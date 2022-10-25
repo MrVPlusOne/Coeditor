@@ -21,7 +21,7 @@ from libcst.metadata import (
 )
 
 ModuleName = str
-ModulePath = str
+ElemPath = str
 
 CNode = TypeVar("CNode", bound=cst.CSTNode)
 
@@ -69,7 +69,7 @@ class ProjectPath(NamedTuple):
     """The path of a top-level function or method in a project."""
 
     module: ModuleName
-    path: ModulePath
+    path: ElemPath
 
     def __str__(self) -> str:
         return f"{self.module}/{self.path}"
@@ -77,7 +77,7 @@ class ProjectPath(NamedTuple):
     def __repr__(self) -> str:
         return f"proj'{str(self)}'"
 
-    def append(self, path: ModulePath) -> "ProjectPath":
+    def append(self, path: ElemPath) -> "ProjectPath":
         new_path = path if self.path == "" else f"{self.path}.{path}"
         return ProjectPath(self.module, new_path)
 
@@ -93,7 +93,7 @@ class ProjectPath(NamedTuple):
         return ProjectPath(module, path)
 
     @staticmethod
-    def annot_path_to_module_path(p: AnnotPath) -> ModulePath:
+    def annot_path_to_module_path(p: AnnotPath) -> ElemPath:
         def simplify(seg: str):
             if seg.endswith("]"):
                 i = seg.find("[")
@@ -437,7 +437,7 @@ class PythonModule:
     defined_symbols: dict[str, ProjectPath]
     tree: cst.Module
     location_map: dict[cst.CSTNode, CodeRange]
-    elem2pos: dict[ModulePath, CodeRange]
+    elem2pos: dict[ElemPath, CodeRange]
 
     @staticmethod
     def from_cst(module: cst.Module, name: str) -> "PythonModule":
@@ -1270,7 +1270,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
 
     imported_modules = set[str]()
     defined_symbols = dict[str, ProjectPath]()
-    elem2pos = dict[ModulePath, CodeRange]()
+    elem2pos = dict[ElemPath, CodeRange]()
 
     class ModuleBuilder(cst.CSTVisitor):
         def __init__(self):

@@ -17,7 +17,7 @@ from .static_analysis import (
     ElemSignature,
     FunctionSignature,
     ModuleName,
-    ModulePath,
+    ElemPath,
     ProjectPath,
     PythonElem,
     PythonFunction,
