@@ -156,6 +156,10 @@ class PythonFunction:
         else:
             return f"GlobalFunction(path={self.path})"
 
+    @cached_property
+    def code(self) -> str:
+        return show_expr(self.tree, quoted=False)
+
     @property
     def in_class(self) -> bool:
         return self.parent_class is not None
@@ -217,6 +221,10 @@ class PythonVariable:
             return f"ClassAttribute(path={self.path})"
         else:
             return f"GlobalVariable(path={self.path})"
+
+    @cached_property
+    def code(self) -> str:
+        return show_expr(self.tree, quoted=False)
 
     @property
     def in_class(self) -> bool:
@@ -438,6 +446,10 @@ class PythonModule:
     tree: cst.Module
     location_map: dict[cst.CSTNode, CodeRange]
     elem2pos: dict[ElemPath, CodeRange]
+
+    @cached_property
+    def code(self) -> str:
+        return self.tree.code
 
     @staticmethod
     def from_cst(module: cst.Module, name: str) -> "PythonModule":
