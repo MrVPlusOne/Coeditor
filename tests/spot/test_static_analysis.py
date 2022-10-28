@@ -693,7 +693,7 @@ def test_annot():
     analysis = full_analysis(project)
 
     B_cls = project.modules["root.file2"].classes[0]
-    assert {n.name for n in not_none(B_cls.superclasses)} == {"root.file1.A"}
+    assert {n.name for n in analysis.superclass_map[B_cls.path]} == {"root.file1.A"}
 
     # test star import of classes
     ns_hier = ModuleHierarchy.from_modules(project.modules.keys())

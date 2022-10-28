@@ -2,13 +2,18 @@
 
 from spot.static_analysis import (
     ElemPath,
+    ModuleAnlaysis,
     ModuleName,
+    ProjectPath,
     PythonElem,
     PythonModule,
     PythonProject,
+    UsageAnalysis,
     remove_comments,
 )
 from .common import *
+from textwrap import indent
+import sys
 
 
 @dataclass
@@ -28,6 +33,23 @@ class Modified(Generic[T1]):
 
 
 Change = Added[T1] | Deleted[T1] | Modified[T1]
+
+
+def show_change(
+    change: Change[T1],
+    name: str = "",
+    show_elem: Callable[[T1], str] = lambda x: str(x),
+) -> str:
+    tab = "   "
+    if isinstance(change, Added):
+        return f"* Added: {name}\n{indent(show_elem(change.after), tab)}"
+    elif isinstance(change, Deleted):
+        return f"* Deleted: {name}\n{indent(show_elem(change.before), tab)}"
+    elif isinstance(change, Modified):
+        before = show_elem(change.before)
+        after = show_elem(change.after)
+        diff = show_string_diff(before, after)
+        return f"* Modified: {name}\n{indent(diff, tab)}"
 
 
 def empty_module(mname: ModuleName) -> PythonModule:
@@ -86,6 +108,10 @@ class ProjectEdit:
     after: PythonProject
     changes: dict[ModuleName, ModuleEdit]
     commit_info: "CommitInfo | None"
+
+    def all_elem_changes(self) -> Generator[Change[PythonElem], None, None]:
+        for medit in self.changes.values():
+            yield from medit.all_changes.values()
 
     def __repr__(self):
         if self.commit_info is None:
@@ -266,7 +292,7 @@ def edits_from_commit_history(
     history: Sequence[CommitInfo],
     src2module: Callable[[str], cst.Module | None] = parse_cst_module,
     ignore_dirs=PythonProject.DefaultIgnoreDirs,
-    verbose=True,
+    silent=False,
 ) -> list[ProjectEdit]:
     """Incrementally compute the edits to a project from the git history.
 
@@ -279,15 +305,18 @@ def edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     commit_now = history[-1]
-    if verbose:
-        print(f"Retriving initial project from commit {commit_now.hash}")
-    project = project_from_commit(project_dir, commit_now.hash, src2module=src2module)
+    with timed_action(
+        f"Retriving initial project from commit {commit_now.hash}", silent=silent
+    ):
+        project = project_from_commit(
+            project_dir, commit_now.hash, src2module=src2module
+        )
     edits = []
 
     for commit_next in tqdm(
         list(reversed(history[:-1])),
         desc="Retriving commits",
-        disable=not verbose,
+        disable=silent,
     ):
         # get changed files
         changes_text = run_command(
@@ -322,4 +351,100 @@ def edits_from_commit_history(
         project = edit.after
         commit_now = commit_next
 
+    assert_eq(len(edits), len(history) - 1)
     return edits
+
+
+@dataclass
+class ContextualEdit:
+    main_change: Modified[PythonElem]
+    usee_changes: Sequence[Modified[PythonElem] | Deleted[PythonElem]]
+    user_changes: Sequence[Modified[PythonElem] | Deleted[PythonElem]]
+
+    def pprint(self, file=sys.stdout) -> None:
+        print("=" * 10, "Main Change", "=" * 10, file=file)
+        name = str(self.main_change.before.path)
+        print(
+            show_change(self.main_change, name, show_elem=lambda x: x.code), file=file
+        )
+
+        if self.usee_changes:
+            print("=" * 10, "Usee Changes", "=" * 10, file=file)
+            for c in self.usee_changes:
+                print(
+                    show_change(c, str(c.before.path), show_elem=lambda x: x.code),
+                    file=file,
+                )
+                print("-" * 20, file=file)
+
+        if self.user_changes:
+            print("=" * 10, "User Changes", "=" * 10, file=file)
+            for c in self.user_changes:
+                print(
+                    show_change(c, str(c.before.path), show_elem=lambda x: x.code),
+                    file=file,
+                )
+                print("-" * 20, file=file)
+
+
+@dataclass
+class EditAnalysis:
+    ctx_edits: Sequence[ContextualEdit]
+    pedit: ProjectEdit
+
+
+def analyze_edits(edits: Sequence[ProjectEdit], silent=False) -> list[EditAnalysis]:
+    """Perform incremental edit analysis from a sequence of edits."""
+    with timed_action("Performing intial module-level analysis...", silent=silent):
+        module_analysis = {
+            mname: ModuleAnlaysis(m) for mname, m in edits[0].before.modules.items()
+        }
+
+    analyzed = list[EditAnalysis]()
+    for t, pedit in enumerate(tqdm(edits, desc="Analyzing edits", disable=silent)):
+        before_project, after_project = pedit.before, pedit.after
+        # pre-edit usage analysis
+        uanalysis = UsageAnalysis(
+            before_project,
+            module_analysis,
+            add_implicit_rel_imports=True,
+            add_override_usages=True,
+        )
+        deletions = dict[ProjectPath, Deleted[PythonElem]]()
+        modifications = dict[ProjectPath, Modified[PythonElem]]()
+        for c in pedit.all_elem_changes():
+            if isinstance(c, Deleted):
+                deletions[c.before.path] = c
+            elif isinstance(c, Modified):
+                modifications[c.before.path] = c
+
+        # create contextual edits
+        ctx_edits = list[ContextualEdit]()
+        ctx_changes = deletions | modifications
+        for path, c in modifications.items():
+            user_changes, usee_changes = [], []
+            for u in uanalysis.user2used.get(path, []):
+                if u.used != path and u.used in ctx_changes:
+                    usee_changes.append(ctx_changes[u.used])
+            for u in uanalysis.used2user.get(path, []):
+                if u.user != path and u.user in ctx_changes:
+                    user_changes.append(ctx_changes[u.user])
+            ctx_edits.append(
+                ContextualEdit(c, usee_changes=usee_changes, user_changes=user_changes)
+            )
+
+        analyzed.append(EditAnalysis(ctx_edits, pedit))
+
+        if t < len(edits) - 1:
+            # update module analysis, reuse when possible
+            new_module_analysis = dict[ModuleName, ModuleAnlaysis]()
+            for mname, new_m in after_project.modules.items():
+                if (
+                    old_m := before_project.modules.get(mname)
+                ) is not None and old_m.code == new_m.code:
+                    new_module_analysis[mname] = module_analysis[mname]
+                else:
+                    new_module_analysis[mname] = ModuleAnlaysis(new_m)
+            module_analysis = new_module_analysis
+
+    return analyzed

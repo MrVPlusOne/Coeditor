@@ -411,21 +411,9 @@ class PythonClass:
     subclasses: dict[str, "PythonClass"]
     tree: cst.ClassDef
     parent_class: ProjectPath | None
-    superclasses: list[QualifiedName] | None = None
 
     def __repr__(self):
         return f"PythonClass(path={self.path}, n_attrs={len(self.attributes)}, n_methods={len(self.methods)})"
-
-    @cached_property
-    def is_dataclass(self) -> bool:
-        for dec in self.tree.decorators:
-            if get_decorator_name(dec) == "dataclass":
-                return True
-        if self.superclasses:
-            for sc in self.superclasses:
-                if "NamedTuple" in sc.name.split("."):
-                    return True
-        return False
 
     def all_elements(self) -> Generator[PythonElem, None, None]:
         yield from self.attributes.values()
@@ -833,6 +821,7 @@ class UsageAnalysis:
     def __init__(
         self,
         project: PythonProject,
+        mod2analysis: Mapping[ModuleName, "ModuleAnlaysis"] | None = None,
         add_override_usages: bool = False,
         add_implicit_rel_imports: bool = False,
     ):
@@ -859,13 +848,20 @@ class UsageAnalysis:
                 elif p in self.path2elem:
                     self.path2elem.setdefault(ProjectPath(mname, s), self.path2elem[p])
 
-        self.mod2analysis = {
-            mname: ModuleAnlaysis(project.modules[mname])
-            for mname in self.sorted_modules
-        }
+        if mod2analysis is None:
+            self.mod2analysis = {
+                mname: ModuleAnlaysis(project.modules[mname])
+                for mname in self.sorted_modules
+            }
+        else:
+            self.mod2analysis = mod2analysis
+
         # resolve subtyping relations
-        for ma in self.mod2analysis.values():
-            ma.udpate_superclasses_()
+        self.superclass_map = superclass_map = dict[
+            ProjectPath, Collection[QualifiedName]
+        ]()
+        for mname in self.sorted_modules:
+            superclass_map.update(self.mod2analysis[mname].compute_superclasses())
 
         self.cls2members = cls2members = dict[ProjectPath, dict[str, PythonElem]]()
         all_usages = list[ProjectUsage]()
@@ -875,7 +871,7 @@ class UsageAnalysis:
             if (cpath := cls.path) in cls2members:
                 return  # already processed
             members = cls2members[cpath] = dict[str, PythonElem]()
-            bases = not_none(cls.superclasses)
+            bases = superclass_map[cls.path]
             parents = [
                 x for p in bases if (x := self.find_class(cpath.module, p)) is not None
             ]
@@ -911,7 +907,8 @@ class UsageAnalysis:
             n: {f.path for f in fs} for n, fs in name2fixtures.items()
         }
 
-        for mname, ma in self.mod2analysis.items():
+        for mname in self.sorted_modules:
+            ma = self.mod2analysis[mname]
             for caller, span, qname, is_call in ma.compute_module_usages():
                 all_usages.extend(self.generate_usages(mname, caller, qname, is_call))
 
@@ -1083,6 +1080,10 @@ class UsageAnalysis:
 
 
 class ModuleAnlaysis:
+    module: PythonModule
+    node2qnames: dict[cst.CSTNode, Collection[QualifiedName]]
+    node2pos: dict[cst.CSTNode, CodeRange]
+
     def __init__(self, mod: PythonModule):
         self.module = mod
         wrapper = cst.MetadataWrapper(mod.tree, unsafe_skip_copy=True)
@@ -1131,17 +1132,21 @@ class ModuleAnlaysis:
 
         return result
 
-    def udpate_superclasses_(self):
+    def compute_superclasses(self) -> Mapping[ProjectPath, Collection[QualifiedName]]:
+        """Update the superclasses field of each class in-place using the resolved qualified names."""
+        result = dict[ProjectPath, list[QualifiedName]]()
         for cls in self.module.all_classes():
-            cls.superclasses = list()
+            superclasses = list()
             for b in cls.tree.bases:
                 if b.value in self.node2qnames and self.node2qnames[b.value]:
-                    cls.superclasses.extend(self.node2qnames[b.value])
+                    superclasses.extend(self.node2qnames[b.value])
                 elif isinstance(b.value, cst.Name):
                     # unresovled parent class is treated as local for later processing
-                    cls.superclasses.append(
+                    superclasses.append(
                         QualifiedName(b.value.value, QualifiedNameSource.LOCAL)
                     )
+            result[cls.path] = superclasses
+        return result
 
 
 @dataclass

@@ -505,6 +505,18 @@ def run_long_task(name: str, notify: bool = True):
     )
 
 
+@contextmanager
+def timed_action(name: str, silent: bool = False):
+    if silent:
+        yield
+        return
+    print("Starting task:", name)
+    start_time = time.time()
+    yield
+    duration = time.time() - start_time
+    print(f"({duration:.1f}s) Finished task:", name)
+
+
 class PickleCache:
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
@@ -630,9 +642,11 @@ def pretty_show_dict(
         return s.getvalue()
 
 
-def show_string_diff(str1, str2) -> str:
-    diffs = difflib.unified_diff(str1.splitlines(), str2.splitlines())
-    return "\n".join(diffs)
+def show_string_diff(str1, str2, n_ctx=5) -> str:
+    diffs = difflib.unified_diff(
+        str1.splitlines(), str2.splitlines(), n=n_ctx, lineterm=""
+    )
+    return "\n".join(list(diffs)[2:])
 
 
 def add_line_numbers(code: str):
