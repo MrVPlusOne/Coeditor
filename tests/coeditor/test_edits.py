@@ -47,7 +47,7 @@ def project_from_code(srcs: dict[ModuleName, str]) -> PythonProject:
     )
 
 
-def test_project_edit_creation():
+def test_project_edit_creation1():
     code_before = {
         "code1": dedent(
             """\
@@ -104,3 +104,46 @@ def test_project_edit_creation():
     assert pe.changes["code1"].modified.keys() == {"to_change"}
     assert "code2" not in pe.changes
     assert pe.changes["code3"].added.keys() == {"added"}
+
+
+def test_project_edit_creation2():
+    code_before = {
+        "code1": dedent(
+            """\
+            def x():
+                return 1
+
+            def y():
+                return 2
+            """
+        ),
+    }
+
+    project_before = project_from_code(code_before)
+
+    code_after = {
+        "code1": dedent(
+            """\
+            import new_module
+            
+            def y():
+                return 2
+            
+
+            def x():
+                return 1
+            """
+        ),
+    }
+
+    project_after = project_from_code(code_after)
+
+    pe = ProjectEdit.from_code_changes(
+        project_before,
+        code_changes=code_after,
+    )
+
+    for mname in project_after.modules:
+        assert pe.after.modules[mname].code == project_after.modules[mname].code
+
+    assert "code1" not in pe.changes

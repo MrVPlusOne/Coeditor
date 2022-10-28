@@ -158,7 +158,7 @@ class PythonFunction:
 
     @cached_property
     def code(self) -> str:
-        return show_expr(self.tree, quoted=False)
+        return show_expr(self.tree, quoted=False).strip()
 
     @property
     def in_class(self) -> bool:
@@ -224,7 +224,7 @@ class PythonVariable:
 
     @cached_property
     def code(self) -> str:
-        return show_expr(self.tree, quoted=False)
+        return show_expr(self.tree, quoted=False).strip()
 
     @property
     def in_class(self) -> bool:
@@ -530,12 +530,14 @@ class PythonProject:
         p.verify_paths_unique()
         return p
 
+    DefaultIgnoreDirs = {".venv", ".mypy_cache", ".git", "venv", "build"}
+
     @staticmethod
     def from_root(
         root: Path,
         discard_bad_files: bool = False,
         file_filter: Callable[[Path], bool] = lambda p: True,
-        ignore_dirs: set[str] = {".venv", ".mypy_cache", ".git", "venv", "build"},
+        ignore_dirs: set[str] = DefaultIgnoreDirs,
         src2module: Callable[[str], cst.Module | None] = lambda s: remove_comments(
             cst.parse_module(s)
         ),
@@ -615,7 +617,7 @@ class PythonProject:
     @staticmethod
     def rel_path_to_module_name(rel_path: Path) -> ModuleName:
         parts = rel_path.parts
-        assert parts[-1].endswith(".py")
+        assert parts[-1].endswith(".py"), f"Not a python file: {rel_path}"
         if parts[0] == "src":
             parts = parts[1:]
         if parts[-1] == "__init__.py":
