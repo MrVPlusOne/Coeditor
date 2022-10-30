@@ -642,11 +642,12 @@ def pretty_show_dict(
         return s.getvalue()
 
 
-def show_string_diff(str1, str2, n_ctx=5) -> str:
-    diffs = difflib.unified_diff(
-        str1.splitlines(), str2.splitlines(), n=n_ctx, lineterm=""
-    )
-    return "\n".join(list(diffs)[2:])
+def show_string_diff(str1, str2, n_ctx: int | None = None) -> str:
+    n = 10000 if n_ctx is None else n_ctx
+    diffs = difflib.unified_diff(str1.splitlines(), str2.splitlines(), n=n, lineterm="")
+    # drop the region indicator line if showing all context
+    drop_lines = 3 if n_ctx is None else 2
+    return "\n".join(list(diffs)[drop_lines:])
 
 
 def add_line_numbers(code: str):

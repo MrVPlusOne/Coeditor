@@ -14,6 +14,7 @@ from spot.static_analysis import (
 from .common import *
 from textwrap import indent
 import sys
+import copy
 
 
 @dataclass
@@ -48,7 +49,7 @@ def show_change(
     elif isinstance(change, Modified):
         before = show_elem(change.before)
         after = show_elem(change.after)
-        diff = show_string_diff(before, after)
+        diff = show_string_diff(before, after, n_ctx=None)
         return f"* Modified: {name}\n{indent(diff, tab)}"
 
 
@@ -92,7 +93,7 @@ class ModuleEdit:
         }
         modified = {
             path: Modified(before_elems[path], after_elems[path])
-            for path in before_elems.keys() & after_elems.keys()
+            for path in (before_elems.keys() & after_elems.keys())
             if before_elems[path].code != after_elems[path].code
         }
         changes = added | deleted | modified
@@ -129,7 +130,7 @@ class ProjectEdit:
         src2module: Callable[[str], cst.Module | None] = parse_cst_module,
         commit_info: "CommitInfo | None" = None,
     ) -> "ProjectEdit":
-        modules = before.modules
+        modules = copy.copy(before.modules)
         changes = dict[ModuleName, ModuleEdit]()
         for mname, new_code in code_changes.items():
             if new_code is None:
@@ -360,8 +361,11 @@ class ContextualEdit:
     main_change: Modified[PythonElem]
     usee_changes: Sequence[Modified[PythonElem] | Deleted[PythonElem]]
     user_changes: Sequence[Modified[PythonElem] | Deleted[PythonElem]]
+    commit_info: CommitInfo | None
 
     def pprint(self, file=sys.stdout) -> None:
+        if self.commit_info is not None:
+            print("Commit:", self.commit_info.hash, file=file)
         print("=" * 10, "Main Change", "=" * 10, file=file)
         name = str(self.main_change.before.path)
         print(
@@ -393,7 +397,12 @@ class EditAnalysis:
     pedit: ProjectEdit
 
 
-def analyze_edits(edits: Sequence[ProjectEdit], silent=False) -> list[EditAnalysis]:
+def analyze_edits(
+    edits: Sequence[ProjectEdit],
+    usees_in_ctx: bool = True,
+    users_in_ctx: bool = False,
+    silent=False,
+) -> list[EditAnalysis]:
     """Perform incremental edit analysis from a sequence of edits."""
     with timed_action("Performing intial module-level analysis...", silent=silent):
         module_analysis = {
@@ -401,8 +410,18 @@ def analyze_edits(edits: Sequence[ProjectEdit], silent=False) -> list[EditAnalys
         }
 
     analyzed = list[EditAnalysis]()
-    for t, pedit in enumerate(tqdm(edits, desc="Analyzing edits", disable=silent)):
-        before_project, after_project = pedit.before, pedit.after
+    for pedit in tqdm(edits, desc="Analyzing edits", disable=silent):
+        before_project = pedit.before
+
+        # analyze changed modules
+        module_analysis = copy.copy(module_analysis)
+        for mname, module in before_project.modules.items():
+            if not (
+                mname in module_analysis
+                and module_analysis[mname].module.code == module.code
+            ):
+                module_analysis[mname] = ModuleAnlaysis(module)
+
         # pre-edit usage analysis
         uanalysis = UsageAnalysis(
             before_project,
@@ -422,29 +441,24 @@ def analyze_edits(edits: Sequence[ProjectEdit], silent=False) -> list[EditAnalys
         ctx_edits = list[ContextualEdit]()
         ctx_changes = deletions | modifications
         for path, c in modifications.items():
-            user_changes, usee_changes = [], []
-            for u in uanalysis.user2used.get(path, []):
-                if u.used != path and u.used in ctx_changes:
-                    usee_changes.append(ctx_changes[u.used])
-            for u in uanalysis.used2user.get(path, []):
-                if u.user != path and u.user in ctx_changes:
-                    user_changes.append(ctx_changes[u.user])
+            usee_changes, user_changes = [], []
+            if usees_in_ctx:
+                for u in uanalysis.user2used.get(path, []):
+                    if u.used != path and u.used in ctx_changes:
+                        usee_changes.append(ctx_changes[u.used])
+            if users_in_ctx:
+                for u in uanalysis.used2user.get(path, []):
+                    if u.user != path and u.user in ctx_changes:
+                        user_changes.append(ctx_changes[u.user])
             ctx_edits.append(
-                ContextualEdit(c, usee_changes=usee_changes, user_changes=user_changes)
+                ContextualEdit(
+                    c,
+                    usee_changes=usee_changes,
+                    user_changes=user_changes,
+                    commit_info=pedit.commit_info,
+                )
             )
 
         analyzed.append(EditAnalysis(ctx_edits, pedit))
-
-        if t < len(edits) - 1:
-            # update module analysis, reuse when possible
-            new_module_analysis = dict[ModuleName, ModuleAnlaysis]()
-            for mname, new_m in after_project.modules.items():
-                if (
-                    old_m := before_project.modules.get(mname)
-                ) is not None and old_m.code == new_m.code:
-                    new_module_analysis[mname] = module_analysis[mname]
-                else:
-                    new_module_analysis[mname] = ModuleAnlaysis(new_m)
-            module_analysis = new_module_analysis
 
     return analyzed

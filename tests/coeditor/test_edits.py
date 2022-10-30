@@ -91,12 +91,17 @@ def test_project_edit_creation1():
         ),
     }
 
-    project_after = project_from_code(code_after)
-
     pe = ProjectEdit.from_code_changes(
         project_before,
         code_changes=code_after,
     )
+
+    # recompute in case the project is somehow modified
+    project_before = project_from_code(code_before)
+    project_after = project_from_code(code_after)
+
+    for mname in project_before.modules:
+        assert pe.before.modules[mname].code == project_before.modules[mname].code
 
     for mname in project_after.modules:
         assert pe.after.modules[mname].code == project_after.modules[mname].code
