@@ -36,6 +36,7 @@ from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
 import multiprocessing
+import textwrap
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm
@@ -642,12 +643,37 @@ def pretty_show_dict(
         return s.getvalue()
 
 
-def show_string_diff(str1, str2, n_ctx: int | None = None) -> str:
-    n = 10000 if n_ctx is None else n_ctx
-    diffs = difflib.unified_diff(str1.splitlines(), str2.splitlines(), n=n, lineterm="")
-    # drop the region indicator line if showing all context
-    drop_lines = 3 if n_ctx is None else 2
-    return "\n".join(list(diffs)[drop_lines:])
+def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
+    def omit_lines(lines: list[str]) -> list[str]:
+        if max_ctx is None:
+            return lines
+        to_keep = [False for _ in lines]
+        # mark which lines to keep
+        for i, line in enumerate(lines):
+            if line.startswith("+") or line.startswith("-"):
+                for j in range(max(0, i - max_ctx), min(len(lines), i + max_ctx + 1)):
+                    to_keep[j] = True
+        new_lines = list[str]()
+        i = 0
+        while i < len(lines):
+            if to_keep[i]:
+                new_lines.append(lines[i])
+                i += 1
+            else:
+                j = i + 1
+                while j < len(lines) and not to_keep[j]:
+                    j += 1
+                new_lines.append(f"... {j - i} lines omitted ...")
+                i = j
+        return new_lines
+
+    diffs = difflib.unified_diff(
+        textwrap.indent(str1, "   ").splitlines(),
+        textwrap.indent(str2, "   ").splitlines(),
+        n=10000,
+        lineterm="",
+    )
+    return "\n".join(omit_lines(list(diffs)[3:]))
 
 
 def add_line_numbers(code: str):
@@ -844,8 +870,12 @@ def move_all_files(src_dir: Path, dest_dir: Path, glob_pattern: str = "**/*"):
 _EmptyModule = cst.Module([])
 
 
-def show_expr(expr: cst.CSTNode, quoted: bool = True) -> str:
+def show_expr(
+    expr: cst.CSTNode, quoted: bool = True, strip_empty_lines: bool = True
+) -> str:
     s = _EmptyModule.code_for_node(expr)
+    if strip_empty_lines:
+        s = s.strip("\n")
     if quoted:
         s = f"cst'{s}'"
     return s

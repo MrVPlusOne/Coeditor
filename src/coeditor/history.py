@@ -6,11 +6,14 @@ from spot.static_analysis import (
     ModuleName,
     ProjectPath,
     PythonElem,
+    PythonFunction,
     PythonModule,
     PythonProject,
+    PythonVariable,
     UsageAnalysis,
     remove_comments,
 )
+from spot.utils import show_expr
 from .common import *
 from textwrap import indent
 import sys
@@ -36,20 +39,63 @@ class Modified(Generic[T1]):
 Change = Added[T1] | Deleted[T1] | Modified[T1]
 
 
+def default_show_diff(before: Any | None, after: Any | None) -> str:
+    def show_elem(elem: Any) -> str:
+        match elem:
+            case PythonVariable() | PythonFunction():
+                return elem.code
+            case _:
+                return str(elem).strip()
+
+    def drop_last_line(s: str) -> str:
+        return "\n".join(s.splitlines()[:-1])
+
+    match before, after:
+        case PythonFunction(tree=tree1) as before, PythonFunction(tree=tree2) as after:
+            header1 = drop_last_line(
+                show_expr(
+                    tree1.with_changes(body=cst.IndentedBlock([])), quoted=False
+                ).strip()
+            )
+            header2 = drop_last_line(
+                show_expr(
+                    tree2.with_changes(body=cst.IndentedBlock([])), quoted=False
+                ).strip()
+            )
+            header_part = (
+                header1
+                if header1 == header2
+                else show_string_diff(header1, header2, max_ctx=None)
+            )
+            body1 = show_expr(tree1.body, quoted=False)
+            body2 = show_expr(tree2.body, quoted=False)
+            if body1 == body2:
+                body_lines = body1.splitlines()
+                kept_lines = body_lines[:6]
+                if (n_omit := len(body_lines) - len(kept_lines)) > 0:
+                    kept_lines.append(f"... {n_omit} lines omitted ...")
+                body_part = "\n".join(kept_lines)
+            else:
+                body_part = show_string_diff(body1, body2)
+            return f"{header_part}\n{body_part}"
+        case _:
+            s1 = show_elem(before) if before is not None else ""
+            s2 = show_elem(after) if after is not None else ""
+            return show_string_diff(s1, s2)
+
+
 def show_change(
     change: Change[T1],
     name: str = "",
-    show_elem: Callable[[T1], str] = lambda x: str(x),
+    show_diff: Callable[[T1 | None, T1 | None], str] = default_show_diff,
 ) -> str:
-    tab = "   "
+    tab = "    "
     if isinstance(change, Added):
-        return f"* Added: {name}\n{indent(show_elem(change.after), tab)}"
+        return f"* Added: {name}\n{indent(show_diff(None, change.after), tab)}"
     elif isinstance(change, Deleted):
-        return f"* Deleted: {name}\n{indent(show_elem(change.before), tab)}"
+        return f"* Deleted: {name}\n{indent(show_diff(change.before, None), tab)}"
     elif isinstance(change, Modified):
-        before = show_elem(change.before)
-        after = show_elem(change.after)
-        diff = show_string_diff(before, after, n_ctx=None)
+        diff = show_diff(change.before, change.after)
         return f"* Modified: {name}\n{indent(diff, tab)}"
 
 
@@ -376,22 +422,20 @@ class ContextualEdit:
     def pprint(self, file=sys.stdout) -> None:
         if self.commit_info is not None:
             print("Commit:", self.commit_info.hash, file=file)
-        print("=" * 10, "Main Change", "=" * 10, file=file)
+        print("=" * 15, "Main Change", "=" * 15, file=file)
         name = str(_get_elem_path(self.main_change))
-        print(
-            show_change(self.main_change, name, show_elem=lambda x: x.code), file=file
-        )
+        print(show_change(self.main_change, name), file=file)
 
         for group, changes in self.grouped_ctx_changes.items():
             if not changes:
                 continue
-            print("=" * 10, group, "=" * 10, file=file)
+            print(Constants.TAB, "=" * 10, group, "=" * 10, file=file)
             for c in changes:
                 print(
-                    show_change(c, str(_get_elem_path(c)), show_elem=lambda x: x.code),
+                    indent(show_change(c, str(_get_elem_path(c))), Constants.TAB),
                     file=file,
                 )
-                print("-" * 20, file=file)
+                print(Constants.TAB, "-" * 20, file=file)
 
 
 @dataclass
@@ -416,15 +460,17 @@ def _select_change_ctx(
         change_ctx[group] = new_changes
     return change_ctx
 
-def is_signature_changed(c:Modified[PythonElem]):
+
+def is_signature_changed(c: Modified[PythonElem]):
     f1 = str(c.before.get_signature())
     f2 = str(c.after.get_signature())
     return f1 != f2
 
+
 def analyze_edits(
     edits: Sequence[ProjectEdit],
     usees_in_ctx: bool = True,
-    users_in_ctx: bool = False,
+    users_in_ctx: bool = True,
     post_usages_in_ctx: bool = True,
     silent=False,
 ) -> list[EditAnalysis]:
@@ -434,7 +480,7 @@ def analyze_edits(
             mname: ModuleAnlaysis(m) for mname, m in edits[0].before.modules.items()
         }
 
-    def analyze_project(project: PythonProject) -> UsageAnalysis:
+    def analyze_project_(project: PythonProject) -> UsageAnalysis:
         # analyze changed modules, reusing when possible
         nonlocal module_analysis
         module_analysis = copy.copy(module_analysis)
@@ -460,8 +506,8 @@ def analyze_edits(
                 modifications[c.before.path] = c
             ctx_changes[_get_elem_path(c)] = c
 
-        pre_analysis = analyze_project(pedit.before)
-        post_analysis = analyze_project(pedit.after)
+        pre_analysis = analyze_project_(pedit.before)
+        post_analysis = analyze_project_(pedit.after)
 
         # create contextual edits
         ctx_edits = list[ContextualEdit]()

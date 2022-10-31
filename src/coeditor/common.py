@@ -18,3 +18,7 @@ def run_command(args: Sequence[str], cwd: str | Path) -> str:
         cwd=cwd,
         text=True,
     )
+
+
+class Constants:
+    TAB = " " * 4
