@@ -18,6 +18,7 @@ from .common import *
 from textwrap import indent
 import sys
 import copy
+import ast
 
 
 @dataclass
@@ -353,7 +354,7 @@ def edits_from_commit_history(
 
     commit_now = history[-1]
     with timed_action(
-        f"Retriving initial project from commit {commit_now.hash}", silent=silent
+        f"Retriving initial project from commit: {commit_now.hash}", silent=silent
     ):
         project = project_from_commit(
             project_dir, commit_now.hash, src2module=src2module
@@ -362,7 +363,7 @@ def edits_from_commit_history(
 
     for commit_next in tqdm(
         list(reversed(history[:-1])),
-        desc="Retriving commits",
+        desc="Edits from commits",
         disable=silent,
     ):
         # get changed files
@@ -402,7 +403,7 @@ def edits_from_commit_history(
     return edits
 
 
-def _get_elem_path(c: Change[PythonElem]) -> ProjectPath:
+def get_change_path(c: Change[PythonElem]) -> ProjectPath:
     match c:
         case Added(before) | Modified(before):
             return before.path
@@ -423,7 +424,7 @@ class ContextualEdit:
         if self.commit_info is not None:
             print("Commit:", self.commit_info.hash, file=file)
         print("=" * 15, "Main Change", "=" * 15, file=file)
-        name = str(_get_elem_path(self.main_change))
+        name = str(get_change_path(self.main_change))
         print(show_change(self.main_change, name), file=file)
 
         for group, changes in self.grouped_ctx_changes.items():
@@ -432,7 +433,7 @@ class ContextualEdit:
             print(Constants.TAB, "=" * 10, group, "=" * 10, file=file)
             for c in changes:
                 print(
-                    indent(show_change(c, str(_get_elem_path(c))), Constants.TAB),
+                    indent(show_change(c, str(get_change_path(c))), Constants.TAB),
                     file=file,
                 )
                 print(Constants.TAB, "-" * 20, file=file)
@@ -475,7 +476,12 @@ def analyze_edits(
     silent=False,
 ) -> list[EditAnalysis]:
     """Perform incremental edit analysis from a sequence of edits."""
-    with timed_action("Performing intial module-level analysis...", silent=silent):
+
+    timer = TimeLogger()
+
+    with timed_action(
+        "Performing intial module-level analysis...", silent=silent
+    ), timer.timed("ModuleAnlaysis/Initial"):
         module_analysis = {
             mname: ModuleAnlaysis(m) for mname, m in edits[0].before.modules.items()
         }
@@ -489,13 +495,15 @@ def analyze_edits(
                 mname in module_analysis
                 and module_analysis[mname].module.code == module.code
             ):
-                module_analysis[mname] = ModuleAnlaysis(module)
-        return UsageAnalysis(
-            project,
-            module_analysis,
-            add_implicit_rel_imports=True,
-            add_override_usages=True,
-        )
+                with timer.timed("ModuleAnlaysis/Incremental"):
+                    module_analysis[mname] = ModuleAnlaysis(module)
+        with timer.timed("UsageAnalysis"):
+            return UsageAnalysis(
+                project,
+                module_analysis,
+                add_implicit_rel_imports=True,
+                add_override_usages=True,
+            )
 
     analyzed = list[EditAnalysis]()
     for pedit in tqdm(edits, desc="Analyzing edits", disable=silent):
@@ -504,7 +512,7 @@ def analyze_edits(
         for c in pedit.all_elem_changes():
             if isinstance(c, Modified):
                 modifications[c.before.path] = c
-            ctx_changes[_get_elem_path(c)] = c
+            ctx_changes[get_change_path(c)] = c
 
         pre_analysis = analyze_project_(pedit.before)
         post_analysis = analyze_project_(pedit.after)
@@ -533,4 +541,90 @@ def analyze_edits(
             ctx_edits.append(ContextualEdit(c, grouped_ctx_changes, pedit.commit_info))
         analyzed.append(EditAnalysis(ctx_edits, pedit))
 
+    if not silent:
+        display(timer.as_dataframe())
+
     return analyzed
+
+
+def _select_ast_calls(
+    node: ast.AST, path: ProjectPath
+) -> Generator[ast.Call, None, None]:
+    """Return all call nodes with the mathcing function name in the AST."""
+    segs = path.path.split(".")
+    if segs[-1] == "__init__":
+        f_name = segs[-2]
+    else:
+        f_name = segs[-1]
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+            if n.func.id == f_name:
+                yield n
+
+
+class EditSelectors:
+    @staticmethod
+    def api_change_to_callsite(ce: ContextualEdit) -> ContextualEdit | None:
+        """
+        When the main change involves a signature change, try to predict
+        the changes to the users.
+        """
+        if not isinstance(ce.main_change, Modified):
+            return None
+        api_path = ce.main_change.before.path
+        changed_users = list[Modified[PythonElem]]()
+        for c in ce.grouped_ctx_changes["users"]:
+            if isinstance(c, Modified):
+                if isinstance(c.before, PythonFunction):
+                    before_calls = [
+                        ast.unparse(f)
+                        for f in _select_ast_calls(ast.parse(c.before.code), api_path)
+                    ]
+                    after_calls = [
+                        ast.unparse(f)
+                        for f in _select_ast_calls(ast.parse(c.after.code), api_path)
+                    ]
+                    involved = before_calls != after_calls
+                else:
+                    lines = show_change(c, str(get_change_path(c))).split("\n")
+                    api_name = ce.main_change.before.name
+                    involved = any(
+                        l.strip().startswith("-") and api_name in l for l in lines
+                    )
+                if involved:
+                    changed_users.append(c)
+        if changed_users:
+            return ContextualEdit(
+                ce.main_change, {"users": changed_users}, ce.commit_info
+            )
+        return None
+
+    @staticmethod
+    def usee_changes_to_user(ce: ContextualEdit) -> ContextualEdit | None:
+        """
+        Try to predict the main change from usee changes.
+        """
+        usees = ce.grouped_ctx_changes["usees"]
+        post_usees = ce.grouped_ctx_changes["post-usees"]
+        if usees or post_usees:
+            return ContextualEdit(
+                ce.main_change,
+                {"usees": usees, "post_usees": post_usees},
+                ce.commit_info,
+            )
+        return None
+
+
+def select_edits(
+    analyzed_edits: list[EditAnalysis],
+    select_edit: Callable[[ContextualEdit], ContextualEdit | None],
+) -> tuple[list[ContextualEdit], list[ContextualEdit]]:
+    selected = list[ContextualEdit]()
+    all_edits = list[ContextualEdit]()
+    for ae in analyzed_edits:
+        for ce in ae.ctx_edits:
+            all_edits.append(ce)
+            if (ce := select_edit(ce)) is not None:
+                selected.append(ce)
+
+    return selected, all_edits
