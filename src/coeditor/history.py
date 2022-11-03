@@ -100,6 +100,18 @@ def show_change(
         return f"* Modified: {name}\n{indent(diff, tab)}"
 
 
+def map_change(
+    change: Change[T1],
+    f: Callable[[T1], T2],
+) -> Change[T2]:
+    if isinstance(change, Added):
+        return Added(f(change.after))
+    elif isinstance(change, Deleted):
+        return Deleted(f(change.before))
+    elif isinstance(change, Modified):
+        return Modified(f(change.before), f(change.after))
+
+
 def empty_module(mname: ModuleName) -> PythonModule:
     return PythonModule.from_cst(cst.Module([]), mname)
 

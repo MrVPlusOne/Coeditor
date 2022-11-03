@@ -152,3 +152,46 @@ def test_project_edit_creation2():
         assert pe.after.modules[mname].code == project_after.modules[mname].code
 
     assert "code1" not in pe.changes
+
+
+from coeditor.encoding import *
+
+
+def test_encoding_decoding_identity():
+    code_before = dedent(
+        """\
+        def f1():
+            x = 1
+            y = 2
+            z = x + y
+            return z
+
+        def f2():
+            f1()\
+        """
+    )
+
+    code_after = dedent(
+        """\
+        # new comment
+        def f_new():
+            x = 1
+            if x > 0:
+                y = 2 * x
+            y *= 2
+            z = x + y
+            return z
+
+        def f2():
+            f1()
+            return f_new() + a
+        
+        new_var = 0
+        """
+    )
+
+    c = Modified(code_before, code_after)
+    # print(show_change(c))
+    c_rec = decode_change(encode_change(c))
+    assert c_rec.before.strip("\n") == c.before.strip("\n")
+    assert c_rec.after.strip("\n") == c.after.strip("\n")

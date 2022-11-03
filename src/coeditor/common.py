@@ -12,6 +12,8 @@ from IPython.display import display
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
+TokenSeq = list[int]
+
 
 def run_command(args: Sequence[str], cwd: str | Path) -> str:
     return subprocess.check_output(
