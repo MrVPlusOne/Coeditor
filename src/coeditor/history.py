@@ -25,16 +25,34 @@ import ast
 class Added(Generic[T1]):
     after: T1
 
+    def map(self, f: Callable[[T1], T2]) -> "Added[T2]":
+        return Added(f(self.after))
+
+    def to_modified(self, empty: T1) -> "Modified[T1]":
+        return Modified(empty, self.after)
+
 
 @dataclass
 class Deleted(Generic[T1]):
     before: T1
+
+    def map(self, f: Callable[[T1], T2]) -> "Deleted[T2]":
+        return Deleted(f(self.before))
+
+    def to_modified(self, empty: T1) -> "Modified[T1]":
+        return Modified(self.before, empty)
 
 
 @dataclass
 class Modified(Generic[T1]):
     before: T1
     after: T1
+
+    def map(self, f: Callable[[T1], T2]) -> "Modified[T2]":
+        return Modified(f(self.before), f(self.after))
+
+    def to_modified(self, empty: T1) -> "Modified[T1]":
+        return self
 
 
 Change = Added[T1] | Deleted[T1] | Modified[T1]
@@ -98,18 +116,6 @@ def show_change(
     elif isinstance(change, Modified):
         diff = show_diff(change.before, change.after)
         return f"* Modified: {name}\n{indent(diff, tab)}"
-
-
-def map_change(
-    change: Change[T1],
-    f: Callable[[T1], T2],
-) -> Change[T2]:
-    if isinstance(change, Added):
-        return Added(f(change.after))
-    elif isinstance(change, Deleted):
-        return Deleted(f(change.before))
-    elif isinstance(change, Modified):
-        return Modified(f(change.before), f(change.after))
 
 
 def empty_module(mname: ModuleName) -> PythonModule:
@@ -423,6 +429,9 @@ def get_change_path(c: Change[PythonElem]) -> ProjectPath:
             return after.path
 
 
+TAB = " " * 4
+
+
 @dataclass
 class ContextualEdit:
     main_change: Modified[PythonElem]
@@ -442,13 +451,13 @@ class ContextualEdit:
         for group, changes in self.grouped_ctx_changes.items():
             if not changes:
                 continue
-            print(Constants.TAB, "=" * 10, group, "=" * 10, file=file)
+            print(TAB, "=" * 10, group, "=" * 10, file=file)
             for c in changes:
                 print(
-                    indent(show_change(c, str(get_change_path(c))), Constants.TAB),
+                    indent(show_change(c, str(get_change_path(c))), TAB),
                     file=file,
                 )
-                print(Constants.TAB, "-" * 20, file=file)
+                print(TAB, "-" * 20, file=file)
 
 
 @dataclass

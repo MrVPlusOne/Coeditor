@@ -111,6 +111,27 @@ def test_project_edit_creation1():
     assert pe.changes["code3"].added.keys() == {"added"}
 
 
+def assert_change_eq(actual: Modified[str], expected: Modified[str], name: str):
+    if actual.before != expected.before:
+        print(f"Failed for case: {name}")
+        print("Expected before:\n", expected.before, "<EOF>")
+        print("Reconstructed before:\n", actual.before, "<EOF>")
+        raise ValueError(f"Failed for case: {name}")
+    if actual.after != expected.after:
+        print(f"Failed for case: {name}")
+        print("Expected after:\n", expected.after, "<EOF>")
+        print("Reconstructed after:\n", actual.after, "<EOF>")
+        raise ValueError(f"Failed for case: {name}")
+
+
+def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
+    if actual != expected:
+        print(f"Failed for case: {name}")
+        print("Expected:\n", decode_tokens(expected), "<EOF>")
+        print("Reconstructed:\n", decode_tokens(actual), "<EOF>")
+        raise ValueError(f"Failed for case: {name}")
+
+
 def test_project_edit_creation2():
     code_before = {
         "code1": dedent(
@@ -158,40 +179,99 @@ from coeditor.encoding import *
 
 
 def test_encoding_decoding_identity():
-    code_before = dedent(
-        """\
-        def f1():
-            x = 1
-            y = 2
-            z = x + y
-            return z
+    cases = {
+        "empty": Modified("", ""),
+        "generation": Modified("", "123"),
+        "no change": Modified(
+            dedent(
+                """\
+                def f1():
+                    x = 1
+                """
+            ),
+            dedent(
+                """\
+                def f1():
+                    x = 1
+                """
+            ),
+        ),
+        "no special tokens": Modified(
+            dedent(
+                """\
+                def f1():
+                    x = 1
+                    y = 2
+                    z = x + y
+                    return z
 
-        def f2():
-            f1()\
-        """
-    )
+                def f2():
+                    f1()"""
+            ),
+            dedent(
+                """\
+                # new comment
+                def f_new():
+                    x = 1
+                    if x > 0:
+                        y = 2 * x
+                    y *= 2
+                    z = x + y
+                    return z
 
-    code_after = dedent(
-        """\
-        # new comment
-        def f_new():
-            x = 1
-            if x > 0:
-                y = 2 * x
-            y *= 2
-            z = x + y
-            return z
+                def f2():
+                    f1()
+                    return f_new() + a
+                
+                new_var = 0
+                """
+            ),
+        ),
+        "with special tokens": Modified(
+            dedent(
+                """\
+                def f1():
+                    x = "<add>"
+                    y = "<del>\tx"
+                    return x + y
 
-        def f2():
-            f1()
-            return f_new() + a
-        
-        new_var = 0
-        """
-    )
+                """
+            ),
+            dedent(
+                """\
+                # new comment 1
+                # new comment 2
+                def f1():
+                    if newcond:
+                        x = "<add>"
+                    new_var = 5
+                    y = "<del>"
+                    return x + new_var + y
+                """
+            ),
+        ),
+    }
 
-    c = Modified(code_before, code_after)
-    # print(show_change(c))
-    c_rec = decode_change(encode_change(c))
-    assert c_rec.before.strip("\n") == c.before.strip("\n")
-    assert c_rec.after.strip("\n") == c.after.strip("\n")
+    for name, c in cases.items():
+        # print(show_change(c))
+        c_tokens = change_to_tokens(c)
+        print("c_tokens\n------\n", decode_tokens(c_tokens))
+        c_rec = tokens_to_change(c_tokens)
+        assert_change_eq(
+            c_rec, c, "change_to_tokens |> tokens_to_change = identity: " + name
+        )
+
+        in_seq, out_seq = change_to_input_output(c)
+        print("in_seq\n------\n", decode_tokens(in_seq))
+        print("out_seq\n------\n", decode_tokens(out_seq))
+
+        assert_tks_eq(
+            in_seq,
+            code_to_input(c.before),
+            "change_to_input_output vs. code_to_input: " + name,
+        )
+
+        inlined = inline_output_tokens(in_seq, out_seq)
+        assert_tks_eq(inlined, change_to_tokens(c), "inline_output_tokens: " + name)
+        c_rec2 = tokens_to_change(inlined)
+        assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)

@@ -673,7 +673,10 @@ def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
         n=10000,
         lineterm="",
     )
-    return "\n".join(omit_lines(list(diffs)[3:]))
+    diffs = list(diffs)[3:]
+    if len(diffs) == 0:
+        diffs = str1.splitlines()
+    return "\n".join(omit_lines(diffs))
 
 
 def add_line_numbers(code: str):

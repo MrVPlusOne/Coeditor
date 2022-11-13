@@ -997,32 +997,34 @@ class ChunkedDataset:
                 )
 
 
-def output_ids_as_seqs(output_ids: Iterable[int]):
-    """Divide the model output as a sequence of tokens, filtering out padding tokens."""
-    seq_id = 0
-    buff = list[int]()
-    seqs = list[list[int]]()
+def output_ids_as_seqs(output_ids: Iterable[Token]) -> dict[Token, TokenSeq]:
+    """Parse the CodeT5 model's output as a series of key-value pairs. Padding tokens are filtered out."""
+    buff = TokenSeq()
+    key = None
+    seqs = dict[Token, TokenSeq]()
     tokenizer = DefaultTokenizer
-    mark = tokenizer.additional_special_tokens_ids[99 - seq_id]
+    min_tk = tokenizer.additional_special_tokens_ids[0]
+    max_tk = tokenizer.additional_special_tokens_ids[-1]
 
     for tk in output_ids:
         if tk <= 0:
             continue  # pad or masked token
-        if tk != mark:
-            buff.append(tk)
+        if min_tk <= tk <= max_tk:
+            if key is not None:
+                seqs[key] = buff
+            buff = TokenSeq()
+            key = tk
         else:
-            seqs.append(buff)
-            buff = []
-            seq_id += 1
-            mark = tokenizer.additional_special_tokens_ids[99 - seq_id]
-    seqs.append(buff)
-    return seqs[1:]
+            buff.append(tk)
+    if key is not None:
+        seqs[key] = buff
+    return seqs
 
 
 def output_ids_as_types(output_ids: Iterable[int], n_types: int) -> list[PythonType]:
     """Try to parse model outputs as a list of Python types, pad `Any` to make sure the
     list is of the correct length."""
-    seqs = output_ids_as_seqs(output_ids)
+    seqs = list(output_ids_as_seqs(output_ids).values())
     tokenizer = DefaultTokenizer
     types = list[PythonType]()
     for seq in seqs[:n_types]:

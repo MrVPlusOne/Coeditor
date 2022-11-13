@@ -10,6 +10,7 @@ from .type_env import apply_annotations, collect_user_annotations
 from libcst.metadata import CodeRange, PositionProvider
 
 
+Token = int
 TokenSeq = list[int]  # might need to make this more space-efficient
 
 
