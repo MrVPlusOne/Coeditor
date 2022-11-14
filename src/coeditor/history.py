@@ -466,23 +466,6 @@ class EditAnalysis:
     pedit: ProjectEdit
 
 
-def _select_change_ctx(
-    main_change_path: ProjectPath,
-    ctx_changes: Mapping[ProjectPath, Change[PythonElem]],
-    change_groups: Mapping[str, Sequence[ProjectPath]],
-) -> dict[str, Sequence[Change[PythonElem]]]:
-    counted = {main_change_path}
-    change_ctx = dict()
-    for group, paths in change_groups.items():
-        new_changes = []
-        for path in paths:
-            if path not in counted and path in ctx_changes:
-                new_changes.append(ctx_changes[path])
-                counted.add(path)
-        change_ctx[group] = new_changes
-    return change_ctx
-
-
 def is_signature_changed(c: Modified[PythonElem]):
     f1 = str(c.before.get_signature())
     f2 = str(c.after.get_signature())
@@ -649,3 +632,20 @@ def select_edits(
                 selected.append(ce)
 
     return selected, all_edits
+
+
+def _select_change_ctx(
+    main_change_path: ProjectPath,
+    ctx_changes: Mapping[ProjectPath, Change[PythonElem]],
+    change_groups: Mapping[str, Sequence[ProjectPath]],
+) -> dict[str, Sequence[Change[PythonElem]]]:
+    counted = {main_change_path}
+    change_ctx = dict()
+    for group, paths in change_groups.items():
+        new_changes = []
+        for path in paths:
+            if path not in counted and path in ctx_changes:
+                new_changes.append(ctx_changes[path])
+                counted.add(path)
+        change_ctx[group] = new_changes
+    return change_ctx

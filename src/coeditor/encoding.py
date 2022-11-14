@@ -1,11 +1,11 @@
 # utils to encode and decode code changes into CodeT5 format.
 
 import difflib
-from coeditor.history import Change, Modified, Added, Deleted, PythonElem
-from .common import *
 import copy
 import spot.utils
 from spot.data import output_ids_as_seqs
+from .common import *
+from .history import *
 
 """
 Only use this when we want to avoid encoding <add> and <del> as special tokens.
@@ -37,6 +37,8 @@ def get_tk_id(token: str) -> int:
 Add_id = get_tk_id(Add)
 Del_id = get_tk_id(Del)
 Newline_id = get_tk_id("\n")
+BOS_id = get_tk_id("<s>")
+EOS_id = get_tk_id("</s>")
 
 N_Extra_Ids = 100
 
@@ -117,7 +119,7 @@ def code_to_input(code: str) -> TokenSeq:
 def change_to_input_output(change: Modified[str]) -> tuple[TokenSeq, TokenSeq]:
     """
     Encode the change as a pair of input and output token sequences.
-    If we inline the output tokens into the input tokens, we should 
+    If we inline the output tokens into the input tokens, we should
     get back the token sequence corresponding to the given change.
     """
     tks = change_to_tokens(change)
@@ -225,3 +227,117 @@ def encode_diffs(diffs: list[str]) -> TokenSeq:
             assert diff.startswith(" ")
         tokens.extend(_BaseTokenizer.encode(diff[1:], add_special_tokens=False))
     return tokens
+
+
+@dataclass
+class WindowArgs:
+    max_window_size: int
+    left_ctx_ratio: float = 0.5
+
+    @staticmethod
+    def Default() -> "WindowArgs":
+        return WindowArgs(4096, 0.5)
+
+
+@dataclass
+class TokenizedEdit:
+    path: ProjectPath
+    input_tks: TokenSeq
+    output_tks: TokenSeq
+
+    def print(self) -> None:
+        print("-" * 20, f"Training Example: {self.path}", "-" * 20)
+        print("Input:")
+        print(indent(decode_tokens(self.input_tks), " " * 4))
+        print("Output:")
+        print(indent(decode_tokens(self.output_tks), " " * 4))
+
+    def truncate_ctx(
+        self,
+        args: WindowArgs,
+    ) -> "TokenizedEdit":
+        return TokenizedEdit(
+            self.path, truncate_ctx(self.input_tks, args), self.output_tks
+        )
+
+
+def truncate_ctx(
+    input_tks: TokenSeq,
+    args: WindowArgs,
+) -> TokenSeq:
+    """
+    Truncate the input to make it fit within the max window size.
+    The cutoff is centered around the <extra_id> tokens.
+    """
+    extra_id_poses = [i for i, tk in enumerate(input_tks) if is_extra_id(tk)]
+    assert extra_id_poses
+    assert 0 <= args.left_ctx_ratio <= 1
+    main_left = extra_id_poses[0]
+    main_right = min(extra_id_poses[-1], main_left + args.max_window_size)
+    main_size = main_right - main_left + 1
+    assert main_size >= 0
+
+    left_size = int((args.max_window_size - main_size) * args.left_ctx_ratio)
+    right_size = args.max_window_size - main_size - left_size
+
+    right_ctx_end = min(len(input_tks), main_right + right_size + 1)
+    right_size = right_ctx_end - 1 - main_right
+    assert right_size >= 0
+
+    # if right_size doesn't use up all the space, we can expand the left context
+    left_size = args.max_window_size - main_size - right_size
+    left_ctx_start = max(0, extra_id_poses[0] - left_size)
+    assert left_size >= 0
+
+    new_input = input_tks[left_ctx_start:right_ctx_end]
+    if left_ctx_start > 0:
+        new_input[0] = BOS_id
+    if right_ctx_end < len(input_tks):
+        new_input[-1] = EOS_id
+    assert len(new_input) <= args.max_window_size
+    return new_input
+
+
+@dataclass
+class FileLevelEditEncoder:
+    def encode_edit(
+        self,
+        pedit: ProjectEdit,
+    ) -> list[TokenizedEdit]:
+        examples = list[TokenizedEdit]()
+        for mname, mchanges in pedit.changes.items():
+            modifications = dict[ProjectPath, Modified[PythonElem]]()
+            for c in mchanges.all_changes.values():
+                if isinstance(c, Modified):
+                    modifications[c.before.path] = c
+            if not modifications:
+                continue
+            mod_before = pedit.before.modules[mname]
+            code_before = mod_before.code.split("\n")
+            mod_after = pedit.after.modules[mname]
+            code_after = mod_after.code.split("\n")
+
+            for path, c in modifications.items():
+                after_range = mod_after.location_map[c.after.tree]
+                code_above_after = "\n".join(code_after[: after_range.start.line - 1])
+                code_below_after = "\n".join(code_after[after_range.end.line :])
+
+                before_range = mod_before.location_map[c.before.tree]
+                code_above_before = "\n".join(
+                    code_before[: before_range.start.line - 1]
+                )
+                code_below_before = "\n".join(code_before[before_range.end.line :])
+
+                above_change = Modified(code_above_before, code_above_after)
+                below_change = Modified(code_below_before, code_below_after)
+
+                ex = TokenizedEdit(path, [], [])
+                ex.input_tks.extend(change_to_tokens(above_change))
+                input, output = change_to_input_output(c.map(lambda e: e.code))
+                ex.input_tks.append(Newline_id)
+                ex.input_tks.extend(input)
+                ex.input_tks.append(Newline_id)
+                ex.output_tks = output
+                ex.input_tks.extend(change_to_tokens(below_change))
+                examples.append(ex)
+        return examples
