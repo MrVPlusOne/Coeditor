@@ -318,7 +318,7 @@ class CommitInfo:
 
 def get_commit_history(
     project_dir: Path,
-    max_hisotry: int,
+    max_hisotry: int = 1000,
     commit_id: str = "HEAD",
 ) -> list[CommitInfo]:
     """Get the commit history of the project, start from the given `commit_id`,
@@ -358,8 +358,7 @@ def edits_from_commit_history(
     history: Sequence[CommitInfo],
     src2module: Callable[[str], cst.Module | None] = parse_cst_module,
     ignore_dirs=PythonProject.DefaultIgnoreDirs,
-    silent=False,
-) -> list[ProjectEdit]:
+) -> Iterator[ProjectEdit]:
     """Incrementally compute the edits to a project from the git history.
 
     Returns:
@@ -371,19 +370,9 @@ def edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     commit_now = history[-1]
-    with timed_action(
-        f"Retriving initial project from commit: {commit_now.hash}", silent=silent
-    ):
-        project = project_from_commit(
-            project_dir, commit_now.hash, src2module=src2module
-        )
-    edits = []
+    project = project_from_commit(project_dir, commit_now.hash, src2module=src2module)
 
-    for commit_next in tqdm(
-        list(reversed(history[:-1])),
-        desc="Edits from commits",
-        disable=silent,
-    ):
+    for commit_next in reversed(history[:-1]):
         # get changed files
         changes_text = run_command(
             ["git", "diff", commit_now.hash, commit_next.hash, "--name-status"],
@@ -413,12 +402,9 @@ def edits_from_commit_history(
             code_changes,
             commit_info=commit_next,
         )
-        edits.append(edit)
         project = edit.after
         commit_now = commit_next
-
-    assert_eq(len(edits), len(history) - 1)
-    return edits
+        yield edit
 
 
 def get_change_path(c: Change[PythonElem]) -> ProjectPath:

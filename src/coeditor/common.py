@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import *
 
@@ -7,9 +8,18 @@ from textwrap import dedent
 from pathlib import Path
 from tqdm import tqdm
 import subprocess
-from spot.utils import assert_eq, show_string_diff, timed_action, TimeLogger
+from spot.utils import (
+    DefaultWorkers,
+    assert_eq,
+    show_string_diff,
+    timed_action,
+    TimeLogger,
+    pmap,
+)
 from IPython.display import display, HTML
 import html
+import asyncio
+from concurrent.futures import Executor, ProcessPoolExecutor
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
@@ -23,6 +33,17 @@ def run_command(args: Sequence[str], cwd: str | Path) -> str:
         cwd=cwd,
         text=True,
     )
+
+
+async def start_command(args: Sequence[str], cwd: str | Path) -> str:
+    assert args
+    process = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.PIPE, cwd=cwd
+    )
+    stdout, stderror = await process.communicate()
+    if stderror:
+        raise RuntimeError(stderror.decode())
+    return stdout.decode()
 
 
 def splitlines(text: str) -> list[str]:
@@ -123,3 +144,36 @@ def html_tabs(elems: list[Any], max_tabs: int = 16) -> HtmlCode:
         """
     )
     return code
+
+
+async def async_map(
+    f: Callable[[T1], Awaitable[T2]], args: Iterable[T1] | AsyncIterable[T1]
+) -> AsyncIterable[T2]:
+    if isinstance(args, AsyncIterable):
+        tasks = [f(x) async for x in args]
+    else:
+        tasks = [f(x) for x in args]
+    for task in tasks:
+        yield (await task)
+
+
+class ExecutorHelper:
+    """Create this inside a function to simplify `run_in_executor` calls."""
+
+    def __init__(self, exec: Executor):
+        self.eloop = asyncio.get_event_loop()
+        self.exec = exec
+
+    # TODO: specify more precise types using TypeVarTuple
+    def run(self, f: Callable[..., T1], *args) -> asyncio.Future[T1]:
+        return self.eloop.run_in_executor(self.exec, f, *args)
+
+    async def map(self, f: Callable[..., T1], *args) -> list[T1]:
+        tasks = [self.run(f, *arg) for arg in zip(*args)]
+        return list(await asyncio.gather(*tasks))
+
+    @contextmanager
+    @staticmethod
+    def cpu(workers: int = DefaultWorkers):
+        with ProcessPoolExecutor(workers) as exec:
+            yield ExecutorHelper(exec)

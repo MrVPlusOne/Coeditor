@@ -1,5 +1,7 @@
 # utils to encode and decode code changes into CodeT5 format.
 
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
 import difflib
 import copy
 import spot.utils
@@ -299,45 +301,43 @@ def truncate_ctx(
 
 
 @dataclass
-class FileLevelEditEncoder:
-    def encode_edit(
+class FileLevelEditTokenizer:
+    def tokenize_edit(
         self,
-        pedit: ProjectEdit,
+        medit: ModuleEdit,
     ) -> list[TokenizedEdit]:
-        examples = list[TokenizedEdit]()
-        for mname, mchanges in pedit.changes.items():
-            modifications = dict[ProjectPath, Modified[PythonElem]]()
-            for c in mchanges.all_changes.values():
-                if isinstance(c, Modified):
-                    modifications[c.before.path] = c
-            if not modifications:
-                continue
-            mod_before = pedit.before.modules[mname]
-            code_before = mod_before.code.split("\n")
-            mod_after = pedit.after.modules[mname]
-            code_after = mod_after.code.split("\n")
+        modifications = medit.modified
+        edits = list[TokenizedEdit]()
+        if not modifications:
+            return edits
+        mod_before = medit.before
+        code_before = mod_before.code.split("\n")
+        mod_after = medit.after
+        code_after = mod_after.code.split("\n")
+        mod_name = mod_after.name
 
-            for path, c in modifications.items():
-                after_range = mod_after.location_map[c.after.tree]
-                code_above_after = "\n".join(code_after[: after_range.start.line - 1])
-                code_below_after = "\n".join(code_after[after_range.end.line :])
+        for path, c in modifications.items():
+            after_range = mod_after.location_map[c.after.tree]
+            code_above_after = "\n".join(code_after[: after_range.start.line - 1])
+            code_below_after = "\n".join(code_after[after_range.end.line :])
 
-                before_range = mod_before.location_map[c.before.tree]
-                code_above_before = "\n".join(
-                    code_before[: before_range.start.line - 1]
-                )
-                code_below_before = "\n".join(code_before[before_range.end.line :])
+            before_range = mod_before.location_map[c.before.tree]
+            code_above_before = "\n".join(code_before[: before_range.start.line - 1])
+            code_below_before = "\n".join(code_before[before_range.end.line :])
 
-                above_change = Modified(code_above_before, code_above_after)
-                below_change = Modified(code_below_before, code_below_after)
+            above_change = Modified(code_above_before, code_above_after)
+            below_change = Modified(code_below_before, code_below_after)
 
-                ex = TokenizedEdit(path, [], [])
-                ex.input_tks.extend(change_to_tokens(above_change))
-                input, output = change_to_input_output(c.map(lambda e: e.code))
-                ex.input_tks.append(Newline_id)
-                ex.input_tks.extend(input)
-                ex.input_tks.append(Newline_id)
-                ex.output_tks = output
-                ex.input_tks.extend(change_to_tokens(below_change))
-                examples.append(ex)
-        return examples
+            above_tks = change_to_tokens(above_change)
+            below_tks = change_to_tokens(below_change)
+            input, output = change_to_input_output(c.map(lambda e: e.code))
+
+            ex = TokenizedEdit(ProjectPath(mod_name, path), [], [])
+            ex.input_tks.extend(above_tks)
+            ex.input_tks.append(Newline_id)
+            ex.input_tks.extend(input)
+            ex.input_tks.append(Newline_id)
+            ex.output_tks = output
+            ex.input_tks.extend(below_tks)
+            edits.append(ex)
+        return edits
