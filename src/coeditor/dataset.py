@@ -37,6 +37,10 @@ class TokenizedEditDataset:
             )
         return pd.DataFrame(rows)
 
+    def all_edits(self) -> Iterable[TokenizedEdit]:
+        for xs in self.project2edits.values():
+            yield from xs
+
 
 def _process_commits(root: Path, commits: Sequence[CommitInfo]):
     edits = edits_from_commit_history(root, commits)

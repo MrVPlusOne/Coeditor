@@ -19,6 +19,7 @@ from spot.utils import (
     pmap,
     pickle_load,
     pickle_dump,
+    as_any,
 )
 from IPython.display import display, HTML
 import html
