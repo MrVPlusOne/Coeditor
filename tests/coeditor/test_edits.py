@@ -1,4 +1,5 @@
 from coeditor.history import *
+from coeditor.encoding import _BaseTokenizer
 
 
 def module_from_code(code: str, mname: ModuleName = "ex_module"):
@@ -128,7 +129,7 @@ def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
     if actual != expected:
         print(f"Failed for case: {name}")
         print("Expected:\n", decode_tokens(expected), "<EOF>")
-        print("Reconstructed:\n", decode_tokens(actual), "<EOF>")
+        print("Actual:\n", decode_tokens(actual), "<EOF>")
         raise ValueError(f"Failed for case: {name}")
 
 
@@ -263,6 +264,10 @@ def test_encoding_decoding_identity():
                 """
             ),
         ),
+        "super long": Modified(
+            "\n".join(f"x = {i}" for i in range(0, 200)),
+            "\n".join(f"x = {2* (i // 2)}" for i in range(0, 200)),
+        ),
     }
 
     for name, c in cases.items():
@@ -280,11 +285,15 @@ def test_encoding_decoding_identity():
 
         assert_tks_eq(
             in_seq,
-            code_to_input(c.before),
-            "change_to_input_output vs. code_to_input: " + name,
+            code_to_input(_BaseTokenizer.encode(c.before, add_special_tokens=False)),
+            "change_to_input_output mathese code_to_input: " + name,
         )
 
-        inlined = inline_output_tokens(in_seq, out_seq)
-        assert_tks_eq(inlined, change_to_tokens(c), "inline_output_tokens: " + name)
-        c_rec2 = tokens_to_change(inlined)
-        assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)
+        if len(c.before.split("\n")) < N_Extra_Ids:
+            inlined = inline_output_tokens(in_seq, out_seq)
+            assert inlined[-1] == Newline_id
+            assert_tks_eq(
+                inlined[:-1], change_to_tokens(c), "inline_output_tokens: " + name
+            )
+            c_rec2 = tokens_to_change(inlined[:-1])
+            assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)

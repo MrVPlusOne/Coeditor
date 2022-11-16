@@ -83,7 +83,7 @@ def change_to_tokens(change: Change[str]) -> TokenSeq:
 
 def tokens_to_change(tokens: TokenSeq) -> Modified[str]:
     "Decode a token sequence into a change."
-    tk_lines = split_list(tokens, Newline_id, keep_sep=True)
+    tk_lines = split_list(tokens, Newline_id)
 
     before_lines = list[str]()
     after_lines = list[str]()
@@ -97,25 +97,27 @@ def tokens_to_change(tokens: TokenSeq) -> Modified[str]:
             before_lines.append(line)
             after_lines.append(line)
 
-    return Modified(before="".join(before_lines), after="".join(after_lines))
+    return Modified(before="\n".join(before_lines), after="\n".join(after_lines))
 
 
-def code_to_input(code: str) -> TokenSeq:
+def code_to_input(code_tks: TokenSeq) -> TokenSeq:
     """
-    Prepare the code to be edited into the input format and tokenize it.
+    Convert the original code into model input by inserting <extra_id> tokens.
 
-    In this format, there will be an extra_id token at the beginning of each line.
-    Ther will always be an extra_id leading an empty line at the end to allow appending.
+    In this format, there will be an <extra_id> token at the beginning of each line.
+    An additional <extra_id> will be added at the end to allow appending.
     """
-    lines = splitlines(code)
-    if len(lines) >= N_Extra_Ids:
-        raise ValueError(f"Input has more than {N_Extra_Ids} lines: len = {len(lines)}")
-    output = TokenSeq()
-    for i, line in enumerate(lines):
-        output.append(get_extra_id(i))
-        output.extend(_BaseTokenizer.encode(line, add_special_tokens=False))
+    tk_lines = split_list(code_tks, Newline_id)
+    tk_lines.append([])
+    input_seq = TokenSeq()
+    for i, line in enumerate(tk_lines):
+        if i < N_Extra_Ids:
+            input_seq.append(get_extra_id(i))
+        input_seq.extend(line)
+        if i < len(tk_lines) - 1:
+            input_seq.append(Newline_id)
 
-    return output
+    return input_seq
 
 
 def check_output_tokens(tks: TokenSeq) -> bool:
@@ -131,19 +133,24 @@ def check_output_tokens(tks: TokenSeq) -> bool:
 def change_to_input_output(change: Modified[str]) -> tuple[TokenSeq, TokenSeq]:
     """
     Encode the change as a pair of input and output token sequences.
-    If we inline the output tokens into the input tokens, we should
-    get back the token sequence corresponding to the given change.
+    If we inline the output tokens into the input tokens and drop the
+    last newline token, we should get back the token sequence corresponding
+    to the given change.
+
+    Note that en extra newline is added to the input to allow appending, as was done
+    in `code_to_input`.
     """
     tks = change_to_tokens(change)
-    tk_lines = split_list(tks, Newline_id, keep_sep=True)
+    tk_lines = split_list(tks, Newline_id)
 
     input_lines: list[TokenSeq] = []
     out_buff = TokenSeq()
     output_segs: list[TokenSeq] = []
 
-    for tk_line in tk_lines:
+    for i, tk_line in enumerate(tk_lines):
         if tk_line and tk_line[0] == Add_id:
             out_buff.extend(tk_line)
+            out_buff.append(Newline_id)
         elif tk_line and tk_line[0] == Del_id:
             input_lines.append(tk_line[1:])
             out_buff.append(Del_id)
@@ -153,17 +160,17 @@ def change_to_input_output(change: Modified[str]) -> tuple[TokenSeq, TokenSeq]:
             input_lines.append(tk_line)
             output_segs.append(out_buff)
             out_buff = TokenSeq()
-
-    if out_buff:
-        output_segs[-1].extend(out_buff)
+    input_lines.append(TokenSeq())
+    output_segs.append(out_buff)
 
     assert_eq(len(input_lines), len(output_segs))
 
-    for i in range(0, min(N_Extra_Ids, len(input_lines))):
+    output_segs = output_segs[:N_Extra_Ids]
+    for i in range(0, len(output_segs)):
         input_lines[i] = [get_extra_id(i)] + input_lines[i]
         output_segs[i] = [get_extra_id(i)] + output_segs[i]
 
-    input = join_list(input_lines, None)
+    input = join_list(input_lines, Newline_id)
     output = join_list(output_segs, None)
     if not check_output_tokens(output):
         str_segs = [decode_tokens(tks) for tks in output_segs]
@@ -242,6 +249,8 @@ def encode_diffs(diffs: list[str]) -> TokenSeq:
         else:
             assert diff.startswith(" ")
         tokens.extend(_BaseTokenizer.encode(diff[1:], add_special_tokens=False))
+        if i < len(diffs) - 1:
+            tokens.append(Newline_id)
     return tokens
 
 
