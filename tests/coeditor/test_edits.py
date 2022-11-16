@@ -196,6 +196,19 @@ def test_encoding_decoding_identity():
                 """
             ),
         ),
+        "replace last": Modified(
+            dedent(
+                """\
+                def f1():
+                    x = 1"""
+            ),
+            dedent(
+                """\
+                def f1():
+                    x = 2
+                    return x * 2"""
+            ),
+        ),
         "no special tokens": Modified(
             dedent(
                 """\

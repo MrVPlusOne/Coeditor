@@ -1,8 +1,9 @@
 from dataclasses import field
+import torch
 
 import wandb
 from coeditor.dataset import TokenizedEditDataset
-from coeditor.encoding import TokenizedEdit, WindowArgs, _Tokenizer
+from coeditor.encoding import TokenizedEdit, WindowArgs, _Tokenizer, is_extra_id
 from spot.model import dynamic_dataloader
 from .common import *
 from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
@@ -17,11 +18,42 @@ CodeT5Model = T5ForConditionalGeneration
 
 
 @dataclass
+class DecodingArgs:
+    base_tokens: int = 128
+    tokens_per_line: int = 16
+    do_sample: bool = False
+    top_p: float = 0.9
+    num_beams: Optional[int] = 8
+    length_penalty: float = 1.0
+
+
+@dataclass
 class CoeditorModel:
     codet5: CodeT5Model
 
+    def predict(
+        self, input_tks: TokenSeq, decode_args: DecodingArgs | None = None
+    ) -> TokenSeq:
+        if decode_args is None:
+            decode_args = DecodingArgs()
+        x = torch.tensor([input_tks]).to(self.codet5.device)
+        n_lines = sum(is_extra_id(tk) for tk in input_tks)
+        max_length = decode_args.base_tokens + decode_args.tokens_per_line * n_lines
+        output = self.codet5.generate(
+            x,
+            max_length,
+            do_sample=decode_args.do_sample,
+            top_p=decode_args.top_p,
+            num_beams=decode_args.num_beams,
+            length_penalty=decode_args.length_penalty,
+        )[0]
+        return output.tolist()
+
     def save_pretrained(self, path: Path):
         self.codet5.save_pretrained(path)
+
+    def to(self, device):
+        self.codet5.to(device)
 
     @staticmethod
     def load_pretrained(path: Path):

@@ -118,6 +118,16 @@ def code_to_input(code: str) -> TokenSeq:
     return output
 
 
+def check_output_tokens(tks: TokenSeq) -> bool:
+    """Check if a token sequence is a valid output of CodeT5."""
+    for i, tk in enumerate(tks):
+        if tk == Del_id:
+            # a <del> token cannot be followed by normal code
+            if i + 1 < len(tks) and not is_extra_id(tks[i + 1]):
+                return False
+    return True
+
+
 def change_to_input_output(change: Modified[str]) -> tuple[TokenSeq, TokenSeq]:
     """
     Encode the change as a pair of input and output token sequences.
@@ -155,6 +165,10 @@ def change_to_input_output(change: Modified[str]) -> tuple[TokenSeq, TokenSeq]:
 
     input = join_list(input_lines, None)
     output = join_list(output_segs, None)
+    if not check_output_tokens(output):
+        str_segs = [decode_tokens(tks) for tks in output_segs]
+        msg = f"Invalid output tokens.\n Output segs: {str_segs}\n Change: {show_change(change)}"
+        raise ValueError(msg)
     return input, output
 
 
@@ -261,6 +275,10 @@ class TokenizedEdit:
         return TokenizedEdit(
             self.path, truncate_ctx(self.input_tks, args), self.output_tks
         )
+
+    def as_change(self) -> Modified[str]:
+        inlined = inline_output_tokens(self.input_tks, self.output_tks)
+        return tokens_to_change(inlined)
 
 
 def truncate_ctx(
