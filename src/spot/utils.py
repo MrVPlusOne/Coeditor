@@ -587,13 +587,13 @@ def cumulative_counts(elems: Sequence[int]) -> tuple[list[int], list[int]]:
     return keys, ys
 
 
-def pickle_dump(file: Path, obj):
+def pickle_dump(file: Path, obj: Any):
     file.parent.mkdir(parents=True, exist_ok=True)
     with file.open("wb") as f:
         pickle.dump(obj, f)
 
 
-def pickle_load(file: Path):
+def pickle_load(file: Path) -> Any:
     with file.open("rb") as f:
         return pickle.load(f)
 

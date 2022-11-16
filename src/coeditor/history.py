@@ -206,7 +206,7 @@ class ProjectEdit:
                     if (m := src2module(new_code)) is None:
                         continue
                     mod_after = PythonModule.from_cst(m, mname)
-                except cst.ParserSyntaxError:
+                except (cst.ParserSyntaxError, cst.CSTValidationError):
                     continue
 
             mod_before = modules[mname] if mname in modules else empty_module(mname)
@@ -282,7 +282,7 @@ def project_from_commit(
             mod = src2module(src_text)
             if mod is None:
                 continue
-        except cst.ParserSyntaxError:
+        except (cst.ParserSyntaxError, cst.CSTValidationError):
             if discard_bad_files:
                 continue
             raise
@@ -318,7 +318,7 @@ class CommitInfo:
 
 def get_commit_history(
     project_dir: Path,
-    max_hisotry: int = 1000,
+    max_hisotry: int | None = None,
     commit_id: str = "HEAD",
 ) -> list[CommitInfo]:
     """Get the commit history of the project, start from the given `commit_id`,
@@ -331,7 +331,7 @@ def get_commit_history(
         cwd=project_dir,
     ).strip()
     history = []
-    for _ in range(max_hisotry):
+    for _ in range(max_hisotry if max_hisotry else 100000):
         lines = run_command(
             ["git", "cat-file", "-p", commit_id],
             cwd=project_dir,

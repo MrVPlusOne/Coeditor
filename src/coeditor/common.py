@@ -1,5 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
+import os
 from typing import *
 
 import libcst as cst
@@ -15,6 +17,8 @@ from spot.utils import (
     timed_action,
     TimeLogger,
     pmap,
+    pickle_load,
+    pickle_dump,
 )
 from IPython.display import display, HTML
 import html
@@ -25,6 +29,41 @@ T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
 TokenSeq = list[int]
+
+
+def proj_root() -> Path:
+    return Path(__file__).parent.parent.parent
+
+
+def get_config_dict() -> dict:
+    if (path := proj_root() / "config" / "coeditor.json").exists():
+        return json.loads(path.read_text())
+    else:
+        return {}
+
+
+def get_config(key: str) -> str:
+    d = get_config_dict()
+    if key not in d:
+        raise KeyError(f"Key '{key}' not found in `config/coeditor.json`")
+    return d[key]
+
+
+def get_gpu_id(default: int) -> int:
+    if (s := os.getenv("GPU_ID")) is not None:
+        return int(s)
+    else:
+        print("GPU_ID not set, using:", default)
+        return default
+
+
+def get_dataset_dir(dataname: str) -> Path:
+    return Path(get_config("datasets_root")) / dataname
+
+
+def get_model_dir(trained=True) -> Path:
+    post = "trained" if trained else "training"
+    return Path(get_config("models_root")) / "models" / post
 
 
 def run_command(args: Sequence[str], cwd: str | Path) -> str:
