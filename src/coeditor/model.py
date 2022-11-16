@@ -3,7 +3,14 @@ import torch
 
 import wandb
 from coeditor.dataset import TokenizedEditDataset
-from coeditor.encoding import TokenizedEdit, WindowArgs, _Tokenizer, is_extra_id
+from coeditor.encoding import (
+    TokenizedEdit,
+    WindowArgs,
+    _Tokenizer,
+    is_extra_id,
+    BOS_id,
+    EOS_id,
+)
 from spot.model import dynamic_dataloader
 from .common import *
 from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
@@ -11,6 +18,7 @@ from transformers import (
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
     DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
 )
 from datasets.arrow_dataset import Dataset
 
@@ -31,6 +39,7 @@ class DecodingArgs:
 class CoeditorModel:
     codet5: CodeT5Model
 
+    @torch.autocast("cuda")
     def predict(
         self, input_tks: TokenSeq, decode_args: DecodingArgs | None = None
     ) -> TokenSeq:
@@ -78,6 +87,7 @@ class TrainingArgs:
     eval_max_batch_tokens: int
     train_window: WindowArgs
     eval_window: WindowArgs
+    max_target_length: int = 512
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     quicktest: bool = False
@@ -93,22 +103,6 @@ def train_coeditor_model(
     train_dir = get_model_dir(trained=False) / training_name
 
     wandb.init(dir=train_dir, project="Coeditor", name=training_name)
-
-    trainer_args = Seq2SeqTrainingArguments(
-        output_dir=str(train_dir),
-        overwrite_output_dir=True,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        logging_steps=400,
-        prediction_loss_only=True,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        num_train_epochs=1,
-        fp16=True,
-        load_best_model_at_end=True,
-        push_to_hub=False,
-        report_to=["wandb"],
-    )
 
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
 
@@ -137,9 +131,24 @@ def train_coeditor_model(
         def get_eval_dataloader(self, eval_dataset):
             return eval_loader
 
+    trainer_args = Seq2SeqTrainingArguments(
+        output_dir=str(train_dir),
+        overwrite_output_dir=True,
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        logging_steps=400,
+        prediction_loss_only=True,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        num_train_epochs=3 if args.quicktest else 5,
+        fp16=True,
+        load_best_model_at_end=True,
+        push_to_hub=False,
+        report_to=["wandb"],
+    )
+
     trainer = DynamicTrainer(
-        model.codet5,
-        trainer_args,
+        model.codet5, trainer_args, callbacks=[EarlyStoppingCallback()]
     )
 
     trainer.train()
@@ -149,10 +158,16 @@ def train_coeditor_model(
     return model
 
 
+def wrap_bos(x: TokenSeq) -> TokenSeq:
+    if x:
+        assert x[0] != BOS_id
+    return [BOS_id] + x + [EOS_id]
+
+
 def edits_to_dataset(edits: Sequence[TokenizedEdit]) -> Dataset:
     return Dataset.from_dict(
         {
             "input_ids": [e.input_tks for e in edits],
-            "labels": [e.output_tks for e in edits],
+            "labels": [wrap_bos(e.output_tks) for e in edits],
         }
     )

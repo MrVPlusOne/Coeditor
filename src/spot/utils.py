@@ -675,7 +675,7 @@ def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
     )
     diffs = list(diffs)[3:]
     if len(diffs) == 0:
-        diffs = str1.splitlines()
+        return "\n".join(str1.split("\n"))
     return "\n".join(omit_lines(diffs))
 
 

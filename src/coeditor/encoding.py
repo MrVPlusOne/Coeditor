@@ -289,6 +289,42 @@ class TokenizedEdit:
         inlined = inline_output_tokens(self.input_tks, self.output_tks)
         return tokens_to_change(inlined)
 
+    def show(self, ctx_tks: int = 100) -> str:
+        extra_id_poses = [i for i, tk in enumerate(self.input_tks) if is_extra_id(tk)]
+        start = max(0, extra_id_poses[0] - ctx_tks)
+        end = min(len(self.input_tks), extra_id_poses[-1] + ctx_tks)
+        shorter_tks = self.input_tks[start:end]
+        inlined = inline_output_tokens(shorter_tks, self.output_tks)
+        return show_change(tokens_to_change(inlined), name=str(self.path))
+
+    def show_prediction(self, pred_tks: TokenSeq, ctx_tks: int = 500):
+        def show_extra_tokens(tks: TokenSeq):
+            segs = output_ids_as_seqs(tks)
+            return "\n".join(
+                f"{decode_tokens([k])}: {decode_tokens(s)}"
+                for k, s in segs.items()
+                if s
+            )
+
+        extra_id_poses = [i for i, tk in enumerate(self.input_tks) if is_extra_id(tk)]
+        l, r = extra_id_poses[0], extra_id_poses[-1]
+        left_ctx = self.input_tks[max(0, l - ctx_tks) : l]
+        right_ctx = self.input_tks[r + 1 : min(len(self.input_tks), r + ctx_tks)]
+
+        outputs = [
+            f"========Left Context========",
+            decode_tokens(left_ctx),
+            "========Ground Truth]========",
+            show_extra_tokens(self.output_tks),
+            "========Prediction========",
+            f"{show_extra_tokens(pred_tks)}",
+            "========Main Code========",
+            decode_tokens(self.input_tks[l : r + 1]),
+            "========Right Context========",
+            decode_tokens(right_ctx),
+        ]
+        return "\n".join(outputs)
+
 
 def truncate_ctx(
     input_tks: TokenSeq,
