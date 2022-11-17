@@ -1,11 +1,12 @@
 import os
 from typing import *
+
+import wandb
 from coeditor.common import *
 from coeditor.encoding import WindowArgs
 from coeditor.model import (
     CodeT5Model,
     CoeditorModel,
-    train_coeditor_model,
     TrainingArgs,
 )
 
@@ -27,4 +28,6 @@ datasets = {name: pickle_load(data_dir / f"{name}.pkl") for name in ["train", "t
 
 model = CoeditorModel.from_code_t5()
 
-train_coeditor_model(model, train_name, datasets["train"], datasets["test"], train_args)
+wandb.init(dir="../wandb", project="Coeditor", name=train_name)
+
+model.train_on_data(train_name, datasets["train"], datasets["test"], train_args)

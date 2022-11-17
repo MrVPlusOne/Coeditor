@@ -64,6 +64,15 @@ class CoeditorModel:
     def to(self, device):
         self.codet5.to(device)
 
+    def train_on_data(
+        self,
+        training_name: str,
+        train_data: TokenizedEditDataset,
+        eval_data: TokenizedEditDataset,
+        args: "TrainingArgs",
+    ) -> None:
+        train_coeditor_model(self, training_name, train_data, eval_data, args)
+
     @staticmethod
     def load_pretrained(path: Path):
         codet5 = CodeT5Model.from_pretrained(path)
@@ -101,8 +110,6 @@ def train_coeditor_model(
     args: TrainingArgs,
 ):
     train_dir = get_model_dir(trained=False) / training_name
-
-    wandb.init(dir=train_dir, project="Coeditor", name=training_name)
 
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
 
@@ -155,7 +162,6 @@ def train_coeditor_model(
     save_dir = get_model_dir(trained=True) / training_name
     model.save_pretrained(save_dir)
     print("Model saved to:", save_dir)
-    return model
 
 
 def wrap_bos(x: TokenSeq) -> TokenSeq:
