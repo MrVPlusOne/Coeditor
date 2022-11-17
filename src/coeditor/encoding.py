@@ -314,7 +314,7 @@ class TokenizedEdit:
         outputs = [
             f"========Left Context========",
             decode_tokens(left_ctx),
-            "========Ground Truth]========",
+            "========Ground Truth========",
             show_extra_tokens(self.output_tks),
             "========Prediction========",
             f"{show_extra_tokens(pred_tks)}",
