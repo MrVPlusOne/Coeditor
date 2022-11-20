@@ -5,20 +5,22 @@ import wandb
 from coeditor.common import *
 from coeditor.encoding import WindowArgs
 from coeditor.model import (
-    CodeT5Model,
     CoeditorModel,
     TrainingArgs,
+    EvalArgs,
 )
 
 os.chdir(proj_root())
 
 data_name = "small"
 train_args = TrainingArgs(
-    train_max_batch_tokens=4096,
-    train_window=WindowArgs(2048),
-    eval_max_batch_tokens=4096 * 2,
-    eval_window=WindowArgs(4096),
+    max_batch_tokens=4096,
+    window=WindowArgs(2048),
     quicktest=False,
+)
+eval_args = EvalArgs(
+    max_batch_tokens=4096 * 2,
+    window=WindowArgs(4096),
 )
 
 train_name = f"{data_name}-quicktest" if train_args.quicktest else data_name
@@ -30,4 +32,9 @@ model = CoeditorModel.from_code_t5()
 
 wandb.init(dir="../wandb", project="Coeditor", name=train_name)
 
-model.train_on_data(train_name, datasets["train"], datasets["test"], train_args)
+model.train_on_data(
+    train_name, datasets["train"], datasets["test"], train_args, eval_args
+)
+
+eval_result = model.eval_on_data(datasets["test"], eval_args)
+wandb.log({f"test/{k}": v for k, v in eval_result.items()})

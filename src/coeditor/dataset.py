@@ -1,5 +1,13 @@
 import numpy as np
-from coeditor.encoding import FileLevelEditTokenizer, TokenizedEdit
+from coeditor.encoding import (
+    FileLevelEditTokenizer,
+    TokenizedEdit,
+    Newline_id,
+    Add_id,
+    decode_tokens,
+    encode_basic,
+)
+from spot.data import output_ids_as_seqs
 from .common import *
 from coeditor.history import (
     CommitInfo,
@@ -8,6 +16,7 @@ from coeditor.history import (
     edits_from_commit_history,
 )
 import pandas as pd
+from nltk.translate.bleu_score import sentence_bleu
 
 
 @dataclass
@@ -21,6 +30,11 @@ class TokenizedEditDataset:
 
     def subset(self, repos: Iterable[Path]) -> "TokenizedEditDataset":
         return TokenizedEditDataset({repo: self.project2edits[repo] for repo in repos})
+
+    def map(self, f: Callable[[TokenizedEdit], TokenizedEdit]):
+        return TokenizedEditDataset(
+            {repo: [f(e) for e in edits] for repo, edits in self.project2edits.items()}
+        )
 
     def per_repo_stats(self) -> pd.DataFrame:
         rows = []
@@ -40,6 +54,12 @@ class TokenizedEditDataset:
     def all_edits(self) -> Iterable[TokenizedEdit]:
         for xs in self.project2edits.values():
             yield from xs
+
+    @staticmethod
+    def from_edits(
+        edits: Iterable[TokenizedEdit], path=Path("all")
+    ) -> "TokenizedEditDataset":
+        return TokenizedEditDataset({path: list(edits)})
 
 
 def _process_commits(root: Path, commits: Sequence[CommitInfo]):
@@ -119,3 +139,48 @@ def datasets_from_repos(
     train_dataset = dataset.subset(train_projects)
     test_dataset = dataset.subset(test_projects)
     return {"train": train_dataset, "test": test_dataset}
+
+
+import warnings
+
+# turn off redundant BLEU warnings
+warnings.simplefilter(
+    "ignore",
+    category=UserWarning,
+    lineno=552,
+)
+
+
+def is_repetitive_edit(edit: TokenizedEdit, blue_threshold=0.8) -> bool:
+    """Check if all additions in the output_tokens can be matched to
+    an addition in the input_tokens with a BLEU score above the threshold."""
+
+    def get_addtion(tks):
+        if tks and tks[0] == Add_id:
+            s = decode_tokens(tks[1:])
+            s.strip()
+            return encode_basic(s)
+        else:
+            return []
+
+    ctx_lines = split_list(edit.input_tks, Newline_id)
+    ctx_addtions = [tks for l in ctx_lines if (tks := get_addtion(l))]
+
+    def has_match(line):
+        if line:
+            return any(
+                as_any(sentence_bleu([ref], line)) > blue_threshold
+                for ref in ctx_addtions
+            )
+        else:
+            return True
+
+    out_additions = list[TokenSeq]()
+    for seg in output_ids_as_seqs(edit.output_tks).values():
+        for line in split_list(seg, Newline_id):
+            if line := get_addtion(line):
+                out_additions.append(line)
+    if out_additions:
+        return all(has_match(seg) for seg in out_additions)
+    else:
+        return False

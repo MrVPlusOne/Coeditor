@@ -63,6 +63,11 @@ def decode_tokens(tokens: TokenSeq) -> str:
     return _Tokenizer.decode(tokens, add_special_tokens=False)
 
 
+def encode_basic(text: str):
+    "Encode a string into a token sequence using the base tokenizer."
+    return _BaseTokenizer.encode(text, add_special_tokens=False)
+
+
 def change_to_tokens(change: Change[str]) -> TokenSeq:
     "Encode a change as a token sequence."
     c = change.to_modified("")
@@ -270,13 +275,6 @@ class TokenizedEdit:
     input_tks: TokenSeq
     output_tks: TokenSeq
 
-    def print(self) -> None:
-        print("-" * 20, f"Training Example: {self.path}", "-" * 20)
-        print("Input:")
-        print(indent(decode_tokens(self.input_tks), " " * 4))
-        print("Output:")
-        print(indent(decode_tokens(self.output_tks), " " * 4))
-
     def truncate_ctx(
         self,
         args: WindowArgs,
@@ -285,9 +283,18 @@ class TokenizedEdit:
             self.path, truncate_ctx(self.input_tks, args), self.output_tks
         )
 
-    def as_change(self) -> Modified[str]:
-        inlined = inline_output_tokens(self.input_tks, self.output_tks)
+    def as_change(self, main_code_only: bool) -> Modified[str]:
+        input_tks = self.get_main_tks() if main_code_only else self.input_tks
+        inlined = inline_output_tokens(input_tks, self.output_tks)
         return tokens_to_change(inlined)
+
+    def get_main_tks(self) -> TokenSeq:
+        lines = split_list(self.input_tks, Newline_id)
+        main_lines = list[TokenSeq]()
+        for line in lines:
+            if line and is_extra_id(line[0]):
+                main_lines.append(line)
+        return join_list(main_lines, Newline_id)
 
     def show(self, ctx_tks: int = 100) -> str:
         extra_id_poses = [i for i, tk in enumerate(self.input_tks) if is_extra_id(tk)]
@@ -297,7 +304,7 @@ class TokenizedEdit:
         inlined = inline_output_tokens(shorter_tks, self.output_tks)
         return show_change(tokens_to_change(inlined), name=str(self.path))
 
-    def show_prediction(self, pred_tks: TokenSeq, ctx_tks: int = 500):
+    def show_prediction(self, pred_tks: TokenSeq | None = None, ctx_tks: int = 500):
         def show_extra_tokens(tks: TokenSeq):
             segs = output_ids_as_seqs(tks)
             return "\n".join(
@@ -311,13 +318,17 @@ class TokenizedEdit:
         left_ctx = self.input_tks[max(0, l - ctx_tks) : l]
         right_ctx = self.input_tks[r + 1 : min(len(self.input_tks), r + ctx_tks)]
 
+        pred_lines = (
+            ["========Prediction========", f"{show_extra_tokens(pred_tks)}"]
+            if pred_tks
+            else []
+        )
         outputs = [
             f"========Left Context========",
             decode_tokens(left_ctx),
             "========Ground Truth========",
             show_extra_tokens(self.output_tks),
-            "========Prediction========",
-            f"{show_extra_tokens(pred_tks)}",
+            *pred_lines,
             "========Main Code========",
             decode_tokens(self.input_tks[l : r + 1]),
             "========Right Context========",

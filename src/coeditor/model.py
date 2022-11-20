@@ -1,4 +1,5 @@
 from dataclasses import field
+import math
 import torch
 
 import wandb
@@ -11,9 +12,13 @@ from coeditor.encoding import (
     BOS_id,
     EOS_id,
 )
-from spot.model import dynamic_dataloader
+from spot.data import output_ids_as_seqs
+from spot.model import dynamic_dataloader, DataLoader
 from .common import *
-from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
+from transformers.models.t5.modeling_t5 import (
+    T5ForConditionalGeneration,
+    Seq2SeqLMOutput,
+)
 from transformers import (
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
@@ -33,6 +38,21 @@ class DecodingArgs:
     top_p: float = 0.9
     num_beams: Optional[int] = 8
     length_penalty: float = 1.0
+
+
+@dataclass
+class TrainingArgs:
+    max_batch_tokens: int
+    window: WindowArgs
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    quicktest: bool = False
+
+
+@dataclass
+class EvalArgs:
+    max_batch_tokens: int
+    window: WindowArgs
 
 
 @dataclass
@@ -69,9 +89,25 @@ class CoeditorModel:
         training_name: str,
         train_data: TokenizedEditDataset,
         eval_data: TokenizedEditDataset,
-        args: "TrainingArgs",
+        train_args: "TrainingArgs",
+        eval_args: "EvalArgs",
     ) -> None:
-        train_coeditor_model(self, training_name, train_data, eval_data, args)
+        train_coeditor_model(
+            self, training_name, train_data, eval_data, train_args, eval_args
+        )
+
+    def eval_on_data(
+        self,
+        eval_data: TokenizedEditDataset,
+        eval_args: "EvalArgs",
+    ):
+        eval_edits = list(eval_data.all_edits())
+        eval_loader = edits_to_dataloader(
+            [e.truncate_ctx(eval_args.window) for e in eval_edits],
+            eval_args.max_batch_tokens,
+            shuffle=True,
+        )
+        return eval_label_likelihood(self, eval_loader)
 
     @staticmethod
     def load_pretrained(path: Path):
@@ -90,45 +126,31 @@ class CoeditorModel:
         return CoeditorModel(codet5)
 
 
-@dataclass
-class TrainingArgs:
-    train_max_batch_tokens: int
-    eval_max_batch_tokens: int
-    train_window: WindowArgs
-    eval_window: WindowArgs
-    max_target_length: int = 512
-    learning_rate: float = 2e-5
-    weight_decay: float = 0.01
-    quicktest: bool = False
-
-
 def train_coeditor_model(
     model: CoeditorModel,
     training_name: str,
     train_data: TokenizedEditDataset,
     eval_data: TokenizedEditDataset,
-    args: TrainingArgs,
+    train_args: TrainingArgs,
+    eval_args: EvalArgs,
 ):
     train_dir = get_model_dir(trained=False) / training_name
 
-    data_collator = DataCollatorForSeq2Seq(_Tokenizer)
-
     train_edits = list(train_data.all_edits())
     eval_edits = list(eval_data.all_edits())
-    if args.quicktest:
+    if train_args.quicktest:
         train_edits = train_edits[:10]
         eval_edits = eval_edits[:10]
-    train_dataset = edits_to_dataset(
-        [e.truncate_ctx(args.train_window) for e in train_edits]
+
+    train_lodader = edits_to_dataloader(
+        [e.truncate_ctx(train_args.window) for e in train_edits],
+        train_args.max_batch_tokens,
+        shuffle=True,
     )
-    eval_dataset = edits_to_dataset(
-        [e.truncate_ctx(args.eval_window) for e in eval_edits]
-    )
-    train_lodader = dynamic_dataloader(
-        train_dataset, args.train_max_batch_tokens, data_collator, shuffle=True
-    )
-    eval_loader = dynamic_dataloader(
-        eval_dataset, args.eval_max_batch_tokens, data_collator, shuffle=False
+    eval_loader = edits_to_dataloader(
+        [e.truncate_ctx(eval_args.window) for e in eval_edits],
+        eval_args.max_batch_tokens,
+        shuffle=True,
     )
 
     class DynamicTrainer(Seq2SeqTrainer):
@@ -145,9 +167,9 @@ def train_coeditor_model(
         save_strategy="epoch",
         logging_steps=400,
         prediction_loss_only=True,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        num_train_epochs=3 if args.quicktest else 5,
+        learning_rate=train_args.learning_rate,
+        weight_decay=train_args.weight_decay,
+        num_train_epochs=3 if train_args.quicktest else 5,
         fp16=True,
         load_best_model_at_end=True,
         push_to_hub=False,
@@ -164,16 +186,106 @@ def train_coeditor_model(
     print("Model saved to:", save_dir)
 
 
+@torch.no_grad()
+@torch.autocast("cuda")
+def eval_label_likelihood(
+    model: CoeditorModel,
+    eval_loader: DataLoader,
+):
+    """
+    Compute the perplexity of the model on the eval dataset.
+    Note that special tokens like <extra_id> and <s> are excluded
+    from the perplexity computation.
+    """
+    core = model.codet5
+    core.eval()
+    loss_per_ex = WeightedSum(0.0, 0)
+    loss_per_tk = WeightedSum(0.0, 0)
+    prob_per_ex = WeightedSum(0.0, 0)
+    for batch in tqdm(eval_loader, desc="evaluate loss", unit="batch"):
+        input_ids = batch["input_ids"].to(core.device)
+        labels = batch["labels"].to(core.device)
+        attention_mask = batch["attention_mask"].to(core.device)
+        outputs = core.forward(input_ids, labels=labels, attention_mask=attention_mask)
+        assert isinstance(outputs, Seq2SeqLMOutput)
+        logits = outputs.logits.permute(0, 2, 1)  # shape: (batch, vocab, seq_len)
+        logp = torch.nn.functional.cross_entropy(
+            logits,
+            labels,
+            reduction="none",
+            ignore_index=-100,
+        )  # shape: (batch, seq_len)
+        loss = logp.sum().item()
+        ex_prob = torch.exp(-logp.sum(dim=1)).sum().item()
+        bsize = input_ids.shape[0]
+        label_tks = (labels != -100).sum().item()
+        loss_per_ex += WeightedSum(loss, bsize)
+        loss_per_tk += WeightedSum(loss, label_tks)
+        prob_per_ex += WeightedSum(ex_prob, bsize)
+
+    return {
+        "loss_per_ex": loss_per_ex,
+        "loss_per_tk": loss_per_tk,
+        "prob_per_ex": prob_per_ex,
+    }
+
+
+def code_tk_loss(logits: torch.FloatTensor, labels: torch.LongTensor):
+    # This computation depends on the label sequence length, which may not be
+    # suitable for comparing different encoding schemes.
+    special_tks = {
+        _Tokenizer.pad_token_id,
+        _Tokenizer.eos_token_id,
+        _Tokenizer.bos_token_id,
+        -100,
+    }
+
+    def is_code_token(tk):
+        return not is_extra_id(tk) and tk not in special_tks
+
+    cpu_labels = cast(torch.LongTensor, labels.cpu())
+    rows = logits.size(0)
+    n_tokens = 0
+    total_loss = 0.0
+    for i in range(rows):
+        selected = [is_code_token(tk) for tk in cpu_labels[i].tolist()]
+        ce = torch.nn.functional.cross_entropy(
+            logits[i, selected], labels[i, selected], reduction="sum"
+        )
+        n_tokens += sum(selected)
+        total_loss += float(ce.item())
+
+    return total_loss, n_tokens
+
+
 def wrap_bos(x: TokenSeq) -> TokenSeq:
     if x:
         assert x[0] != BOS_id
     return [BOS_id] + x + [EOS_id]
 
 
+def drop_empty_labels(x: TokenSeq) -> TokenSeq:
+    """Drop the <extra_id>s that are not followed by a code token."""
+    new_seq = TokenSeq()
+    for k, v in output_ids_as_seqs(x).items():
+        if v:
+            new_seq.append(k)
+            new_seq.extend(v)
+    return new_seq
+
+
 def edits_to_dataset(edits: Sequence[TokenizedEdit]) -> Dataset:
     return Dataset.from_dict(
         {
             "input_ids": [e.input_tks for e in edits],
-            "labels": [wrap_bos(e.output_tks) for e in edits],
+            "labels": [wrap_bos(drop_empty_labels(e.output_tks)) for e in edits],
         }
     )
+
+
+def edits_to_dataloader(
+    edits: Sequence[TokenizedEdit], max_batch_tokens: int, shuffle: bool = False
+) -> DataLoader:
+    dataset = edits_to_dataset(edits)
+    data_collator = DataCollatorForSeq2Seq(_Tokenizer)
+    return dynamic_dataloader(dataset, max_batch_tokens, data_collator, shuffle=shuffle)

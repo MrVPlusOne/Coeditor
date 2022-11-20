@@ -20,11 +20,14 @@ from spot.utils import (
     pickle_load,
     pickle_dump,
     as_any,
+    not_none,
 )
 from IPython.display import display, HTML
 import html
 import asyncio
 from concurrent.futures import Executor, ProcessPoolExecutor
+import numbers
+import ast
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
@@ -203,3 +206,40 @@ class ExecutorHelper:
     def cpu(workers: int = DefaultWorkers):
         with ProcessPoolExecutor(workers) as exec:
             yield ExecutorHelper(exec)
+
+
+V = TypeVar("V")
+W = TypeVar("W")
+
+
+@dataclass
+class WeightedSum(Generic[V, W]):
+    sum: V
+    weight: W
+
+    def average(self) -> float:
+        if self.weight == 0:
+            return float("nan")
+        out = self.sum / self.weight  # type: ignore
+        return float(out)
+
+    def mean(self) -> float:
+        return self.average()
+
+    def __add__(self, other: "WeightedSum[V, W]") -> "WeightedSum[V, W]":
+        sum = self.sum + other.sum  # type: ignore
+        weight = self.weight + other.weight  # type: ignore
+        return WeightedSum(sum, weight)
+
+    def __repr__(self) -> str:
+        return f"(mean={self.mean():.5g}, weight={self.weight})"
+
+
+def normalize_code_by_ast(code: str) -> str:
+    """Normalize the code by parsing and unparsing it using the AST module.
+    If parsing fails, return the original code."""
+    try:
+        tree = ast.parse(code)
+        return ast.unparse(tree)
+    except SyntaxError:
+        return code
