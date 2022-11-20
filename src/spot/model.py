@@ -260,11 +260,13 @@ def dynamic_dataloader(
         random.shuffle(ids)
     ids.sort(key=lambda x: ex_sizes[x], reverse=True)
     batches = list[list[int]]()
-    while len(ids) > 0:
-        w = ex_sizes[ids[0]]
+    t = 0
+    while t < len(ids):
+        w = ex_sizes[ids[t]]
         n = max(1, max_tokens // w)
-        batches.append(ids[:n])
-        ids = ids[n:]
+        batch = ids[t : t + n]
+        batches.append(batch)
+        t += len(batch)
     if shuffle:
         random.shuffle(batches)
 
