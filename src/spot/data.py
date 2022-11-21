@@ -47,20 +47,24 @@ class GitRepo:
     stars: int
     forks: int
     description: str = ""
+    archived: bool = False
     lines_of_code: Optional[int] = None
     last_update: Optional[datetime] = None
     n_type_annots: Optional[int] = None
     n_type_places: Optional[int] = None
 
     def authorname(self):
-        return self.author + "__" + self.name
+        return f"{self.author}?{self.name}"
 
     def repo_dir(self, repos_dir: Path) -> Path:
         return repos_dir / "downloaded" / self.authorname()
 
-    def download(self, repos_dir: Path, timeout=None) -> bool:
+    def download(
+        self, repos_dir: Path, full_history: bool = False, timeout=None
+    ) -> bool:
+        depth = "--depth=1" if not full_history else ""
         subprocess.run(
-            ["git", "clone", "--depth", "1", self.url, self.authorname()],
+            ["git", "clone", *depth, self.url, self.authorname()],
             cwd=(repos_dir / "downloading"),
             timeout=timeout,
             capture_output=True,
@@ -68,11 +72,7 @@ class GitRepo:
         if not (repos_dir / "downloading" / self.authorname()).is_dir():
             # git clone failed. Possibly caused by invalid url?
             return False
-        subprocess.run(
-            ["mv", self.authorname(), (repos_dir / "downloaded")],
-            cwd=(repos_dir / "downloading"),
-            capture_output=True,
-        )
+        shutil.move(repos_dir / "downloading" / self.authorname(), (repos_dir / "downloaded"))
         return True
 
     def read_last_update(self, repos_dir):
@@ -998,7 +998,7 @@ class ChunkedDataset:
 
 
 def output_ids_as_seqs(output_ids: Iterable[Token]) -> dict[Token, TokenSeq]:
-    """Parse the CodeT5 model's output as a series of key-value pairs. 
+    """Parse the CodeT5 model's output as a series of key-value pairs.
     <pad>, <mask>, or <s> or </s> tokens are filtered out."""
     buff = TokenSeq()
     key = None

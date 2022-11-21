@@ -4,6 +4,7 @@ from coeditor.encoding import (
     TokenizedEdit,
     Newline_id,
     Add_id,
+    WindowArgs,
     decode_tokens,
     encode_basic,
 )
@@ -62,9 +63,9 @@ class TokenizedEditDataset:
         return TokenizedEditDataset({path: list(edits)})
 
 
-def _process_commits(root: Path, commits: Sequence[CommitInfo]):
+def _process_commits(root: Path, commits: Sequence[CommitInfo], window: WindowArgs):
     edits = edits_from_commit_history(root, commits)
-    encoder = FileLevelEditTokenizer()
+    encoder = FileLevelEditTokenizer(window)
     tk_edits = list[TokenizedEdit]()
     for pe in edits:
         for me in pe.changes.values():
@@ -74,8 +75,8 @@ def _process_commits(root: Path, commits: Sequence[CommitInfo]):
 
 def dataset_from_projects(
     project_roots: Sequence[Path],
+    window: WindowArgs,
     max_history_per_repo: int = 1000,
-    history_chunk_size: int = 100,
     workers: int = DefaultWorkers,
 ) -> "TokenizedEditDataset":
     """
@@ -99,6 +100,7 @@ def dataset_from_projects(
     roots = list[Path]()
     chunked_histories = list[list[CommitInfo]]()
     for root, h in zip(project_roots, histories):
+        history_chunk_size = max(100, len(h) // 5)
         for i in range(0, len(h), history_chunk_size):
             roots.append(root)
             # note that we need 1 extra overlapping commit to get all diffs
@@ -107,6 +109,7 @@ def dataset_from_projects(
         _process_commits,
         roots,
         chunked_histories,
+        [window] * len(roots),
         desc="Create tokenized edits",
         max_workers=workers,
         tqdm_args={"unit": "chunk"},
@@ -123,22 +126,29 @@ def dataset_from_projects(
 
 
 def datasets_from_repos(
-    repos_root: Path, max_history_per_repo: int = 1000, workers: int = DefaultWorkers
+    repos_root: Path,
+    window: WindowArgs,
+    max_history_per_repo: int = 1000,
+    workers: int = DefaultWorkers,
 ) -> dict[str, TokenizedEditDataset]:
-    assert (repos_root / "train").is_dir()
-    assert (repos_root / "test").is_dir()
-
-    train_projects = [p for p in (repos_root / "train").iterdir() if p.is_dir()]
-    test_projects = [p for p in (repos_root / "test").iterdir() if p.is_dir()]
+    splits = ["test", "valid", "train"]
+    projects = dict[str, list[Path]]()
+    for split in splits:
+        if not (repos_root / split).exists():
+            warnings.warn(f"Split {split} not found at {repos_root / split}.")
+            continue
+        ps = [p for p in (repos_root / split).iterdir() if p.is_dir]
+        projects[split] = ps
+        if not ps:
+            warnings.warn(f"No projects found in {split} split")
 
     dataset = dataset_from_projects(
-        train_projects + test_projects,
+        join_list(projects.values()),
+        window=window,
         max_history_per_repo=max_history_per_repo,
         workers=workers,
     )
-    train_dataset = dataset.subset(train_projects)
-    test_dataset = dataset.subset(test_projects)
-    return {"train": train_dataset, "test": test_dataset}
+    return {k: dataset.subset(v) for k, v in projects.items()}
 
 
 import warnings

@@ -29,6 +29,7 @@ import asyncio
 from concurrent.futures import Executor, ProcessPoolExecutor
 import numbers
 import ast
+import warnings
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
@@ -115,8 +116,8 @@ def split_list(
 
 
 def join_list(
-    segs: list[list[T1]],
-    sep: T1 | None,
+    segs: Iterable[Iterable[T1]],
+    sep: T1 | None = None,
 ) -> list[T1]:
     result = list[T1]()
     for i, seg in enumerate(segs):

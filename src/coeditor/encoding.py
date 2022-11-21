@@ -264,6 +264,48 @@ class WindowArgs:
     max_window_size: int
     left_ctx_ratio: float = 0.5
 
+    def truncate_ctx(
+        self,
+        input_tks: TokenSeq,
+    ) -> TokenSeq:
+        """
+        Truncate the input to make it fit within the max window size.
+        The cutoff is centered around the <extra_id> tokens.
+        """
+        extra_id_poses = [i for i, tk in enumerate(input_tks) if is_extra_id(tk)]
+        assert extra_id_poses
+        assert 0 <= self.left_ctx_ratio <= 1
+        main_left = extra_id_poses[0]
+        main_end = min(extra_id_poses[-1] + 1, main_left + self.max_window_size)
+        main_size = main_end - main_left
+        assert main_size >= 0
+
+        if main_size > self.max_window_size:
+            # the main part is too long, truncate it
+            left_ctx_start = main_left
+            right_ctx_end = left_ctx_start + self.max_window_size
+        else:
+            left_size = int((self.max_window_size - main_size) * self.left_ctx_ratio)
+            right_size = self.max_window_size - main_size - left_size
+            assert right_size >= 0, f"right_size: {right_size}"
+
+            right_ctx_end = min(len(input_tks), main_end + right_size)
+            right_size = right_ctx_end - main_end
+            assert right_size >= 0, f"right_size: {right_size}"
+
+            # if right_size doesn't use up all the space, we can expand the left context
+            left_size = self.max_window_size - main_size - right_size
+            left_ctx_start = max(0, extra_id_poses[0] - left_size)
+            assert left_size >= 0
+
+        new_input = input_tks[left_ctx_start:right_ctx_end]
+        if left_ctx_start > 0:
+            new_input[0] = BOS_id
+        if right_ctx_end < len(input_tks):
+            new_input[-1] = EOS_id
+        assert len(new_input) <= self.max_window_size
+        return new_input
+
     @staticmethod
     def Default() -> "WindowArgs":
         return WindowArgs(4096, 0.5)
@@ -280,7 +322,7 @@ class TokenizedEdit:
         args: WindowArgs,
     ) -> "TokenizedEdit":
         return TokenizedEdit(
-            self.path, truncate_ctx(self.input_tks, args), self.output_tks
+            self.path, args.truncate_ctx(self.input_tks), self.output_tks
         )
 
     def as_change(self, main_code_only: bool) -> Modified[str]:
@@ -337,45 +379,10 @@ class TokenizedEdit:
         return "\n".join(outputs)
 
 
-def truncate_ctx(
-    input_tks: TokenSeq,
-    args: WindowArgs,
-) -> TokenSeq:
-    """
-    Truncate the input to make it fit within the max window size.
-    The cutoff is centered around the <extra_id> tokens.
-    """
-    extra_id_poses = [i for i, tk in enumerate(input_tks) if is_extra_id(tk)]
-    assert extra_id_poses
-    assert 0 <= args.left_ctx_ratio <= 1
-    main_left = extra_id_poses[0]
-    main_right = min(extra_id_poses[-1], main_left + args.max_window_size)
-    main_size = main_right - main_left + 1
-    assert main_size >= 0
-
-    left_size = int((args.max_window_size - main_size) * args.left_ctx_ratio)
-    right_size = args.max_window_size - main_size - left_size
-
-    right_ctx_end = min(len(input_tks), main_right + right_size + 1)
-    right_size = right_ctx_end - 1 - main_right
-    assert right_size >= 0
-
-    # if right_size doesn't use up all the space, we can expand the left context
-    left_size = args.max_window_size - main_size - right_size
-    left_ctx_start = max(0, extra_id_poses[0] - left_size)
-    assert left_size >= 0
-
-    new_input = input_tks[left_ctx_start:right_ctx_end]
-    if left_ctx_start > 0:
-        new_input[0] = BOS_id
-    if right_ctx_end < len(input_tks):
-        new_input[-1] = EOS_id
-    assert len(new_input) <= args.max_window_size
-    return new_input
-
-
 @dataclass
 class FileLevelEditTokenizer:
+    window: WindowArgs
+
     def tokenize_edit(
         self,
         medit: ModuleEdit,
@@ -389,21 +396,33 @@ class FileLevelEditTokenizer:
         mod_after = medit.after
         code_after = mod_after.code.split("\n")
         mod_name = mod_after.name
+        max_ctx_lines = self.window.max_window_size // 2
 
         for path, c in modifications.items():
             after_range = mod_after.location_map[c.after.tree]
-            code_above_after = "\n".join(code_after[: after_range.start.line - 1])
-            code_below_after = "\n".join(code_after[after_range.end.line :])
-
+            after_start = after_range.start.line - 1
+            after_end = after_range.end.line - 1
             before_range = mod_before.location_map[c.before.tree]
-            code_above_before = "\n".join(code_before[: before_range.start.line - 1])
-            code_below_before = "\n".join(code_before[before_range.end.line :])
+            before_start = before_range.start.line - 1
+            before_end = before_range.end.line - 1
 
-            code_main_before = "\n".join(
-                code_before[before_range.start.line - 1 : before_range.end.line]
+            code_main_before = "\n".join(code_before[before_start : before_end + 1])
+            code_main_after = "\n".join(code_after[after_start : after_end + 1])
+
+            code_above_after = "\n".join(
+                code_after[max(0, after_start - max_ctx_lines) : after_start]
             )
-            code_main_after = "\n".join(
-                code_after[after_range.start.line - 1 : after_range.end.line]
+            code_below_after = "\n".join(
+                code_after[after_end : min(len(code_after), after_end + max_ctx_lines)]
+            )
+
+            code_above_before = "\n".join(
+                code_before[max(0, before_start - max_ctx_lines) : before_start]
+            )
+            code_below_before = "\n".join(
+                code_before[
+                    before_end : min(len(code_before), before_end + max_ctx_lines)
+                ]
             )
 
             above_change = Modified(code_above_before, code_above_after)
@@ -422,5 +441,6 @@ class FileLevelEditTokenizer:
             ex.input_tks.append(Newline_id)
             ex.output_tks = output
             ex.input_tks.extend(below_tks)
+            ex.truncate_ctx(self.window)
             edits.append(ex)
         return edits
