@@ -159,7 +159,8 @@ class ModuleEdit:
         modified = {
             path: Modified(before_elems[path], after_elems[path])
             for path in (before_elems.keys() & after_elems.keys())
-            if before_elems[path].code != after_elems[path].code
+            if normalize_code_by_ast(before_elems[path].code)
+            != normalize_code_by_ast(after_elems[path].code)
         }
         changes = added | deleted | modified
 
