@@ -1,4 +1,5 @@
 from pathlib import Path
+from textwrap import dedent
 
 from numpy import False_
 from spot.static_analysis import (
@@ -966,3 +967,40 @@ def fix1():
         "test_out/test_global_fix",
         ("conftest/fix1", True),
     )
+
+
+from spot.static_analysis import CodeRange
+
+
+def test_element_location_and_code():
+    code1 = """
+def f1(x, y):
+    return (
+        x + y
+    )
+
+@annotation
+def f2(x, y, z):    
+    return x + y + z
+
+class A:
+    def m1(self, x):
+        return x + 1
+
+    @staticmethod
+    def m2(x):
+        return x + 2
+"""
+    lines = code1.split("\n")
+
+    def get_code_from_range(range: CodeRange):
+        start = range.start.line - 1
+        end = range.end.line - 1
+        snippet = "\n".join(lines[start : end + 1])
+        return dedent(snippet)
+
+    project = project_from_code({"file1": code1})
+    m = project.modules["file1"]
+    for f in m.all_funcs():
+        f_range = m.location_map[f.tree]
+        assert get_code_from_range(f_range) == f.code

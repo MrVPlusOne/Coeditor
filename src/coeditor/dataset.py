@@ -79,7 +79,7 @@ def dataset_from_projects(
     workers: int = DefaultWorkers,
 ) -> "TokenizedEditDataset":
     """
-    Create a file-based editing datase from the given list of project roots.
+    Create a file-based editing dataset from the given list of project roots.
     Args:
         - max_history_per_repo (int, optional): When the repo history is longer than
         this value, only the oldest portion is going to be used. Defaults to 1000.

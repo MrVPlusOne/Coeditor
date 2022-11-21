@@ -126,7 +126,10 @@ class CoeditorModel:
     def load_pretrained(path: Path):
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
-        args: dict = pickle_load(path / "coeditor_args.pkl")
+        if (path / "coeditor_args.pkl").exists():
+            args: dict = pickle_load(path / "coeditor_args.pkl")
+        else:
+            args = dict()
         skip_unchanged = args.get("skip_unchanged", False)
         return CoeditorModel(codet5, skip_unchanged=skip_unchanged)
 

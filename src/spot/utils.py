@@ -208,6 +208,18 @@ def pmap(
     return r
 
 
+def pfilter(
+    f: Callable[[T1], bool],
+    xs: Iterable[T1],
+    desc: str = "filtering",
+    max_workers: int | None = None,
+    tqdm_args: dict = {},
+) -> list[T1]:
+    xs = list(xs) 
+    to_keep = pmap(f, xs, desc=desc, max_workers=max_workers, tqdm_args=tqdm_args)
+    return [x for x, keep in zip(xs, to_keep) if keep]
+
+
 class SpecialNames:
     Return = "<return>"
     Missing = "<missing>"

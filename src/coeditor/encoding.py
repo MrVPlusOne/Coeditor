@@ -399,12 +399,21 @@ class FileLevelEditTokenizer:
             code_above_before = "\n".join(code_before[: before_range.start.line - 1])
             code_below_before = "\n".join(code_before[before_range.end.line :])
 
+            code_main_before = "\n".join(
+                code_before[before_range.start.line - 1 : before_range.end.line]
+            )
+            code_main_after = "\n".join(
+                code_after[after_range.start.line - 1 : after_range.end.line]
+            )
+
             above_change = Modified(code_above_before, code_above_after)
             below_change = Modified(code_below_before, code_below_after)
 
             above_tks = change_to_tokens(above_change)
             below_tks = change_to_tokens(below_change)
-            input, output = change_to_input_output(c.map(lambda e: e.code))
+            input, output = change_to_input_output(
+                Modified(code_main_before, code_main_after)
+            )
 
             ex = TokenizedEdit(ProjectPath(mod_name, path), [], [])
             ex.input_tks.extend(above_tks)

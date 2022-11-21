@@ -17,6 +17,7 @@ from spot.utils import (
     timed_action,
     TimeLogger,
     pmap,
+    pfilter,
     pickle_load,
     pickle_dump,
     as_any,

@@ -1280,12 +1280,27 @@ class _VisitKind(enum.Enum):
     Function = enum.auto()
 
 
+def _fix_function_location_(node2range: dict[cst.CSTNode, CodeRange]):
+    """
+    Change the start code range of a function to point to its first decorator,
+    as opposed to the `def` statement.
+    """
+    for node in node2range:
+        if isinstance(node, cst.FunctionDef) and node.decorators:
+            dec_range = node2range[node.decorators[0]]
+            node2range[node] = CodeRange(
+                start=dec_range.start,
+                end=node2range[node].end,
+            )
+
+
 def build_python_module(module: cst.Module, module_name: ModuleName):
     """Construct a `PythonModule` from a `cst.Module`.
     If multiple definitions of the same name are found, only the last one is kept."""
 
     wrapper = cst.MetadataWrapper(module)
     node2location = dict(wrapper.resolve(PositionProvider))
+    _fix_function_location_(node2location)
 
     imported_modules = set[str]()
     defined_symbols = dict[str, ProjectPath]()
