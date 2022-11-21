@@ -1,8 +1,6 @@
 from dataclasses import field
-import math
 import torch
 
-import wandb
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import (
     TokenizedEdit,
@@ -180,16 +178,20 @@ def train_coeditor_model(
         def get_eval_dataloader(self, eval_dataset):
             return eval_loader
 
+    eval_interval = 5 if train_args.quicktest else 500
     trainer_args = Seq2SeqTrainingArguments(
         output_dir=str(train_dir),
         overwrite_output_dir=True,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        logging_steps=400,
+        evaluation_strategy="steps",
+        save_strategy="steps",
+        eval_steps=eval_interval,
+        logging_steps=eval_interval,
+        save_steps=eval_interval,
+        save_total_limit=3,
         prediction_loss_only=True,
         learning_rate=train_args.learning_rate,
         weight_decay=train_args.weight_decay,
-        num_train_epochs=3 if train_args.quicktest else 5,
+        num_train_epochs=4,
         fp16=True,
         load_best_model_at_end=True,
         push_to_hub=False,
@@ -197,7 +199,9 @@ def train_coeditor_model(
     )
 
     trainer = DynamicTrainer(
-        model.codet5, trainer_args, callbacks=[EarlyStoppingCallback()]
+        model.codet5,
+        trainer_args,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
 
     trainer.train()

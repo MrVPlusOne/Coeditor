@@ -338,13 +338,8 @@ class TokenizedEdit:
                 main_lines.append(line)
         return join_list(main_lines, Newline_id)
 
-    def show(self, ctx_tks: int = 100) -> str:
-        extra_id_poses = [i for i, tk in enumerate(self.input_tks) if is_extra_id(tk)]
-        start = max(0, extra_id_poses[0] - ctx_tks)
-        end = min(len(self.input_tks), extra_id_poses[-1] + ctx_tks)
-        shorter_tks = self.input_tks[start:end]
-        inlined = inline_output_tokens(shorter_tks, self.output_tks)
-        return show_change(tokens_to_change(inlined), name=str(self.path))
+    def show(self, ctx_tks: int = 500) -> str:
+        return self.show_prediction(None, ctx_tks)
 
     def show_prediction(self, pred_tks: TokenSeq | None = None, ctx_tks: int = 500):
         def show_extra_tokens(tks: TokenSeq):
@@ -441,6 +436,21 @@ class FileLevelEditTokenizer:
             ex.input_tks.append(Newline_id)
             ex.output_tks = output
             ex.input_tks.extend(below_tks)
-            ex.truncate_ctx(self.window)
+            ex = ex.truncate_ctx(self.window)
             edits.append(ex)
+        return edits
+
+
+@dataclass
+class ProjectLevelEditTokenizer:
+    window: WindowArgs
+    collapse_unchanged: bool = True
+
+    def tokenize_edit(
+        self,
+        pedit: ProjectEdit,
+    ) -> list[TokenizedEdit]:
+        edits = list[TokenizedEdit]()
+        for medit in pedit.edits:
+            edits.extend(self.tokenize_edit(medit))
         return edits

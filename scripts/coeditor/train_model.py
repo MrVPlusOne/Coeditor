@@ -13,8 +13,8 @@ from coeditor.model import (
 
 os.chdir(proj_root())
 
-data_name = "small"
-skip_unchanged = True
+data_name = "medium"
+skip_unchanged = False
 train_args = TrainingArgs(
     max_batch_tokens=4096,
     window=WindowArgs(2048),
@@ -32,21 +32,35 @@ if train_args.quicktest:
     model_name = "quicktest-" + model_name
 
 data_dir = get_dataset_dir(data_name) / "tokenized-file_based"
-datasets = {name: pickle_load(data_dir / f"{name}.pkl") for name in ["train", "test"]}
-train_data: TokenizedEditDataset = datasets["train"]
-eval_data: TokenizedEditDataset = datasets["test"]
+with timed_action("Loading datasets"):
+    datasets: dict[str, TokenizedEditDataset] = {
+        name: pickle_load(data_dir / f"{name}.pkl")
+        for name in ["train", "valid", "test"]
+    }
 if train_args.quicktest:
-    train_data = TokenizedEditDataset.from_edits(list(train_data.all_edits())[:10])
-    eval_data = TokenizedEditDataset.from_edits(list(eval_data.all_edits())[:10])
+    for name, dataset in datasets.items():
+        datasets[name] = TokenizedEditDataset.from_edits(list(dataset.all_edits())[:10])
 
 model = CoeditorModel.from_code_t5()
-model.skip_unchanged = True
+model.skip_unchanged = skip_unchanged
+
+if os.getenv("CUDA_VISIBLE_DEVICES") is None:
+    warnings.warn(
+        "CUDA_VISIBLE_DEVICES not set, using 0. Note that "
+        "the Huggingface Trainer will use all visible GPUs for training."
+    )
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
 wandb.init(dir="../wandb", project=project, name=model_name)
 
-model.train_on_data(model_name, train_data, eval_data, train_args, eval_args)
+with timed_action("Training"):
+    model.train_on_data(
+        model_name, datasets["train"], datasets["valid"], train_args, eval_args
+    )
 
-eval_result = model.eval_on_data(eval_data, eval_args)
+with timed_action("Evaluating"):
+    eval_result = model.eval_on_data(datasets["test"], eval_args)
+
 eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
 wandb.log(eval_dict)
