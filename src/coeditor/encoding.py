@@ -185,7 +185,7 @@ def change_to_input_output(change: Modified[str]) -> tuple[TokenSeq, TokenSeq]:
 
 
 def inline_output_tokens(
-    input: TokenSeq, output: TokenSeq, leave_unpredicted=True
+    input: TokenSeq, output: TokenSeq, leave_unpredicted=False
 ) -> TokenSeq:
     """Inline CodeT5's output tokens into its input tokens."""
     out_map = output_ids_as_seqs(output)

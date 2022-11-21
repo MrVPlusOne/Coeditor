@@ -57,7 +57,18 @@ class EvalArgs:
 
 @dataclass
 class CoeditorModel:
+    """
+    args:
+    - skip_unchanged: whether to skip <extra_id>s that are not followed by a
+    change in the output sequence.
+    """
+
     codet5: CodeT5Model
+    skip_unchanged: bool = False
+
+    @property
+    def coeditor_args(self):
+        return {"skip_unchanged": self.skip_unchanged}
 
     @torch.autocast("cuda")
     def predict(
@@ -79,6 +90,7 @@ class CoeditorModel:
         return output.tolist()
 
     def save_pretrained(self, path: Path):
+        pickle_dump(path / "coeditor_args.pkl", self.coeditor_args)
         self.codet5.save_pretrained(path)
 
     def to(self, device):
@@ -105,6 +117,7 @@ class CoeditorModel:
         eval_loader = edits_to_dataloader(
             [e.truncate_ctx(eval_args.window) for e in eval_edits],
             eval_args.max_batch_tokens,
+            skip_unchanged=self.skip_unchanged,
             shuffle=True,
         )
         return eval_label_likelihood(self, eval_loader)
@@ -113,7 +126,9 @@ class CoeditorModel:
     def load_pretrained(path: Path):
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
-        return CoeditorModel(codet5)
+        args: dict = pickle_load(path / "coeditor_args.pkl")
+        skip_unchanged = args.get("skip_unchanged", False)
+        return CoeditorModel(codet5, skip_unchanged=skip_unchanged)
 
     @staticmethod
     def from_code_t5(use_small_model=False):
@@ -145,11 +160,13 @@ def train_coeditor_model(
     train_lodader = edits_to_dataloader(
         [e.truncate_ctx(train_args.window) for e in train_edits],
         train_args.max_batch_tokens,
+        skip_unchanged=model.skip_unchanged,
         shuffle=True,
     )
     eval_loader = edits_to_dataloader(
         [e.truncate_ctx(eval_args.window) for e in eval_edits],
         eval_args.max_batch_tokens,
+        skip_unchanged=model.skip_unchanged,
         shuffle=True,
     )
 
@@ -274,18 +291,27 @@ def drop_empty_labels(x: TokenSeq) -> TokenSeq:
     return new_seq
 
 
-def edits_to_dataset(edits: Sequence[TokenizedEdit]) -> Dataset:
+def edits_to_dataset(edits: Sequence[TokenizedEdit], skip_unchanged: bool) -> Dataset:
+    def get_labels(e: TokenizedEdit):
+        labels = e.output_tks
+        if skip_unchanged:
+            labels = drop_empty_labels(labels)
+        return wrap_bos(labels)
+
     return Dataset.from_dict(
         {
             "input_ids": [e.input_tks for e in edits],
-            "labels": [wrap_bos(drop_empty_labels(e.output_tks)) for e in edits],
+            "labels": [get_labels(e) for e in edits],
         }
     )
 
 
 def edits_to_dataloader(
-    edits: Sequence[TokenizedEdit], max_batch_tokens: int, shuffle: bool = False
+    edits: Sequence[TokenizedEdit],
+    max_batch_tokens: int,
+    skip_unchanged: bool,
+    shuffle: bool = False,
 ) -> DataLoader:
-    dataset = edits_to_dataset(edits)
+    dataset = edits_to_dataset(edits, skip_unchanged)
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
     return dynamic_dataloader(dataset, max_batch_tokens, data_collator, shuffle=shuffle)
