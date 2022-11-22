@@ -156,7 +156,7 @@ def train_coeditor_model(
     eval_edits = list(eval_data.all_edits())
     if train_args.quicktest:
         train_edits = train_edits[:10]
-        eval_edits = eval_edits[:10]
+        eval_edits = eval_edits[:2]
 
     train_lodader = edits_to_dataloader(
         [e.truncate_ctx(train_args.window) for e in train_edits],
@@ -178,7 +178,7 @@ def train_coeditor_model(
         def get_eval_dataloader(self, eval_dataset):
             return eval_loader
 
-    eval_interval = 5 if train_args.quicktest else 500
+    eval_interval = 5 * len(eval_loader)
     trainer_args = Seq2SeqTrainingArguments(
         output_dir=str(train_dir),
         overwrite_output_dir=True,
@@ -298,12 +298,19 @@ def drop_empty_labels(x: TokenSeq) -> TokenSeq:
     return new_seq
 
 
-def edits_to_dataset(edits: Sequence[TokenizedEdit], skip_unchanged: bool) -> Dataset:
+def edits_to_dataset(
+    edits: Sequence[TokenizedEdit],
+    skip_unchanged: bool,
+    max_label_tks: int,
+) -> Dataset:
     def get_labels(e: TokenizedEdit):
         labels = e.output_tks
         if skip_unchanged:
             labels = drop_empty_labels(labels)
-        return wrap_bos(labels)
+        labels = wrap_bos(labels)
+        if len(labels) > max_label_tks:
+            labels = labels[:max_label_tks]
+        return labels
 
     return Dataset.from_dict(
         {
@@ -317,8 +324,9 @@ def edits_to_dataloader(
     edits: Sequence[TokenizedEdit],
     max_batch_tokens: int,
     skip_unchanged: bool,
+    max_label_tks: int = 512,
     shuffle: bool = False,
 ) -> DataLoader:
-    dataset = edits_to_dataset(edits, skip_unchanged)
+    dataset = edits_to_dataset(edits, skip_unchanged, max_label_tks)
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
     return dynamic_dataloader(dataset, max_batch_tokens, data_collator, shuffle=shuffle)

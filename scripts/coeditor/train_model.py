@@ -20,7 +20,11 @@ train_args = TrainingArgs(
     window=WindowArgs(2048),
     quicktest=False,
 )
-eval_args = EvalArgs(
+valid_args = EvalArgs(
+    max_batch_tokens=4096 * 2,
+    window=WindowArgs(2048),
+)
+test_args = EvalArgs(
     max_batch_tokens=4096 * 2,
     window=WindowArgs(4096),
 )
@@ -56,11 +60,11 @@ wandb.init(dir="../wandb", project=project, name=model_name)
 
 with timed_action("Training"):
     model.train_on_data(
-        model_name, datasets["train"], datasets["valid"], train_args, eval_args
+        model_name, datasets["train"], datasets["valid"], train_args, valid_args
     )
 
 with timed_action("Evaluating"):
-    eval_result = model.eval_on_data(datasets["test"], eval_args)
+    eval_result = model.eval_on_data(datasets["test"], test_args)
 
 eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
 wandb.log(eval_dict)

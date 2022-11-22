@@ -9,6 +9,7 @@ from coeditor.encoding import (
     encode_basic,
 )
 from spot.data import output_ids_as_seqs
+from spot.utils import scalar_stats
 from .common import *
 from coeditor.history import (
     CommitInfo,
@@ -51,6 +52,16 @@ class TokenizedEditDataset:
                 }
             )
         return pd.DataFrame(rows)
+
+    def overall_stats(self) -> dict:
+        input_sizes = [len(e.input_tks) for e in self.all_edits()]
+        output_sizes = [len(e.output_tks) for e in self.all_edits()]
+        return {
+            "n_projects": len(self.project2edits),
+            "n_edits": len(input_sizes),
+            "input_size": scalar_stats(input_sizes),
+            "output_size": scalar_stats(output_sizes),
+        }
 
     def all_edits(self) -> Iterable[TokenizedEdit]:
         for xs in self.project2edits.values():
