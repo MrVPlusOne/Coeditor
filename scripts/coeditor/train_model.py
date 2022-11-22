@@ -5,16 +5,15 @@ import wandb
 from coeditor.common import *
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import WindowArgs
-from coeditor.model import (
-    CoeditorModel,
-    TrainingArgs,
-    EvalArgs,
-)
+from coeditor.model import *
 
 os.chdir(proj_root())
 
 data_name = "medium"
-skip_unchanged = False
+model_variant = "-shuffle"
+data_args = DataTransformArgs(
+    shuffle_extra_ids=True,
+)
 train_args = TrainingArgs(
     max_batch_tokens=4096,
     window=WindowArgs(2048),
@@ -30,8 +29,7 @@ test_args = EvalArgs(
 )
 
 model_name = f"coeditor-{data_name}"
-if skip_unchanged:
-    model_name += "-skip"
+model_name += model_variant
 if train_args.quicktest:
     model_name = "quicktest-" + model_name
 
@@ -45,8 +43,7 @@ if train_args.quicktest:
     for name, dataset in datasets.items():
         datasets[name] = TokenizedEditDataset.from_edits(list(dataset.all_edits())[:10])
 
-model = CoeditorModel.from_code_t5()
-model.skip_unchanged = skip_unchanged
+model = CoeditorModel.from_code_t5(data_args)
 
 if os.getenv("CUDA_VISIBLE_DEVICES") is None:
     warnings.warn(
@@ -55,8 +52,19 @@ if os.getenv("CUDA_VISIBLE_DEVICES") is None:
     )
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+config_dict = {
+    k: get_modified_args(v)
+    for k, v in {
+        "data": data_args,
+        "train": train_args,
+        "valid": valid_args,
+        "test": test_args,
+    }.items()
+}
+
 project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
-wandb.init(dir="../wandb", project=project, name=model_name)
+wandb.init(dir="../wandb", project=project, name=model_name, config=config_dict)
+
 
 with timed_action("Training"):
     model.train_on_data(

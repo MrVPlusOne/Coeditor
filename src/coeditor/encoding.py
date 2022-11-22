@@ -4,6 +4,8 @@ import asyncio
 from concurrent.futures import ProcessPoolExecutor
 import difflib
 import copy
+import random
+from spot.static_analysis import StubGenerator, show_element
 import spot.utils
 from spot.data import output_ids_as_seqs
 from .common import *
@@ -313,19 +315,21 @@ class WindowArgs:
 
 @dataclass
 class TokenizedEdit:
-    path: ProjectPath
     input_tks: TokenSeq
     output_tks: TokenSeq
+    path: ProjectPath
 
     def truncate_ctx(
         self,
         args: WindowArgs,
     ) -> "TokenizedEdit":
         return TokenizedEdit(
-            self.path, args.truncate_ctx(self.input_tks), self.output_tks
+            args.truncate_ctx(self.input_tks),
+            self.output_tks,
+            path=self.path,
         )
 
-    def as_change(self, main_code_only: bool) -> Modified[str]:
+    def as_change(self, main_code_only: bool = False) -> Modified[str]:
         input_tks = self.get_main_tks() if main_code_only else self.input_tks
         inlined = inline_output_tokens(input_tks, self.output_tks)
         return tokens_to_change(inlined)
@@ -378,46 +382,50 @@ class TokenizedEdit:
 class FileLevelEditTokenizer:
     window: WindowArgs
 
-    def tokenize_edit(
+    def tokenize_pedit(
+        self,
+        pedit: ProjectEdit,
+    ) -> Iterable[TokenizedEdit]:
+        for me in pedit.changes.values():
+            yield from self.tokenize_medit(me)
+
+    def tokenize_medit(
         self,
         medit: ModuleEdit,
-    ) -> list[TokenizedEdit]:
-        modifications = medit.modified
-        edits = list[TokenizedEdit]()
+    ) -> Iterable[TokenizedEdit]:
+        modifications = medit.modified_functions()
         if not modifications:
-            return edits
+            return
         mod_before = medit.before
         code_before = mod_before.code.split("\n")
         mod_after = medit.after
         code_after = mod_after.code.split("\n")
         mod_name = mod_after.name
-        max_ctx_lines = self.window.max_window_size // 2
+        ctx_lines = self.window.max_window_size // 2
 
         for path, c in modifications.items():
             after_range = mod_after.location_map[c.after.tree]
             after_start = after_range.start.line - 1
-            after_end = after_range.end.line - 1
+            after_end = after_range.end.line
             before_range = mod_before.location_map[c.before.tree]
             before_start = before_range.start.line - 1
-            before_end = before_range.end.line - 1
+            before_end = before_range.end.line
 
-            code_main_before = "\n".join(code_before[before_start : before_end + 1])
-            code_main_after = "\n".join(code_after[after_start : after_end + 1])
+            code_main_before = "\n".join(code_before[before_start:before_end])
+            code_main_after = "\n".join(code_after[after_start:after_end])
 
             code_above_after = "\n".join(
-                code_after[max(0, after_start - max_ctx_lines) : after_start]
+                code_after[max(0, after_start - ctx_lines) : after_start]
             )
             code_below_after = "\n".join(
-                code_after[after_end : min(len(code_after), after_end + max_ctx_lines)]
+                code_after[after_end : min(len(code_after), after_end + ctx_lines)]
             )
 
             code_above_before = "\n".join(
-                code_before[max(0, before_start - max_ctx_lines) : before_start]
+                code_before[max(0, before_start - ctx_lines) : before_start]
             )
             code_below_before = "\n".join(
-                code_before[
-                    before_end : min(len(code_before), before_end + max_ctx_lines)
-                ]
+                code_before[before_end : min(len(code_before), before_end + ctx_lines)]
             )
 
             above_change = Modified(code_above_before, code_above_after)
@@ -429,7 +437,7 @@ class FileLevelEditTokenizer:
                 Modified(code_main_before, code_main_after)
             )
 
-            ex = TokenizedEdit(ProjectPath(mod_name, path), [], [])
+            ex = TokenizedEdit([], [], path=ProjectPath(mod_name, path))
             ex.input_tks.extend(above_tks)
             ex.input_tks.append(Newline_id)
             ex.input_tks.extend(input)
@@ -437,8 +445,7 @@ class FileLevelEditTokenizer:
             ex.output_tks = output
             ex.input_tks.extend(below_tks)
             ex = ex.truncate_ctx(self.window)
-            edits.append(ex)
-        return edits
+            yield ex
 
 
 @dataclass
@@ -446,11 +453,94 @@ class ProjectLevelEditTokenizer:
     window: WindowArgs
     collapse_unchanged: bool = True
 
-    def tokenize_edit(
+    def tokenize_pedit(
         self,
         pedit: ProjectEdit,
-    ) -> list[TokenizedEdit]:
-        edits = list[TokenizedEdit]()
-        for medit in pedit.edits:
-            edits.extend(self.tokenize_edit(medit))
-        return edits
+    ) -> Iterable[TokenizedEdit]:
+        for mname, medit in pedit.changes.items():
+            mod_fs = medit.modified_functions()
+            if not mod_fs:
+                continue
+            elems_encoding = self.encode_module_elems(medit)
+            sorted_elems = list(elems_encoding)
+
+            for i, path in enumerate(sorted_elems):
+                if path not in mod_fs:
+                    continue
+                c = mod_fs[path]
+                main_change = c.map(lambda x: x.code)
+                main_tks, output_tks = change_to_input_output(main_change)
+                left_ctx = join_list(
+                    [elems_encoding[p] for p in sorted_elems[:i]], sep=Newline_id
+                )
+                right_ctx = join_list(
+                    [elems_encoding[p] for p in sorted_elems[i + 1 :]], sep=Newline_id
+                )
+                input_tks = (
+                    left_ctx + [Newline_id] + main_tks + [Newline_id] + right_ctx
+                )
+                ex = TokenizedEdit(input_tks, output_tks, path=ProjectPath(mname, path))
+                ex = ex.truncate_ctx(self.window)
+                yield ex
+
+    def encode_module_elems(
+        self,
+        medit: ModuleEdit,
+    ) -> dict[ElemPath, TokenSeq]:
+        after_elems = {e.path.path: e for e in medit.after.all_elements()}
+        after_classes = {c.path.path: c for c in medit.after.classes}
+
+        elems_encoding = dict[ElemPath, TokenSeq]()
+        for path in medit.sorted_elems(include_classes=True):
+            if path in after_classes:
+                c = after_classes[path]
+                cls = c.tree.with_changes(body=cst.IndentedBlock([]))
+                # drop the `pass` part
+                cls_lines = show_element(cls, indent=False).split("\n")[:-1]
+                header_tks = encode_basic("\n".join(cls_lines))
+                elems_encoding[c.path.path] = header_tks
+            elif path in medit.modified:
+                elems_encoding[path] = change_to_tokens(
+                    medit.modified[path].map(lambda e: e.code)
+                )
+            elif path in medit.deleted:
+                change = medit.deleted[path].map(lambda e: e.code)
+                elems_encoding[path] = change_to_tokens(change)
+            elif path in medit.added:
+                change = medit.added[path].map(lambda e: e.code)
+                elems_encoding[path] = change_to_tokens(change)
+            else:
+                e = after_elems[path]
+                if self.collapse_unchanged:
+                    tree = collapse_code(e.tree)
+                    shorter_code = show_element(tree, e.in_class)
+                    elems_encoding[path] = encode_basic(shorter_code)
+                else:
+                    elems_encoding[path] = encode_basic(e.code)
+
+        return elems_encoding
+
+
+def collapse_code(tree: cst.CSTNode) -> cst.CSTNode:
+    class Transformer(cst.CSTTransformer):
+        OMIT = cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
+
+        def leave_FunctionDef(
+            self, original_node: "cst.FunctionDef", updated_node: "cst.FunctionDef"
+        ):
+            return updated_node.with_changes(body=self.OMIT)
+
+    out = tree.visit(Transformer())
+    assert isinstance(out, cst.CSTNode)
+    return out
+
+
+__ordered_extra_ids = [get_extra_id(i) for i in range(100)]
+__random_extra_ids = [get_extra_id(i) for i in range(100)]
+
+
+def random_extra_id_map() -> dict[Token, Token]:
+    """Uniformly randomly map extra_ids to other extra_ids (1-to-1). This can be
+    used to improve the training such that every extra_id appears with the same frequency."""
+    random.shuffle(__random_extra_ids)
+    return dict(zip(__ordered_extra_ids, __random_extra_ids))

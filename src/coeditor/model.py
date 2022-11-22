@@ -9,6 +9,7 @@ from coeditor.encoding import (
     is_extra_id,
     BOS_id,
     EOS_id,
+    random_extra_id_map,
 )
 from spot.data import output_ids_as_seqs
 from spot.model import dynamic_dataloader, DataLoader
@@ -32,6 +33,7 @@ CodeT5Model = T5ForConditionalGeneration
 class DecodingArgs:
     base_tokens: int = 128
     tokens_per_line: int = 16
+    max_output_tks: int = 512
     do_sample: bool = False
     top_p: float = 0.9
     num_beams: Optional[int] = 8
@@ -62,11 +64,7 @@ class CoeditorModel:
     """
 
     codet5: CodeT5Model
-    skip_unchanged: bool = False
-
-    @property
-    def coeditor_args(self):
-        return {"skip_unchanged": self.skip_unchanged}
+    data_args: "DataTransformArgs"
 
     @torch.autocast("cuda")
     def predict(
@@ -77,6 +75,7 @@ class CoeditorModel:
         x = torch.tensor([input_tks]).to(self.codet5.device)
         n_lines = sum(is_extra_id(tk) for tk in input_tks)
         max_length = decode_args.base_tokens + decode_args.tokens_per_line * n_lines
+        max_length = min(max_length, decode_args.max_output_tks)
         output = self.codet5.generate(
             x,
             max_length,
@@ -88,7 +87,7 @@ class CoeditorModel:
         return output.tolist()
 
     def save_pretrained(self, path: Path):
-        pickle_dump(path / "coeditor_args.pkl", self.coeditor_args)
+        pickle_dump(path / "data_transform_args.pkl", self.data_args)
         self.codet5.save_pretrained(path)
 
     def to(self, device):
@@ -115,7 +114,7 @@ class CoeditorModel:
         eval_loader = edits_to_dataloader(
             [e.truncate_ctx(eval_args.window) for e in eval_edits],
             eval_args.max_batch_tokens,
-            skip_unchanged=self.skip_unchanged,
+            self.data_args,
             shuffle=True,
         )
         return eval_label_likelihood(self, eval_loader)
@@ -124,22 +123,21 @@ class CoeditorModel:
     def load_pretrained(path: Path):
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
-        if (path / "coeditor_args.pkl").exists():
-            args: dict = pickle_load(path / "coeditor_args.pkl")
+        if (path / "data_transform_args.pkl").exists():
+            dargs = pickle_load(path / "data_transform_args.pkl")
         else:
-            args = dict()
-        skip_unchanged = args.get("skip_unchanged", False)
-        return CoeditorModel(codet5, skip_unchanged=skip_unchanged)
+            dargs = DataTransformArgs()
+        return CoeditorModel(codet5, data_args=dargs)
 
     @staticmethod
-    def from_code_t5(use_small_model=False):
+    def from_code_t5(data_args: "DataTransformArgs", use_small_model=False):
         path = (
             "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
         )
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
         codet5.resize_token_embeddings(len(_Tokenizer))
-        return CoeditorModel(codet5)
+        return CoeditorModel(codet5, data_args=data_args)
 
 
 def train_coeditor_model(
@@ -161,13 +159,13 @@ def train_coeditor_model(
     train_lodader = edits_to_dataloader(
         [e.truncate_ctx(train_args.window) for e in train_edits],
         train_args.max_batch_tokens,
-        skip_unchanged=model.skip_unchanged,
+        args=model.data_args,
         shuffle=True,
     )
     eval_loader = edits_to_dataloader(
         [e.truncate_ctx(eval_args.window) for e in eval_edits],
         eval_args.max_batch_tokens,
-        skip_unchanged=model.skip_unchanged,
+        args=model.data_args,
         shuffle=True,
     )
 
@@ -298,24 +296,39 @@ def drop_empty_labels(x: TokenSeq) -> TokenSeq:
     return new_seq
 
 
+@dataclass
+class DataTransformArgs:
+    skip_unchanged: bool = False
+    shuffle_extra_ids: bool = False
+    max_label_tks: int = 512
+
+
 def edits_to_dataset(
     edits: Sequence[TokenizedEdit],
-    skip_unchanged: bool,
-    max_label_tks: int,
+    args: DataTransformArgs,
 ) -> Dataset:
-    def get_labels(e: TokenizedEdit):
+    def process_edit(e: TokenizedEdit):
         labels = e.output_tks
-        if skip_unchanged:
+        if args.skip_unchanged:
             labels = drop_empty_labels(labels)
         labels = wrap_bos(labels)
-        if len(labels) > max_label_tks:
-            labels = labels[:max_label_tks]
-        return labels
+        if len(labels) > args.max_label_tks:
+            labels = labels[: args.max_label_tks]
 
+        input_ids = e.input_tks
+
+        if args.shuffle_extra_ids:
+            id_map = random_extra_id_map()
+            input_ids = [id_map.get(tk, tk) for tk in input_ids]
+            labels = [id_map.get(tk, tk) for tk in labels]
+
+        return input_ids, labels
+
+    processed = [process_edit(e) for e in edits]
     return Dataset.from_dict(
         {
-            "input_ids": [e.input_tks for e in edits],
-            "labels": [get_labels(e) for e in edits],
+            "input_ids": [x[0] for x in processed],
+            "labels": [x[1] for x in processed],
         }
     )
 
@@ -323,10 +336,9 @@ def edits_to_dataset(
 def edits_to_dataloader(
     edits: Sequence[TokenizedEdit],
     max_batch_tokens: int,
-    skip_unchanged: bool,
-    max_label_tks: int = 512,
+    args: DataTransformArgs,
     shuffle: bool = False,
 ) -> DataLoader:
-    dataset = edits_to_dataset(edits, skip_unchanged, max_label_tks)
+    dataset = edits_to_dataset(edits, args)
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
     return dynamic_dataloader(dataset, max_batch_tokens, data_collator, shuffle=shuffle)

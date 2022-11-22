@@ -1,6 +1,7 @@
 import numpy as np
 from coeditor.encoding import (
     FileLevelEditTokenizer,
+    ProjectLevelEditTokenizer,
     TokenizedEdit,
     Newline_id,
     Add_id,
@@ -74,19 +75,20 @@ class TokenizedEditDataset:
         return TokenizedEditDataset({path: list(edits)})
 
 
-def _process_commits(root: Path, commits: Sequence[CommitInfo], window: WindowArgs):
+EditEncoder = FileLevelEditTokenizer | ProjectLevelEditTokenizer
+
+
+def _process_commits(root: Path, commits: Sequence[CommitInfo], encoder: EditEncoder):
     edits = edits_from_commit_history(root, commits)
-    encoder = FileLevelEditTokenizer(window)
     tk_edits = list[TokenizedEdit]()
     for pe in edits:
-        for me in pe.changes.values():
-            tk_edits.extend(encoder.tokenize_edit(me))
+        tk_edits.extend(encoder.tokenize_pedit(pe))
     return tk_edits
 
 
 def dataset_from_projects(
     project_roots: Sequence[Path],
-    window: WindowArgs,
+    encoder: EditEncoder,
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
 ) -> "TokenizedEditDataset":
@@ -120,7 +122,7 @@ def dataset_from_projects(
         _process_commits,
         roots,
         chunked_histories,
-        [window] * len(roots),
+        [encoder] * len(roots),
         desc="Create tokenized edits",
         max_workers=workers,
         tqdm_args={"unit": "chunk"},
@@ -138,7 +140,7 @@ def dataset_from_projects(
 
 def datasets_from_repos(
     repos_root: Path,
-    window: WindowArgs,
+    encoder: EditEncoder,
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
 ) -> dict[str, TokenizedEditDataset]:
@@ -155,7 +157,7 @@ def datasets_from_repos(
 
     dataset = dataset_from_projects(
         join_list(projects.values()),
-        window=window,
+        encoder=encoder,
         max_history_per_repo=max_history_per_repo,
         workers=workers,
     )
@@ -205,3 +207,14 @@ def is_repetitive_edit(edit: TokenizedEdit, blue_threshold=0.8) -> bool:
         return all(has_match(seg) for seg in out_additions)
     else:
         return False
+
+
+def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path):
+    for name, dataset in datasets.items():
+        pickle_dump(save_dir / f"{name}.pkl", dataset)
+
+
+def load_datasets(
+    save_dir: Path, splits=("test", "valid", "train")
+) -> dict[str, TokenizedEditDataset]:
+    return {name: pickle_load(save_dir / f"{name}.pkl") for name in splits}

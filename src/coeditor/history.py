@@ -12,6 +12,7 @@ from spot.static_analysis import (
     PythonVariable,
     UsageAnalysis,
     remove_comments,
+    CodePosition,
 )
 from spot.utils import show_expr
 from .common import *
@@ -141,6 +142,44 @@ class ModuleEdit:
     @property
     def is_empty(self) -> bool:
         return len(self.all_changes) == 0
+
+    def modified_functions(self) -> dict[ElemPath, Modified[PythonFunction]]:
+        return {
+            k: cast(Modified[PythonFunction], change)
+            for k, change in self.modified.items()
+            if isinstance(change.before, PythonFunction)
+            and isinstance(change.after, PythonFunction)
+        }
+
+    def sorted_elems(self, include_classes=True) -> list[ElemPath]:
+        """Sort the elements from both before and after the edit into a single ordering."""
+
+        def to_tuple(pos: CodePosition):
+            return (pos.line, pos.column)
+
+        after_pos = dict[ElemPath, tuple[int, int]]()
+        if include_classes:
+            for c in self.after.classes:
+                path = c.path.path
+                after_pos[path] = to_tuple(self.after.location_map[c.tree].start)
+        for e in self.after.all_elements():
+            path = e.path.path
+            after_pos[path] = to_tuple(self.after.location_map[e.tree].start)
+
+        before_elems = [e.path.path for e in self.before.all_elements()]
+        to_prev_elem = {
+            before_elems[i]: (before_elems[i - 1] if i > 0 else None)
+            for i in range(len(before_elems))
+        }
+        for path in self.deleted:
+            prev = to_prev_elem[path]
+            if prev is None:
+                after_pos[path] = (0, 0)
+            else:
+                after_pos[path] = after_pos[prev]
+        sorted = list(after_pos)
+        sorted.sort(key=lambda path: after_pos[path])
+        return sorted
 
     @staticmethod
     def from_modules(before: PythonModule, after: PythonModule):

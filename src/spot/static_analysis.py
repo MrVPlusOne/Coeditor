@@ -158,7 +158,7 @@ class PythonFunction:
 
     @cached_property
     def code(self) -> str:
-        return show_expr(self.tree, quoted=False).strip()
+        return show_element(self.tree, self.in_class)
 
     @property
     def in_class(self) -> bool:
@@ -224,7 +224,11 @@ class PythonVariable:
 
     @cached_property
     def code(self) -> str:
-        return show_expr(self.tree, quoted=False).strip()
+        if self.assignments:
+            return "\n".join(show_element(a, self.in_class) for a in self.assignments)
+        else:
+            stmt = cst.AnnAssign(self.tree, cst.Annotation(cst.Ellipsis()))
+            return show_element(stmt, self.in_class)
 
     @property
     def in_class(self) -> bool:
@@ -246,6 +250,13 @@ class PythonVariable:
 
 
 PythonElem = PythonFunction | PythonVariable
+
+
+def show_element(tree: cst.CSTNode, indent: bool) -> str:
+    code = show_expr(tree, quoted=False).strip("\n")
+    if indent:
+        code = textwrap.indent(code, "    ")
+    return code
 
 
 @dataclass

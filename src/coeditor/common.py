@@ -22,6 +22,7 @@ from spot.utils import (
     pickle_dump,
     as_any,
     not_none,
+    get_modified_args,
 )
 from IPython.display import display, HTML
 import html
@@ -34,7 +35,8 @@ import warnings
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
 
-TokenSeq = list[int]
+Token = int
+TokenSeq = list[Token]
 
 
 def proj_root() -> Path:
