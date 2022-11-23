@@ -88,7 +88,7 @@ with timed_action("Training"):
     )
 
 with timed_action("Evaluating"):
-    eval_result = model.eval_on_data(datasets["test"], test_args)
+    eval_result = model.eval_loss_on_data(datasets["test"], test_args)
 
 eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
 wandb.log(eval_dict)

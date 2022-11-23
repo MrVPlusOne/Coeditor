@@ -1,4 +1,5 @@
 from dataclasses import field
+import shutil
 import torch
 
 from coeditor.dataset import TokenizedEditDataset
@@ -13,6 +14,7 @@ from coeditor.encoding import (
 )
 from spot.data import output_ids_as_seqs
 from spot.model import dynamic_dataloader, DataLoader
+from spot.static_analysis import ProjectPath
 from .common import *
 from transformers.models.t5.modeling_t5 import (
     T5ForConditionalGeneration,
@@ -86,6 +88,64 @@ class CoeditorModel:
         )[0]
         return output.tolist()
 
+    def predict_on_batch(
+        self,
+        batch: dict,
+        decode_args: DecodingArgs,
+    ) -> list[TokenSeq]:
+        x = batch["input_ids"].to(self.codet5.device)
+        output = self.codet5.generate(
+            x,
+            max_length=decode_args.max_output_tks,
+            do_sample=decode_args.do_sample,
+            top_p=decode_args.top_p,
+            num_beams=decode_args.num_beams,
+            length_penalty=decode_args.length_penalty,
+        )
+        return [y.tolist() for y in output]
+
+    @torch.autocast("cuda")
+    def predict_on_loader(
+        self,
+        eval_loader: DataLoader,
+        dec_args: DecodingArgs,
+    ) -> dict[int, TokenSeq]:
+        self.codet5.eval()
+        predictions = dict[int, TokenSeq]()
+        for batch in tqdm(eval_loader, desc="decoding", unit="batch"):
+            ex_ids: list[int] = batch["ex_ids"].tolist()
+            preds = self.predict_on_batch(batch, decode_args=dec_args)
+            for ex_id, pred in zip(ex_ids, preds):
+                predictions[ex_id] = pred
+        return predictions
+
+    def predict_on_data(
+        self,
+        eval_data: TokenizedEditDataset,
+        eval_args: "EvalArgs",
+        dec_args: DecodingArgs,
+    ) -> "DatasetDecodingResult":
+        eval_edits = list(eval_data.all_edits())
+        dataset = edits_to_dataset(
+            [e.truncate_ctx(eval_args.window) for e in eval_edits],
+            self.data_args,
+            add_ex_id=True,
+        )
+        data_collator = DataCollatorForSeq2Seq(_Tokenizer)
+        loader = dynamic_dataloader(
+            dataset, eval_args.max_batch_tokens, data_collator, shuffle=True
+        )
+        pred_dict = self.predict_on_loader(loader, dec_args)
+        pred_seq = [pred_dict[i] for i in range(len(eval_edits))]
+
+        return DatasetDecodingResult(
+            eval_args,
+            dec_args,
+            input_ids=dataset["input_ids"],
+            labels=dataset["labels"],
+            predictions=pred_seq,
+        )
+
     def save_pretrained(self, path: Path):
         pickle_dump(path / "data_transform_args.pkl", self.data_args)
         self.codet5.save_pretrained(path)
@@ -105,7 +165,7 @@ class CoeditorModel:
             self, training_name, train_data, eval_data, train_args, eval_args
         )
 
-    def eval_on_data(
+    def eval_loss_on_data(
         self,
         eval_data: TokenizedEditDataset,
         eval_args: "EvalArgs",
@@ -138,6 +198,60 @@ class CoeditorModel:
         assert isinstance(codet5, CodeT5Model)
         codet5.resize_token_embeddings(len(_Tokenizer))
         return CoeditorModel(codet5, data_args=data_args)
+
+
+@dataclass
+class DatasetDecodingResult:
+    eval_args: "EvalArgs"
+    dec_args: DecodingArgs
+    input_ids: list[TokenSeq]
+    labels: list[TokenSeq]
+    predictions: list[TokenSeq]
+
+    def __post_init__(self):
+        assert_eq(len(self.input_ids), len(self.predictions), len(self.labels))
+
+    def edits(self):
+        for inputs, labels in zip(self.input_ids, self.labels):
+            yield TokenizedEdit(inputs, labels, ProjectPath("UNKNOWN", ""))
+
+    def exact_match_accuracy(self) -> WeightedSum[int, int]:
+        exact_match = WeightedSum(0, 0)
+        for pred, edit in zip(self.predictions, self.edits()):
+            true_code = edit.as_change(True).after
+            pred_code = (
+                TokenizedEdit(edit.input_tks, pred, edit.path).as_change(True).after
+            )
+            is_correct = normalize_code_by_ast(true_code) == normalize_code_by_ast(
+                pred_code
+            )
+            exact_match += WeightedSum(int(is_correct), 1)
+        return exact_match
+
+    def save_examples_to_dir(
+        self, out_dir: Path, ex_ids: Sequence[int], ctx_tks: int = 2000
+    ):
+        shutil.rmtree(out_dir, ignore_errors=True)
+        (out_dir / "correct").mkdir(parents=True, exist_ok=True)
+        (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
+
+        edits = list(self.edits())
+        preds = self.predictions
+        for ex_id in tqdm(ex_ids, desc="saving examples"):
+            edit = edits[ex_id]
+            pred_tks = preds[ex_id]
+            true_code = edit.as_change(True).after
+            pred_code = (
+                TokenizedEdit(edit.input_tks, pred_tks, edit.path).as_change(True).after
+            )
+            is_correct = normalize_code_by_ast(true_code) == normalize_code_by_ast(
+                pred_code
+            )
+            compare_str = edit.show_prediction(pred_tks, ctx_tks=ctx_tks)
+            out_file = (
+                out_dir / ("correct" if is_correct else "incorrect") / f"ex-{ex_id}.txt"
+            )
+            out_file.write_text(compare_str)
 
 
 def train_coeditor_model(
@@ -214,11 +328,6 @@ def eval_label_likelihood(
     model: CoeditorModel,
     eval_loader: DataLoader,
 ):
-    """
-    Compute the perplexity of the model on the eval dataset.
-    Note that special tokens like <extra_id> and <s> are excluded
-    from the perplexity computation.
-    """
     core = model.codet5
     core.eval()
     loss_per_ex = WeightedSum(0.0, 0)
@@ -306,6 +415,7 @@ class DataTransformArgs:
 def edits_to_dataset(
     edits: Sequence[TokenizedEdit],
     args: DataTransformArgs,
+    add_ex_id: bool = False,
 ) -> Dataset:
     def process_edit(e: TokenizedEdit):
         labels = e.output_tks
@@ -325,20 +435,22 @@ def edits_to_dataset(
         return input_ids, labels
 
     processed = [process_edit(e) for e in edits]
-    return Dataset.from_dict(
-        {
-            "input_ids": [x[0] for x in processed],
-            "labels": [x[1] for x in processed],
-        }
-    )
+    d: dict[str, Any] = {
+        "input_ids": [x[0] for x in processed],
+        "labels": [x[1] for x in processed],
+    }
+    if add_ex_id:
+        d["ex_ids"] = list(range(len(edits)))
+    return Dataset.from_dict(d)
 
 
 def edits_to_dataloader(
     edits: Sequence[TokenizedEdit],
     max_batch_tokens: int,
     args: DataTransformArgs,
+    add_ex_id: bool = False,
     shuffle: bool = False,
 ) -> DataLoader:
-    dataset = edits_to_dataset(edits, args)
+    dataset = edits_to_dataset(edits, args, add_ex_id)
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
     return dynamic_dataloader(dataset, max_batch_tokens, data_collator, shuffle=shuffle)

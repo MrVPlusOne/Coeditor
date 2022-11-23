@@ -1,5 +1,6 @@
 import numpy as np
 from coeditor.encoding import (
+    Del_id,
     FileLevelEditTokenizer,
     ProjectLevelEditTokenizer,
     TokenizedEdit,
@@ -177,8 +178,8 @@ def is_repetitive_edit(edit: TokenizedEdit, blue_threshold=0.8) -> bool:
     """Check if all additions in the output_tokens can be matched to
     an addition in the input_tokens with a BLEU score above the threshold."""
 
-    def get_addtion(tks):
-        if tks and tks[0] == Add_id:
+    def get_changes(tks, key_tk: Token):
+        if tks and tks[0] == key_tk:
             s = decode_tokens(tks[1:])
             s.strip()
             return encode_basic(s)
@@ -186,26 +187,34 @@ def is_repetitive_edit(edit: TokenizedEdit, blue_threshold=0.8) -> bool:
             return []
 
     ctx_lines = split_list(edit.input_tks, Newline_id)
-    ctx_addtions = [tks for l in ctx_lines if (tks := get_addtion(l))]
+    main_lines = output_ids_as_seqs(edit.input_tks)
+    ctx_addtions = [tks for l in ctx_lines if (tks := get_changes(l, Add_id))]
+    ctx_deletions = [tks for l in ctx_lines if (tks := get_changes(l, Del_id))]
 
-    def has_match(line):
+    def has_match(line, line_key: Token):
         if line:
-            return any(
-                as_any(sentence_bleu([ref], line)) > blue_threshold
-                for ref in ctx_addtions
-            )
+            if line[0] == Add_id:
+                added = line[1:]
+                return any(
+                    as_any(sentence_bleu([ref], added)) > blue_threshold
+                    for ref in ctx_addtions
+                )
+            elif line == [Del_id]:
+                deleted = main_lines[line_key]
+                return any(
+                    as_any(sentence_bleu([ref], deleted)) > blue_threshold
+                    for ref in ctx_deletions
+                )
+            else:
+                raise ValueError(f"Unexpected line: {decode_tokens(line)}")
         else:
             return True
 
-    out_additions = list[TokenSeq]()
-    for seg in output_ids_as_seqs(edit.output_tks).values():
+    for k, seg in output_ids_as_seqs(edit.output_tks).items():
         for line in split_list(seg, Newline_id):
-            if line := get_addtion(line):
-                out_additions.append(line)
-    if out_additions:
-        return all(has_match(seg) for seg in out_additions)
-    else:
-        return False
+            if not has_match(line, k):
+                return False
+    return True
 
 
 def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path):
