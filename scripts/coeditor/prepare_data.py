@@ -7,7 +7,7 @@ os.chdir(proj_root())
 
 dataset_name = "medium"
 # dataset_name = "SPOT"
-file_based = True
+file_based = False
 
 window = WindowArgs(4096)
 if file_based:

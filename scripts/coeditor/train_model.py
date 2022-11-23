@@ -9,8 +9,22 @@ from coeditor.model import *
 
 os.chdir(proj_root())
 
+
+def check_save_dir(model_name: str):
+    to_check = [get_model_dir(b) / model_name for b in [True, False]]
+    exists = [path for path in to_check if path.exists()]
+    if exists:
+        for path in exists:
+            print(f"Path already exists:", path)
+        answer = input("Continue training? (y/n):")
+        if answer.lower().strip() != "y":
+            print("Training aborted.")
+            exit(1)
+
+
 data_name = "medium"
-model_variant = "-shuffle"
+data_dir = get_dataset_dir(data_name) / "tokenized-file_collapsed"
+model_variant = "-collapse-shuffle"
 data_args = DataTransformArgs(
     shuffle_extra_ids=True,
 )
@@ -33,8 +47,23 @@ model_name += model_variant
 if train_args.quicktest:
     model_name = "quicktest-" + model_name
 
-data_dir = get_dataset_dir(data_name) / "tokenized-file_based"
-with timed_action("Loading datasets"):
+if not train_args.quicktest:
+    check_save_dir(model_name)
+
+config_dict = {
+    k: get_modified_args(v)
+    for k, v in {
+        "data": data_args,
+        "train": train_args,
+        "valid": valid_args,
+        "test": test_args,
+    }.items()
+}
+
+project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
+wandb.init(dir="..", project=project, name=model_name, config=config_dict)
+
+with timed_action(f"Loading datasets: {data_dir}"):
     datasets: dict[str, TokenizedEditDataset] = {
         name: pickle_load(data_dir / f"{name}.pkl")
         for name in ["train", "valid", "test"]
@@ -51,19 +80,6 @@ if os.getenv("CUDA_VISIBLE_DEVICES") is None:
         "the Huggingface Trainer will use all visible GPUs for training."
     )
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
-config_dict = {
-    k: get_modified_args(v)
-    for k, v in {
-        "data": data_args,
-        "train": train_args,
-        "valid": valid_args,
-        "test": test_args,
-    }.items()
-}
-
-project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
-wandb.init(dir="../wandb", project=project, name=model_name, config=config_dict)
 
 
 with timed_action("Training"):

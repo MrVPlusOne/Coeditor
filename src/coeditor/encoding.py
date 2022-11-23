@@ -72,19 +72,24 @@ def encode_basic(text: str):
 
 def change_to_tokens(change: Change[str]) -> TokenSeq:
     "Encode a change as a token sequence."
-    c = change.to_modified("")
-    diffs = list(
-        difflib.unified_diff(
-            splitlines(c.before),
-            splitlines(c.after),
-            n=100000,  # don't really have a limit
-            lineterm="",
-        )
-    )[3:]
-    rearrange_diffs_(diffs)
-    if not diffs:
-        # as a special case, `unified_diff` would return an empty when there is no change.
-        diffs = [" " + l for l in splitlines(c.before)]
+    match change:
+        case Modified(before, after):
+            diffs = list(
+                difflib.unified_diff(
+                    splitlines(before),
+                    splitlines(after),
+                    n=100000,  # don't really have a limit
+                    lineterm="",
+                )
+            )[3:]
+            rearrange_diffs_(diffs)
+            if not diffs:
+                # as a special case, `unified_diff` would return an empty when there is no change.
+                diffs = [" " + l for l in splitlines(before)]
+        case Added(after):
+            diffs = ["+" + l for l in splitlines(after)]
+        case Deleted(before):
+            diffs = ["-" + l for l in splitlines(before)]
     return encode_diffs(diffs)
 
 
@@ -345,22 +350,42 @@ class TokenizedEdit:
     def show(self, ctx_tks: int = 500) -> str:
         return self.show_prediction(None, ctx_tks)
 
-    def show_prediction(self, pred_tks: TokenSeq | None = None, ctx_tks: int = 500):
-        def show_extra_tokens(tks: TokenSeq):
+    def show_prediction(self, pred_tks: TokenSeq | None = None, ctx_tks: int = 1000):
+        def show_label(i: int):
+            return f" <{i}>" if i <= 9 else f"<{i}>"
+
+        def show_extra_tokens(tks: TokenSeq, main_tk_lines: dict[Token, TokenSeq]):
             segs = output_ids_as_seqs(tks)
-            return "\n".join(
-                f"{decode_tokens([k])}: {decode_tokens(s)}"
-                for k, s in segs.items()
-                if s
-            )
+            lines = []
+            for k, seg in segs.items():
+                if not seg:
+                    continue  # skip empty lines
+                if seg[-1] == Del_id:
+                    # show the delted line
+                    origin_line = main_tk_lines.get(k, [])
+                    seg = seg + origin_line
+                lines.append(
+                    f"{show_label(id_map[k])}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}"
+                )
+            return "\n".join(lines)
 
         extra_id_poses = [i for i, tk in enumerate(self.input_tks) if is_extra_id(tk)]
         l, r = extra_id_poses[0], extra_id_poses[-1]
         left_ctx = self.input_tks[max(0, l - ctx_tks) : l]
         right_ctx = self.input_tks[r + 1 : min(len(self.input_tks), r + ctx_tks)]
+        main_tks = self.input_tks[l : r + 1]
+
+        main_lines = output_ids_as_seqs(main_tks)
+        id_map = {k: i for i, k in enumerate(main_lines)}
+        new_main_tks = []
+        for tk in main_tks:
+            if is_extra_id(tk):
+                new_main_tks.extend(encode_basic(show_label(id_map[tk])))
+            else:
+                new_main_tks.append(tk)
 
         pred_lines = (
-            ["========Prediction========", f"{show_extra_tokens(pred_tks)}"]
+            ["========Prediction========", f"{show_extra_tokens(pred_tks, main_lines)}"]
             if pred_tks
             else []
         )
@@ -368,10 +393,10 @@ class TokenizedEdit:
             f"========Left Context========",
             decode_tokens(left_ctx),
             "========Ground Truth========",
-            show_extra_tokens(self.output_tks),
+            show_extra_tokens(self.output_tks, main_lines),
             *pred_lines,
             "========Main Code========",
-            decode_tokens(self.input_tks[l : r + 1]),
+            decode_tokens(new_main_tks),
             "========Right Context========",
             decode_tokens(right_ctx),
         ]
@@ -493,30 +518,37 @@ class ProjectLevelEditTokenizer:
         elems_encoding = dict[ElemPath, TokenSeq]()
         for path in medit.sorted_elems(include_classes=True):
             if path in after_classes:
-                c = after_classes[path]
-                cls = c.tree.with_changes(body=cst.IndentedBlock([]))
+                elem = after_classes[path]
+                cls = elem.tree.with_changes(body=cst.IndentedBlock([]))
                 # drop the `pass` part
                 cls_lines = show_element(cls, indent=False).split("\n")[:-1]
                 header_tks = encode_basic("\n".join(cls_lines))
-                elems_encoding[c.path.path] = header_tks
+                elem_tks = [Newline_id] + header_tks
             elif path in medit.modified:
-                elems_encoding[path] = change_to_tokens(
-                    medit.modified[path].map(lambda e: e.code)
-                )
+                mod = medit.modified[path]
+                elem = mod.after
+                elem_tks = change_to_tokens(mod.map(lambda e: e.code))
             elif path in medit.deleted:
-                change = medit.deleted[path].map(lambda e: e.code)
-                elems_encoding[path] = change_to_tokens(change)
+                mod = medit.deleted[path]
+                elem = mod.before
+                change = mod.map(lambda e: e.code)
+                elem_tks = change_to_tokens(change)
             elif path in medit.added:
-                change = medit.added[path].map(lambda e: e.code)
-                elems_encoding[path] = change_to_tokens(change)
+                mod = medit.added[path]
+                elem = mod.after
+                change = mod.map(lambda e: e.code)
+                elem_tks = change_to_tokens(change)
             else:
-                e = after_elems[path]
-                if self.collapse_unchanged:
-                    tree = collapse_code(e.tree)
-                    shorter_code = show_element(tree, e.in_class)
-                    elems_encoding[path] = encode_basic(shorter_code)
+                elem = after_elems[path]
+                if self.collapse_unchanged and isinstance(elem, PythonFunction):
+                    tree = collapse_code(elem.tree)
+                    code = show_element(tree, elem.in_class)
                 else:
-                    elems_encoding[path] = encode_basic(e.code)
+                    code = elem.code
+                elem_tks = encode_basic(code)
+            if isinstance(elem, PythonFunction):
+                elem_tks.append(Newline_id)
+            elems_encoding[path] = elem_tks
 
         return elems_encoding
 

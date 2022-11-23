@@ -227,7 +227,7 @@ class PythonVariable:
         if self.assignments:
             return "\n".join(show_element(a, self.in_class) for a in self.assignments)
         else:
-            stmt = cst.AnnAssign(self.tree, cst.Annotation(cst.Ellipsis()))
+            stmt = cst.AnnAssign(cst.Name(self.name), cst.Annotation(cst.Ellipsis()))
             return show_element(stmt, self.in_class)
 
     @property

@@ -64,9 +64,8 @@ class TokenizedEditDataset:
             "output_size": scalar_stats(output_sizes),
         }
 
-    def all_edits(self) -> Iterable[TokenizedEdit]:
-        for xs in self.project2edits.values():
-            yield from xs
+    def all_edits(self) -> list[TokenizedEdit]:
+        return join_list(self.project2edits.values())
 
     @staticmethod
     def from_edits(
