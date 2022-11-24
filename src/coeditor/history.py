@@ -2,7 +2,7 @@
 
 from spot.static_analysis import (
     ElemPath,
-    ModuleAnlaysis,
+    ModuleAnalysis,
     ModuleName,
     ProjectPath,
     PythonElem,
@@ -516,11 +516,14 @@ def analyze_edits(
 
     timer = TimeLogger()
 
+    if not edits:
+        return []
+
     with timed_action(
         "Performing intial module-level analysis...", silent=silent
     ), timer.timed("ModuleAnlaysis/Initial"):
         module_analysis = {
-            mname: ModuleAnlaysis(m) for mname, m in edits[0].before.modules.items()
+            mname: ModuleAnalysis(m) for mname, m in edits[0].before.modules.items()
         }
 
     def analyze_project_(project: PythonProject) -> UsageAnalysis:
@@ -533,7 +536,7 @@ def analyze_edits(
                 and module_analysis[mname].module.code == module.code
             ):
                 with timer.timed("ModuleAnlaysis/Incremental"):
-                    module_analysis[mname] = ModuleAnlaysis(module)
+                    module_analysis[mname] = ModuleAnalysis(module)
         with timer.timed("UsageAnalysis"):
             return UsageAnalysis(
                 project,

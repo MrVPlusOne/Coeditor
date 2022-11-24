@@ -873,7 +873,7 @@ class UsageAnalysis:
     def __init__(
         self,
         project: PythonProject,
-        mod2analysis: Mapping[ModuleName, "ModuleAnlaysis"] | None = None,
+        mod2analysis: Mapping[ModuleName, "ModuleAnalysis"] | None = None,
         add_override_usages: bool = False,
         add_implicit_rel_imports: bool = False,
     ):
@@ -906,7 +906,7 @@ class UsageAnalysis:
 
         if mod2analysis is None:
             self.mod2analysis = {
-                mname: ModuleAnlaysis(project.modules[mname])
+                mname: ModuleAnalysis(project.modules[mname])
                 for mname in self.sorted_modules
             }
         else:
@@ -1139,7 +1139,7 @@ class UsageAnalysis:
         }
 
 
-class ModuleAnlaysis:
+class ModuleAnalysis:
     module: PythonModule
     node2qnames: dict[cst.CSTNode, Collection[QualifiedName]]
     node2pos: dict[cst.CSTNode, CodeRange]
@@ -1438,6 +1438,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
                 parent_class=self.current_class.path if self.current_class else None,
             )
             self._record_elem(func, node)
+            return False
 
         def leave_FunctionDef(self, node) -> None:
             assert self.visit_stack[-1] == _VisitKind.Function
@@ -1495,7 +1496,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
                     var = PythonVariable(n, cls.path.append(n), cls_path, tree, [])
             if var is not None:
                 self._record_elem(var, node)
-            return None
+            return False
 
         # record global_vars and class attributes
         def visit_Assign(self, node: cst.Assign) -> Optional[bool]:
@@ -1526,6 +1527,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
                         var = PythonVariable(n, cls.path.append(n), cls_path, tree, [])
                 if var is not None:
                     self._record_elem(var, node)
+            return False
 
         def visit_Import(self, node: cst.Import):
             for alias in node.names:
@@ -1533,6 +1535,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
                 for seg in parse_module_path(alias.name, module_name, 0):
                     segs.append(seg)
                     imported_modules.add(".".join(segs))
+            return False
 
         def visit_ImportFrom(self, node: cst.ImportFrom):
             segs = list[str]()
@@ -1547,6 +1550,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
                     for seg in parse_module_path(alias.name, "", 0):
                         posfix.append(seg)
                     imported_modules.add(".".join(posfix))
+            return False
 
     builder = ModuleBuilder()
     wrapper.visit(builder)
@@ -1602,7 +1606,7 @@ class UsageRecorder(cst.CSTVisitor):
         self.parents = list[cst.CSTNode]()
         self.usages = list[tuple[CodeRange, QualifiedName, bool]]()
 
-    def _resolve(self, name: cst.CSTNode):
+    def _resolve(self, name: cst.CSTNode) -> list[QualifiedName]:
         if is_access_chain(name) and name in self.name_mapping:
             srcs = self.name_mapping[name]
             if len(srcs) == 0 and isinstance(name, cst.Name):
