@@ -182,7 +182,11 @@ class ModuleEdit:
         return sorted
 
     @staticmethod
-    def from_modules(before: PythonModule, after: PythonModule):
+    def from_no_change(module: PythonModule) -> "ModuleEdit":
+        return ModuleEdit(module, module, {}, {}, {}, {})
+
+    @staticmethod
+    def from_modules(before: PythonModule, after: PythonModule) -> "ModuleEdit":
         before_elems = {e.path.path: e for e in before.all_elements()}
         after_elems = {e.path.path: e for e in after.all_elements()}
         added = {
@@ -464,6 +468,10 @@ class ContextualEdit:
     grouped_ctx_changes: dict[str, Sequence[Change[PythonElem]]]
     commit_info: CommitInfo | None
 
+    @property
+    def path(self) -> ProjectPath:
+        return get_change_path(self.main_change)
+
     def is_ctx_empty(self):
         return all(len(changes) == 0 for changes in self.grouped_ctx_changes.values())
 
@@ -471,8 +479,7 @@ class ContextualEdit:
         if self.commit_info is not None:
             print("Commit:", self.commit_info.hash, file=file)
         print("=" * 15, "Main Change", "=" * 15, file=file)
-        name = str(get_change_path(self.main_change))
-        print(show_change(self.main_change, name), file=file)
+        print(show_change(self.main_change, str(self.path)), file=file)
 
         for group, changes in self.grouped_ctx_changes.items():
             if not changes:
@@ -536,6 +543,8 @@ def analyze_edits(
             )
 
     analyzed = list[EditAnalysis]()
+    pre_analysis = analyze_project_(edits[0].before)
+
     for pedit in tqdm(edits, desc="Analyzing edits", disable=silent):
         ctx_changes = dict[ProjectPath, Change[PythonElem]]()
         modifications = dict[ProjectPath, Modified[PythonElem]]()
@@ -544,7 +553,6 @@ def analyze_edits(
                 modifications[c.before.path] = c
             ctx_changes[get_change_path(c)] = c
 
-        pre_analysis = analyze_project_(pedit.before)
         post_analysis = analyze_project_(pedit.after)
 
         # create contextual edits
@@ -570,6 +578,7 @@ def analyze_edits(
             grouped_ctx_changes = _select_change_ctx(path, ctx_changes, change_groups)
             ctx_edits.append(ContextualEdit(c, grouped_ctx_changes, pedit.commit_info))
         analyzed.append(EditAnalysis(ctx_edits, pedit))
+        pre_analysis = post_analysis
 
     if not silent:
         display(timer.as_dataframe())

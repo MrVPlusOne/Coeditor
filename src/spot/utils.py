@@ -215,7 +215,7 @@ def pfilter(
     max_workers: int | None = None,
     tqdm_args: dict = {},
 ) -> list[T1]:
-    xs = list(xs) 
+    xs = list(xs)
     to_keep = pmap(f, xs, desc=desc, max_workers=max_workers, tqdm_args=tqdm_args)
     return [x for x, keep in zip(xs, to_keep) if keep]
 
@@ -762,7 +762,6 @@ def get_modified_args(instance, flatten: bool = False) -> dict[str, Any] | None:
         return None
 
     cls = type(instance)
-    delta = dict[str, Any]()
     # collect all values that are different from the default
     if hasattr(cls, "_field_defaults"):
         default_values = cls._field_defaults
@@ -772,6 +771,7 @@ def get_modified_args(instance, flatten: bool = False) -> dict[str, Any] | None:
             for attr in instance.__annotations__
             if hasattr(cls, attr)
         }
+    delta = dict[str, Any]()
     for attr in instance.__annotations__:
         v = getattr(instance, attr)
         if attr in default_values and default_values[attr] == v:

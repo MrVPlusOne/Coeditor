@@ -23,6 +23,7 @@ from spot.utils import (
     as_any,
     not_none,
     get_modified_args,
+    repr_modified_args,
 )
 from IPython.display import display, HTML
 import html
@@ -31,6 +32,7 @@ from concurrent.futures import Executor, ProcessPoolExecutor
 import numbers
 import ast
 import warnings
+import math
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")

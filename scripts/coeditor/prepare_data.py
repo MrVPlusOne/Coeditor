@@ -1,21 +1,24 @@
 from coeditor.common import *
 from coeditor.dataset import *
-from coeditor.encoding import FileLevelEditTokenizer, ProjectLevelEditTokenizer
+from coeditor.encoding import (
+    FileBasedEditEncoder,
+    CstBasedEditEncoder,
+    AnalysisBasedEditEncoder,
+)
 from spot.utils import pretty_print_dict
 
 os.chdir(proj_root())
 
-dataset_name = "medium"
-# dataset_name = "SPOT"
-file_based = False
+# dataset_name = "medium"
+dataset_name = "SPOT"
 
 window = WindowArgs(4096)
-if file_based:
-    encoder = FileLevelEditTokenizer(window)
-    save_dir = get_dataset_dir(dataset_name) / "tokenized-file_based"
-else:
-    encoder = ProjectLevelEditTokenizer(window)
-    save_dir = get_dataset_dir(dataset_name) / "tokenized-file_collapsed"
+# encoder = FileBasedEditEncoder(window)
+# encoder = CstBasedEditEncoder(window)
+encoder = AnalysisBasedEditEncoder(
+    window=window, extra_ctx_min_size=1000, extra_ctx_names=("usees", "post-usees")
+)
+save_dir = get_dataset_dir(dataset_name) / repr_modified_args(encoder)
 
 if dataset_name == "SPOT":
     datasets = {"test": dataset_from_projects([proj_root()], encoder)}

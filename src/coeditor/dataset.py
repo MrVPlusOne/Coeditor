@@ -1,8 +1,9 @@
 import numpy as np
 from coeditor.encoding import (
+    AnalysisBasedEditEncoder,
     Del_id,
-    FileLevelEditTokenizer,
-    ProjectLevelEditTokenizer,
+    FileBasedEditEncoder,
+    CstBasedEditEncoder,
     TokenizedEdit,
     Newline_id,
     Add_id,
@@ -75,14 +76,17 @@ class TokenizedEditDataset:
         return TokenizedEditDataset({path: list(edits)})
 
 
-EditEncoder = FileLevelEditTokenizer | ProjectLevelEditTokenizer
+EditEncoder = FileBasedEditEncoder | CstBasedEditEncoder | AnalysisBasedEditEncoder
 
 
 def _process_commits(root: Path, commits: Sequence[CommitInfo], encoder: EditEncoder):
     edits = edits_from_commit_history(root, commits)
     tk_edits = list[TokenizedEdit]()
-    for pe in edits:
-        tk_edits.extend(encoder.tokenize_pedit(pe))
+    if isinstance(encoder, AnalysisBasedEditEncoder):
+        tk_edits.extend(encoder.encode_pedits(list(edits)))
+    else:
+        for pe in edits:
+            tk_edits.extend(encoder.encode_pedit(pe))
     return tk_edits
 
 
@@ -113,7 +117,7 @@ def dataset_from_projects(
     roots = list[Path]()
     chunked_histories = list[list[CommitInfo]]()
     for root, h in zip(project_roots, histories):
-        history_chunk_size = max(100, len(h) // 5)
+        history_chunk_size = max(50, math.ceil(len(h) / 4))
         for i in range(0, len(h), history_chunk_size):
             roots.append(root)
             # note that we need 1 extra overlapping commit to get all diffs

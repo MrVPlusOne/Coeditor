@@ -419,7 +419,7 @@ class PythonClass:
     path: ProjectPath
     attributes: dict[str, PythonVariable]
     methods: dict[str, PythonFunction]
-    subclasses: dict[str, "PythonClass"]
+    inner_classes: dict[str, "PythonClass"]
     tree: cst.ClassDef
     parent_class: ProjectPath | None
 
@@ -429,7 +429,7 @@ class PythonClass:
     def all_elements(self) -> Generator[PythonElem, None, None]:
         yield from self.attributes.values()
         yield from self.methods.values()
-        for c in self.subclasses.values():
+        for c in self.inner_classes.values():
             yield from c.all_elements()
 
 
@@ -445,6 +445,14 @@ class PythonModule:
     tree: cst.Module
     location_map: dict[cst.CSTNode, CodeRange]
     elem2pos: dict[ElemPath, CodeRange]
+
+    @cached_property
+    def classes_dict(self) -> dict[ElemPath, PythonClass]:
+        return {c.path.path: c for c in self.all_classes()}
+
+    @cached_property
+    def elems_dict(self) -> dict[ElemPath, PythonElem]:
+        return {e.path.path: e for e in self.all_elements()}
 
     @cached_property
     def code(self) -> str:
@@ -481,7 +489,7 @@ class PythonModule:
     def all_classes(self) -> Generator[PythonClass, None, None]:
         def rec(c: PythonClass) -> Generator[PythonClass, None, None]:
             yield c
-            for sc in c.subclasses.values():
+            for sc in c.inner_classes.values():
                 yield from rec(sc)
 
         for c in self.classes:
@@ -872,7 +880,7 @@ class UsageAnalysis:
             ProjectPath, Collection[QualifiedName]
         ]()
         for mname in self.sorted_modules:
-            superclass_map.update(self.mod2analysis[mname].compute_superclasses())
+            superclass_map.update(self.mod2analysis[mname].superclass_map)
 
         self.cls2members = cls2members = dict[ProjectPath, dict[str, PythonElem]]()
         all_usages = list[ProjectUsage]()
@@ -920,7 +928,7 @@ class UsageAnalysis:
 
         for mname in self.sorted_modules:
             ma = self.mod2analysis[mname]
-            for caller, span, qname, is_call in ma.compute_module_usages():
+            for caller, span, qname, is_call in ma.module_usages:
                 all_usages.extend(self.generate_usages(mname, caller, qname, is_call))
 
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
@@ -1072,7 +1080,7 @@ class UsageAnalysis:
         try:
             assert_eq(actual, expect)
         except:
-            usages = self.mod2analysis[caller_p.module].compute_module_usages()
+            usages = self.mod2analysis[caller_p.module].module_usages
             usages = groupby(usages, lambda x: x[0]).get(caller_p, [])
             print(f"Raw callees:")
             for u in usages:
@@ -1102,7 +1110,10 @@ class ModuleAnlaysis:
         self.node2qnames = dict(wrapper.resolve(QualifiedNameProvider))
         self.node2pos = dict(wrapper.resolve(PositionProvider))
 
-    def compute_module_usages(self):
+    @cached_property
+    def module_usages(
+        self,
+    ) -> Sequence[tuple[ProjectPath, CodeRange, QualifiedName, bool]]:
         """
         Compute a mapping from each method/function to the methods and functions they use.
         Also resolve the qualified name of superclasses.
@@ -1143,7 +1154,8 @@ class ModuleAnlaysis:
 
         return result
 
-    def compute_superclasses(self) -> Mapping[ProjectPath, Collection[QualifiedName]]:
+    @cached_property
+    def superclass_map(self) -> Mapping[ProjectPath, Collection[QualifiedName]]:
         """Update the superclasses field of each class in-place using the resolved qualified names."""
         result = dict[ProjectPath, list[QualifiedName]]()
         for cls in self.module.all_classes():
@@ -1342,7 +1354,7 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
             cls = self.current_class
             vars = cls.attributes if cls else self.global_vars
             funcs = cls.methods if cls else self.functions
-            classes = cls.subclasses if cls else self.classes
+            classes = cls.inner_classes if cls else self.classes
             is_new_def = False
 
             classes.pop(e.name, None)
@@ -1398,12 +1410,12 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
                 path=self.current_path.append(node.name.value),
                 attributes=dict(),
                 methods=dict(),
-                subclasses=dict(),
+                inner_classes=dict(),
                 tree=node,
                 parent_class=parent_cls.path if parent_cls else None,
             )
             if parent_cls:
-                parent_cls.subclasses[cls.name] = cls
+                parent_cls.inner_classes[cls.name] = cls
             self.visit_stack.append(_VisitKind.Class)
             self.class_stack.append(cls)
             if parent_type == _VisitKind.Root:

@@ -2,9 +2,12 @@
 
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import field
 import difflib
 import copy
 import random
+
+from functools import cache
 from spot.static_analysis import StubGenerator, show_element
 import spot.utils
 from spot.data import output_ids_as_seqs
@@ -347,7 +350,7 @@ class TokenizedEdit:
                 main_lines.append(line)
         return join_list(main_lines, Newline_id)
 
-    def show(self, ctx_tks: int = 500) -> str:
+    def show(self, ctx_tks: int = 2048) -> str:
         return self.show_prediction(None, ctx_tks)
 
     def show_prediction(self, pred_tks: TokenSeq | None = None, ctx_tks: int = 1000):
@@ -404,17 +407,17 @@ class TokenizedEdit:
 
 
 @dataclass
-class FileLevelEditTokenizer:
+class FileBasedEditEncoder:
     window: WindowArgs
 
-    def tokenize_pedit(
+    def encode_pedit(
         self,
         pedit: ProjectEdit,
     ) -> Iterable[TokenizedEdit]:
         for me in pedit.changes.values():
-            yield from self.tokenize_medit(me)
+            yield from self.encode_medit(me)
 
-    def tokenize_medit(
+    def encode_medit(
         self,
         medit: ModuleEdit,
     ) -> Iterable[TokenizedEdit]:
@@ -474,83 +477,145 @@ class FileLevelEditTokenizer:
 
 
 @dataclass
-class ProjectLevelEditTokenizer:
+class CstBasedEditEncoder:
     window: WindowArgs
     collapse_unchanged: bool = True
 
-    def tokenize_pedit(
+    def encode_pedit(
         self,
         pedit: ProjectEdit,
     ) -> Iterable[TokenizedEdit]:
+        prompt = encode_basic("\n# EDIT:\n")
+        ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
         for mname, medit in pedit.changes.items():
             mod_fs = medit.modified_functions()
             if not mod_fs:
                 continue
-            elems_encoding = self.encode_module_elems(medit)
-            sorted_elems = list(elems_encoding)
+
+            sorted_elems = [
+                ProjectPath(mname, p) for p in medit.sorted_elems(include_classes=True)
+            ]
 
             for i, path in enumerate(sorted_elems):
-                if path not in mod_fs:
+                if (c := mod_fs.get(path.path)) is None:
                     continue
-                c = mod_fs[path]
                 main_change = c.map(lambda x: x.code)
                 main_tks, output_tks = change_to_input_output(main_change)
                 left_ctx = join_list(
-                    [elems_encoding[p] for p in sorted_elems[:i]], sep=Newline_id
+                    (ctx_encoder.encode_ctx_element(p) for p in sorted_elems[:i]),
+                    sep=Newline_id,
                 )
                 right_ctx = join_list(
-                    [elems_encoding[p] for p in sorted_elems[i + 1 :]], sep=Newline_id
+                    (ctx_encoder.encode_ctx_element(p) for p in sorted_elems[i + 1 :]),
+                    sep=Newline_id,
                 )
-                input_tks = (
-                    left_ctx + [Newline_id] + main_tks + [Newline_id] + right_ctx
-                )
-                ex = TokenizedEdit(input_tks, output_tks, path=ProjectPath(mname, path))
+                input_tks = left_ctx + prompt + main_tks + [Newline_id] + right_ctx
+                ex = TokenizedEdit(input_tks, output_tks, path=path)
                 ex = ex.truncate_ctx(self.window)
                 yield ex
 
-    def encode_module_elems(
+
+@dataclass
+class AnalysisBasedEditEncoder:
+    window: WindowArgs
+    extra_ctx_min_size: int
+    extra_ctx_names: Sequence[str] = ("usees",)
+    collapse_unchanged: bool = True
+
+    CtxSepTokens = encode_basic("\n# Usees ends\n")
+
+    def encode_pedits(
         self,
-        medit: ModuleEdit,
-    ) -> dict[ElemPath, TokenSeq]:
-        after_elems = {e.path.path: e for e in medit.after.all_elements()}
-        after_classes = {c.path.path: c for c in medit.after.classes}
+        pedits: Sequence[ProjectEdit],
+    ) -> Iterable[TokenizedEdit]:
+        anlyses = analyze_edits(pedits, silent=False)
+        inner_window = copy.deepcopy(self.window)
+        inner_window.max_window_size -= self.extra_ctx_min_size
+        cst_encoder = CstBasedEditEncoder(inner_window, self.collapse_unchanged)
+        for analysis in anlyses:
+            pedit = analysis.pedit
+            ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
+            path_to_cxt_edit = {e.path: e for e in analysis.ctx_edits}
+            tk_edits = list(cst_encoder.encode_pedit(pedit))
+            for edit in tk_edits:
+                module = edit.path.module
+                ctx_edit = path_to_cxt_edit[edit.path]
+                ctx_changes = [
+                    c
+                    for group in self.extra_ctx_names
+                    for c in ctx_edit.grouped_ctx_changes[group]
+                    if get_change_path(c).module != module
+                ]
+                if ctx_changes:
+                    file_tks = edit.input_tks
+                    extra_ctx_size = (
+                        self.extra_ctx_min_size
+                        + cst_encoder.window.max_window_size
+                        - len(file_tks)
+                    )
+                    extra_ctx_tks = ctx_encoder.encode_ctx_changes(ctx_changes)
+                    if len(extra_ctx_tks) > extra_ctx_size:
+                        extra_ctx_tks = extra_ctx_tks[: extra_ctx_size - 1] + [EOS_id]
+                    edit.input_tks = extra_ctx_tks + self.CtxSepTokens + edit.input_tks
+                yield edit
 
-        elems_encoding = dict[ElemPath, TokenSeq]()
-        for path in medit.sorted_elems(include_classes=True):
-            if path in after_classes:
-                elem = after_classes[path]
-                cls = elem.tree.with_changes(body=cst.IndentedBlock([]))
-                # drop the `pass` part
-                cls_lines = show_element(cls, indent=False).split("\n")[:-1]
-                header_tks = encode_basic("\n".join(cls_lines))
-                elem_tks = [Newline_id] + header_tks
-            elif path in medit.modified:
-                mod = medit.modified[path]
-                elem = mod.after
-                elem_tks = change_to_tokens(mod.map(lambda e: e.code))
-            elif path in medit.deleted:
-                mod = medit.deleted[path]
-                elem = mod.before
-                change = mod.map(lambda e: e.code)
-                elem_tks = change_to_tokens(change)
-            elif path in medit.added:
-                mod = medit.added[path]
-                elem = mod.after
-                change = mod.map(lambda e: e.code)
-                elem_tks = change_to_tokens(change)
+
+@dataclass
+class CtxEncoder:
+    pedit: ProjectEdit
+    collapse_unchanged: bool
+    cache: dict[ProjectPath, TokenSeq] = field(default_factory=dict)
+
+    def encode_ctx_element(self, ppath: ProjectPath) -> TokenSeq:
+        "Encode a single element in the context. Results are cached."
+        if ppath in self.cache:
+            return self.cache[ppath]
+        pedit = self.pedit
+        if (medit := pedit.changes.get(ppath.module)) is None:
+            medit = ModuleEdit.from_no_change(pedit.after.modules[ppath.module])
+        module_after = medit.after
+        path = ppath.path
+
+        if path in medit.all_changes:
+            mod = medit.all_changes[path]
+            elem = mod.before if isinstance(mod, Deleted) else mod.after
+            elem_tks = change_to_tokens(mod.map(lambda e: e.code))
+        elif path in module_after.elems_dict:
+            elem = module_after.elems_dict[path]
+            if self.collapse_unchanged and isinstance(elem, PythonFunction):
+                tree = collapse_code(elem.tree)
+                code = show_element(tree, elem.in_class)
             else:
-                elem = after_elems[path]
-                if self.collapse_unchanged and isinstance(elem, PythonFunction):
-                    tree = collapse_code(elem.tree)
-                    code = show_element(tree, elem.in_class)
-                else:
-                    code = elem.code
-                elem_tks = encode_basic(code)
-            if isinstance(elem, PythonFunction):
-                elem_tks.append(Newline_id)
-            elems_encoding[path] = elem_tks
+                code = elem.code
+            elem_tks = encode_basic(code)
+        else:
+            # FIXME: inner classes are pulled out in this implementation
+            if (elem := module_after.classes_dict.get(path)) is None:
+                elem = pedit.before.modules[ppath.module].classes_dict[path]
+            cls = elem.tree.with_changes(body=cst.IndentedBlock([]))
+            # drop the `pass` part
+            cls_lines = show_element(cls, indent=False).split("\n")[:-1]
+            header_tks = encode_basic("\n".join(cls_lines))
+            elem_tks = [Newline_id] + header_tks
+        if isinstance(elem, PythonFunction):
+            elem_tks.append(Newline_id)
 
-        return elems_encoding
+        self.cache[ppath] = elem_tks
+        return elem_tks
+
+    def encode_ctx_changes(self, changes: Sequence[Change[PythonElem]]):
+        # group changes by parents
+        parent2change = spot.utils.groupby(changes, lambda c: get_change_path(c).pop())
+        sorted_paths = list[ProjectPath]()
+        for parent, changes in parent2change.items():
+            if parent.path:
+                sorted_paths.append(parent)
+            for c in changes:
+                sorted_paths.append(get_change_path(c))
+        return join_list(
+            (self.encode_ctx_element(p) for p in sorted_paths),
+            sep=Newline_id,
+        )
 
 
 def collapse_code(tree: cst.CSTNode) -> cst.CSTNode:
