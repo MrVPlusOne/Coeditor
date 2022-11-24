@@ -173,11 +173,23 @@ def with_default_workers(workers: int):
         DefaultWorkers = old_workers
 
 
+@dataclass
+class TaggedFunc(Generic[T1]):
+    """Helper class to tag the output of a function. Useful for using
+    with unordered map."""
+
+    f: Callable[..., T1]
+
+    def __call__(self, args: tuple) -> tuple[Any, T1]:
+        return args[0], self.f(*args[1:])
+
+
 def pmap(
     f: Callable[..., T1],
     *f_args: Any,
     desc: str,
     max_workers: int | None = None,
+    chunksize: int | None = None,
     tqdm_args: dict = {},
 ) -> list[T1]:
     """
@@ -194,18 +206,18 @@ def pmap(
             outs.append(f(*(a[i] for a in f_args)))
         return outs
 
-    chunksize = max(1, n // (50 * max_workers))
-    r = process_map(
-        f,
-        *f_args,
-        chunksize=chunksize,
-        max_workers=max_workers,
-        desc=desc,
-        tqdm_class=tqdm,
-        **tqdm_args,
-    )
-    assert isinstance(r, list)
-    return r
+    if chunksize is None:
+        chunksize = max(1, n // (50 * max_workers))
+
+    tag_f = TaggedFunc(f)
+    arg_tuples = zip(range(n), *f_args)
+
+    with multiprocessing.Pool(max_workers) as pool, tqdm(total=n, **tqdm_args) as pbar:
+        results = dict[int, T1]()
+        for i, r in pool.imap_unordered(tag_f, arg_tuples, chunksize=chunksize):
+            results[i] = r
+            pbar.update()
+    return [results[i] for i in range(n)]
 
 
 def pfilter(

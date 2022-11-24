@@ -518,7 +518,7 @@ class CstBasedEditEncoder:
 @dataclass
 class AnalysisBasedEditEncoder:
     window: WindowArgs
-    extra_ctx_min_size: int
+    extra_ctx_size: int
     extra_ctx_names: Sequence[str] = ("usees",)
     collapse_unchanged: bool = True
 
@@ -530,9 +530,7 @@ class AnalysisBasedEditEncoder:
     ) -> Iterable[TokenizedEdit]:
         anlyses = analyze_edits(pedits, silent=True)
         # display(UsageAnalysis.TLogger.as_dataframe())
-        inner_window = copy.deepcopy(self.window)
-        inner_window.max_window_size -= self.extra_ctx_min_size
-        cst_encoder = CstBasedEditEncoder(inner_window, self.collapse_unchanged)
+        cst_encoder = CstBasedEditEncoder(self.window, self.collapse_unchanged)
         for analysis in anlyses:
             pedit = analysis.pedit
             ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
@@ -548,15 +546,17 @@ class AnalysisBasedEditEncoder:
                     if get_change_path(c).module != module
                 ]
                 if ctx_changes:
-                    file_tks = edit.input_tks
-                    extra_ctx_size = (
-                        self.extra_ctx_min_size
-                        + cst_encoder.window.max_window_size
-                        - len(file_tks)
-                    )
                     extra_ctx_tks = ctx_encoder.encode_ctx_changes(ctx_changes)
-                    if len(extra_ctx_tks) > extra_ctx_size:
-                        extra_ctx_tks = extra_ctx_tks[: extra_ctx_size - 1] + [EOS_id]
+                    max_ctx_size = max(
+                        self.extra_ctx_size,
+                        self.window.max_window_size - len(edit.input_tks),
+                    )
+                    if len(extra_ctx_tks) > max_ctx_size:
+                        extra_ctx_tks = extra_ctx_tks[:max_ctx_size]
+                        extra_ctx_tks[-1] = EOS_id
+                    inner_window = copy.deepcopy(self.window)
+                    inner_window.max_window_size -= len(extra_ctx_tks)
+                    edit = edit.truncate_ctx(inner_window)
                     edit.input_tks = extra_ctx_tks + self.CtxSepTokens + edit.input_tks
                 yield edit
 
