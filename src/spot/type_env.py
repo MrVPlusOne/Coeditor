@@ -279,6 +279,9 @@ class StmtsAdder(cst.CSTTransformer):
     def __init__(self, stmts: Sequence[cst.BaseStatement]):
         self.stmts = stmts
 
+    def visit_Module(self, node) -> Optional[bool]:
+        return False
+
     def leave_Module(self, node: cst.Module, updated: cst.Module) -> cst.Module:
 
         body_type: Any = type(updated.body)

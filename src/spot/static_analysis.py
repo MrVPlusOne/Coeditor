@@ -19,6 +19,7 @@ from libcst.metadata import (
     QualifiedNameSource,
     PositionProvider,
 )
+from pyrsistent import pmap as persist_map, PMap
 
 ModuleName = str
 ElemPath = str
@@ -114,14 +115,7 @@ class ProjectPath(NamedTuple):
         return ProjectPath(mname, mpath)
 
 
-ProjNamespace = dict[str, ProjectPath]
-
-# @dataclass
-# class ProjectNamespace:
-#     children: "PMap[str, ProjectNamespace | ProjectPath]"
-
-#     def add_member(self, name: str, path: ProjectPath) -> "ProjectNamespace":
-#         return ProjectNamespace(self.children.set(name, path))
+ProjNamespace = type(persist_map(dict[str, ProjectPath]()))
 
 
 def get_decorator_name(dec: cst.Decorator) -> str | None:
@@ -736,80 +730,60 @@ class ModuleHierarchy:
         return root
 
 
-def sort_modules_by_imports(project: PythonProject) -> list[str]:
+def sort_modules_by_imports(
+    imports: dict[ModuleName, set[ModuleName]]
+) -> list[ModuleName]:
     "Sort modules topologically according to imports"
     sorted_modules = list[str]()
     visited = set[str]()
 
     def visit(m: str) -> None:
-        if m in visited or m not in project.modules:
+        if m in visited or m not in imports:
             return
         visited.add(m)
-        if m in project.modules:
-            for m2 in project.modules[m].imported_modules:
+        if m in imports:
+            for m2 in imports[m]:
                 visit(m2)
         sorted_modules.append(m)
 
-    for m in project.modules:
+    for m in imports:
         visit(m)
     return sorted_modules
 
 
-def build_project_namespaces(
+def build_project_namespaces_(
     project: PythonProject, ns_heir: ModuleHierarchy
-) -> dict[ModuleName, ProjNamespace]:
-    """Return the visible project-defined symbols in each module."""
-    # first, update the imported modules of each module by resolving
-    # any implicit relative imports
-    for mname, module in project.modules.items():
-        base_segs = mname.split(".")
-        base_segs.pop()
-        additional_imports = set[ModuleName]()
-        for im in module.imported_modules:
-            if not ns_heir.has_module(i_segs := im.split(".")) and ns_heir.has_module(
-                i_segs := base_segs + i_segs
-            ):
-                resolved = ".".join(i_segs)
-                additional_imports.add(resolved)
-                ns_heir._implicit_imports[(mname, im)] = resolved
-        module.imported_modules.update(additional_imports)
+) -> "dict[ModuleName, ProjNamespace]":
+    class NsBuilder(cst.CSTVisitor):
+        def __init__(
+            self, module_path: str, module2ns: Mapping[ModuleName, ProjNamespace]
+        ):
+            self.module_path = module_path
+            self.module2ns: Mapping[ModuleName, ProjNamespace] = module2ns
+            self.star_imports = set[ModuleName]()
+            self.single_imports = dict[str, ProjectPath]()
 
-    sorted_modules = sort_modules_by_imports(project)
-    result = dict[ModuleName, ProjNamespace]()
-    for mod in sorted_modules:
-        mv = _NsBuilder(mod, result)
-        project.modules[mod].tree.visit(mv)
-        new_ns = mv.namespace
-        new_ns.update(project.modules[mod].defined_symbols)
-        result[mod] = new_ns
-    return result
-
-
-class _NsBuilder(cst.CSTVisitor):
-    def __init__(self, module_path: str, module2ns: Mapping[ModuleName, ProjNamespace]):
-        self.module_path = module_path
-        self.module2ns = module2ns
-        self.namespace: ProjNamespace = dict()
-
-    # todo: handle imported modules and renamed modules
-
-    def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
-        src_mod: ModuleName = ".".join(
-            parse_module_path(node.module, self.module_path, dots := len(node.relative))
-        )
-        if src_mod not in self.module2ns:
-            if dots == 0:
-                # try parse it as a relative import
-                src_mod = ".".join(parse_module_path(node.module, self.module_path, 1))
-                if src_mod not in self.module2ns:
+        # todo: handle imported modules and renamed modules
+        def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
+            src_mod: ModuleName = ".".join(
+                parse_module_path(
+                    node.module, self.module_path, dots := len(node.relative)
+                )
+            )
+            if src_mod not in self.module2ns:
+                if dots == 0:
+                    # try parse it as a relative import
+                    src_mod = ".".join(
+                        parse_module_path(node.module, self.module_path, 1)
+                    )
+                    if src_mod not in self.module2ns:
+                        return
+                else:
                     return
+            if isinstance(node.names, cst.ImportStar):
+                self.star_imports.add(src_mod)
             else:
-                return
-        src_ns = self.module2ns[src_mod]
-        match node.names:
-            case cst.ImportStar():
-                self.namespace.update(src_ns)
-            case _:
+                src_ns = self.module2ns[src_mod]
                 for name in node.names:
                     match name.name:
                         case cst.Name(value=n1) if n1 in src_ns:
@@ -818,7 +792,64 @@ class _NsBuilder(cst.CSTVisitor):
                                 if isinstance(name.asname, cst.Name)
                                 else n1
                             )
-                            self.namespace[n2] = src_ns[n1]
+                            self.single_imports[n2] = src_ns[n1]
+
+        def visit_FunctionDef(self, node) -> Optional[bool]:
+            return False
+
+        def visit_ClassDef(self, node) -> Optional[bool]:
+            return False
+
+        def visit_Assign(self, node: "cst.Assign") -> Optional[bool]:
+            return False
+
+        def visit_AnnAssign(self, node: "cst.AnnAssign") -> Optional[bool]:
+            return False
+
+        def build(self) -> ProjNamespace:
+            # for better performance, we will sacrifice some correctness here
+            # by not respecting the order of imports and built on the largest namespace
+            import_ns_list = [self.module2ns[m] for m in self.star_imports]
+            import_ns_list.sort(key=lambda ns: len(ns), reverse=True)
+            if import_ns_list:
+                ns = import_ns_list[0]
+                for ns2 in import_ns_list[1:]:
+                    ns = ns.update(ns2)
+            else:
+                ns: ProjNamespace = persist_map({})
+            ns = ns.update(self.single_imports)
+            return ns
+
+    """Return the visible project-defined symbols in each module."""
+    timed = UsageAnalysis.TLogger.timed
+    with timed("sort modules"):
+        # first, update the imported modules of each module by resolving
+        # any implicit relative imports
+        imported_modules = dict[ModuleName, set[ModuleName]]()
+        for mname, mod in project.modules.items():
+            base_segs = mname.split(".")
+            base_segs.pop()
+            additional_imports = set[ModuleName]()
+            for im in imported_modules.get(mname, mod.imported_modules):
+                if not ns_heir.has_module(
+                    i_segs := im.split(".")
+                ) and ns_heir.has_module(i_segs := base_segs + i_segs):
+                    resolved = ".".join(i_segs)
+                    additional_imports.add(resolved)
+                    ns_heir._implicit_imports[(mname, im)] = resolved
+            imported_modules[mname] = mod.imported_modules | additional_imports
+        sorted_modules = sort_modules_by_imports(imported_modules)
+
+    result = dict[ModuleName, ProjNamespace]()
+    for mod in sorted_modules:
+        mv = NsBuilder(mod, result)
+        with timed("NSbuilder.visit"):
+            project.modules[mod].tree.visit(mv)
+        with timed("NSbuilder.build"):
+            new_ns = mv.build()
+        new_ns = new_ns.update(project.modules[mod].defined_symbols)
+        result[mod] = new_ns
+    return result
 
 
 class UsageAnalysis:
@@ -826,6 +857,8 @@ class UsageAnalysis:
     path2elem: dict[ProjectPath, PythonElem]
     user2used: dict[ProjectPath, list[ProjectUsage]]
     used2user: dict[ProjectPath, list[ProjectUsage]]
+
+    TLogger = TimeLogger()
 
     def get_var(self, path: ProjectPath) -> PythonVariable:
         v = self.path2elem[path]
@@ -844,11 +877,13 @@ class UsageAnalysis:
         add_override_usages: bool = False,
         add_implicit_rel_imports: bool = False,
     ):
+        timed = self.TLogger.timed
         self.project = project
         self.add_override_usages = add_override_usages
         self.add_implicit_rel_imports = add_implicit_rel_imports
         self.ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
-        module2ns = build_project_namespaces(project, self.ns_hier)
+        with timed("build_project_namespaces"):
+            module2ns = build_project_namespaces_(project, self.ns_hier)
         self.sorted_modules = list(module2ns.keys())
 
         self.path2elem = {v.path: v for v in project.all_elems()}
@@ -858,14 +893,16 @@ class UsageAnalysis:
             for cls in mod.all_classes()
         }
 
-        # add mapping for star imports
-        for mname, ns in module2ns.items():
-            for s, p in ns.items():
-                if p in self.path2class:
-                    cls = self.path2class[p]
-                    self.path2class.setdefault(ProjectPath(mname, s), cls)
-                elif p in self.path2elem:
-                    self.path2elem.setdefault(ProjectPath(mname, s), self.path2elem[p])
+        with timed("add mapping for star imports"):
+            for mname, ns in module2ns.items():
+                for s, p in ns.items():
+                    if p in self.path2class:
+                        cls = self.path2class[p]
+                        self.path2class.setdefault(ProjectPath(mname, s), cls)
+                    elif p in self.path2elem:
+                        self.path2elem.setdefault(
+                            ProjectPath(mname, s), self.path2elem[p]
+                        )
 
         if mod2analysis is None:
             self.mod2analysis = {
@@ -875,12 +912,12 @@ class UsageAnalysis:
         else:
             self.mod2analysis = mod2analysis
 
-        # resolve subtyping relations
-        self.superclass_map = superclass_map = dict[
-            ProjectPath, Collection[QualifiedName]
-        ]()
-        for mname in self.sorted_modules:
-            superclass_map.update(self.mod2analysis[mname].superclass_map)
+        with timed("resolve subtyping relations"):
+            self.superclass_map = superclass_map = dict[
+                ProjectPath, Collection[QualifiedName]
+            ]()
+            for mname in self.sorted_modules:
+                superclass_map.update(self.mod2analysis[mname].superclass_map)
 
         self.cls2members = cls2members = dict[ProjectPath, dict[str, PythonElem]]()
         all_usages = list[ProjectUsage]()
@@ -913,7 +950,8 @@ class UsageAnalysis:
 
         for mname in self.sorted_modules:
             for cls in project.modules[mname].all_classes():
-                process_cls(cls)
+                with timed("process_cls"):
+                    process_cls(cls)
 
         all_class_members = {x.path for x in project.all_elems() if x.in_class}
         self.name2class_member = groupby(
@@ -926,10 +964,13 @@ class UsageAnalysis:
             n: {f.path for f in fs} for n, fs in name2fixtures.items()
         }
 
-        for mname in self.sorted_modules:
-            ma = self.mod2analysis[mname]
-            for caller, span, qname, is_call in ma.module_usages:
-                all_usages.extend(self.generate_usages(mname, caller, qname, is_call))
+        with timed("generate usages"):
+            for mname in self.sorted_modules:
+                ma = self.mod2analysis[mname]
+                for caller, span, qname, is_call in ma.module_usages:
+                    all_usages.extend(
+                        self.generate_usages(mname, caller, qname, is_call)
+                    )
 
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
         for u in all_usages:
@@ -1879,6 +1920,9 @@ class ImportsRemover(cst.CSTTransformer):
 
     def visit_FunctionDef(self, node):
         # stops traversal at inner levels.
+        return False
+
+    def visit_ClassDef(self, node) -> Optional[bool]:
         return False
 
 

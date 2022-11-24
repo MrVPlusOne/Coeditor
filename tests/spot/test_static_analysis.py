@@ -9,7 +9,7 @@ from spot.static_analysis import (
     PythonModule,
     PythonProject,
     UsageAnalysis,
-    build_project_namespaces,
+    build_project_namespaces_,
     cst,
     stub_from_module,
     to_abs_import_path,
@@ -698,7 +698,7 @@ def test_annot():
 
     # test star import of classes
     ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
-    assert build_project_namespaces(project, ns_hier)["root.file2"]["A"] == A_cls.path
+    assert build_project_namespaces_(project, ns_hier)["root.file2"]["A"] == A_cls.path
 
     analysis.assert_usages(
         "root.file2/B.fly",

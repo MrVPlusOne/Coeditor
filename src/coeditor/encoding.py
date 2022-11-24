@@ -528,7 +528,8 @@ class AnalysisBasedEditEncoder:
         self,
         pedits: Sequence[ProjectEdit],
     ) -> Iterable[TokenizedEdit]:
-        anlyses = analyze_edits(pedits, silent=False)
+        anlyses = analyze_edits(pedits, silent=True)
+        # display(UsageAnalysis.TLogger.as_dataframe())
         inner_window = copy.deepcopy(self.window)
         inner_window.max_window_size -= self.extra_ctx_min_size
         cst_encoder = CstBasedEditEncoder(inner_window, self.collapse_unchanged)
@@ -621,6 +622,9 @@ class CtxEncoder:
 def collapse_code(tree: cst.CSTNode) -> cst.CSTNode:
     class Transformer(cst.CSTTransformer):
         OMIT = cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
+
+        def visit_FunctionDef(self, node) -> Optional[bool]:
+            return False
 
         def leave_FunctionDef(
             self, original_node: "cst.FunctionDef", updated_node: "cst.FunctionDef"
