@@ -8,11 +8,27 @@ import copy
 import random
 
 from functools import cache
-from spot.static_analysis import StubGenerator, show_element
+from textwrap import indent
+from spot.static_analysis import (
+    ProjectPath,
+    PythonElem,
+    PythonFunction,
+    show_element,
+)
 import spot.utils
 from spot.data import output_ids_as_seqs
 from .common import *
-from .history import *
+from .history import (
+    Change,
+    Modified,
+    Added,
+    Deleted,
+    ModuleEdit,
+    ProjectEdit,
+    analyze_edits,
+    get_change_path,
+    show_change,
+)
 
 """
 Only use this when we want to avoid encoding <add> and <del> as special tokens.
