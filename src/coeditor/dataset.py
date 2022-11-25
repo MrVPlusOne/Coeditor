@@ -229,4 +229,8 @@ def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path):
 def load_datasets(
     save_dir: Path, splits=("test", "valid", "train")
 ) -> dict[str, TokenizedEditDataset]:
-    return {name: pickle_load(save_dir / f"{name}.pkl") for name in splits}
+    return {
+        name: pickle_load(path)
+        for name in splits
+        if (path := (save_dir / f"{name}.pkl")).exists()
+    }

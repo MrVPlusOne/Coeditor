@@ -22,27 +22,27 @@ def check_save_dir(model_name: str):
             exit(1)
 
 
-data_name = "medium"
-data_dir = get_dataset_dir(data_name) / "tokenized-file_collapsed"
-model_variant = "-collapse-shuffle"
+from prepare_data import dataset_name, datasets
+
+model_variant = "-analysis-post_usees"
 data_args = DataTransformArgs(
     shuffle_extra_ids=True,
 )
 train_args = TrainingArgs(
     max_batch_tokens=4096,
-    window=WindowArgs(2048),
+    window=WindowArgs(4096),
     quicktest=False,
 )
 valid_args = EvalArgs(
     max_batch_tokens=4096 * 2,
-    window=WindowArgs(2048),
+    window=WindowArgs(4096),
 )
 test_args = EvalArgs(
     max_batch_tokens=4096 * 2,
     window=WindowArgs(4096),
 )
 
-model_name = f"coeditor-{data_name}"
+model_name = f"coeditor-{dataset_name}"
 model_name += model_variant
 if train_args.quicktest:
     model_name = "quicktest-" + model_name
@@ -63,12 +63,8 @@ config_dict = {
 project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
 wandb.init(dir="..", project=project, name=model_name, config=config_dict)
 
-with timed_action(f"Loading datasets: {data_dir}"):
-    datasets: dict[str, TokenizedEditDataset] = {
-        name: pickle_load(data_dir / f"{name}.pkl")
-        for name in ["train", "valid", "test"]
-    }
 if train_args.quicktest:
+    print("Using fewer data for quick test.")
     for name, dataset in datasets.items():
         datasets[name] = TokenizedEditDataset.from_edits(list(dataset.all_edits())[:10])
 
