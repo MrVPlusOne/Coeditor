@@ -212,7 +212,10 @@ def pmap(
     tag_f = TaggedFunc(f)
     arg_tuples = zip(range(n), *f_args)
 
-    with multiprocessing.Pool(max_workers) as pool, tqdm(total=n, **tqdm_args) as pbar:
+    with (
+        multiprocessing.Pool(max_workers) as pool,
+        tqdm(total=n, desc=desc, **tqdm_args) as pbar,
+    ):
         results = dict[int, T1]()
         for i, r in pool.imap_unordered(tag_f, arg_tuples, chunksize=chunksize):
             results[i] = r

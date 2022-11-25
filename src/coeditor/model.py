@@ -38,7 +38,7 @@ class DecodingArgs:
     max_output_tks: int = 512
     do_sample: bool = False
     top_p: float = 0.9
-    num_beams: Optional[int] = 8
+    num_beams: Optional[int] = 1
     length_penalty: float = 1.0
 
 

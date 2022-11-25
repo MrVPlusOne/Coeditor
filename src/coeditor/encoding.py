@@ -282,6 +282,7 @@ class WindowArgs:
         Truncate the input to make it fit within the max window size.
         The cutoff is centered around the <extra_id> tokens.
         """
+        assert self.max_window_size > 0
         extra_id_poses = [i for i, tk in enumerate(input_tks) if is_extra_id(tk)]
         assert extra_id_poses
         assert 0 <= self.left_ctx_ratio <= 1
@@ -367,9 +368,8 @@ class TokenizedEdit:
                     # show the delted line
                     origin_line = main_tk_lines.get(k, [])
                     seg = seg + origin_line
-                lines.append(
-                    f"{show_label(id_map[k])}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}"
-                )
+                label = show_label(id_map[k] if k in id_map else -1)
+                lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
             return "\n".join(lines)
 
         extra_id_poses = [i for i, tk in enumerate(self.input_tks) if is_extra_id(tk)]
@@ -555,7 +555,8 @@ class AnalysisBasedEditEncoder:
                         extra_ctx_tks = extra_ctx_tks[:max_ctx_size]
                         extra_ctx_tks[-1] = EOS_id
                     inner_window = copy.deepcopy(self.window)
-                    inner_window.max_window_size -= len(extra_ctx_tks)
+                    used_space = len(extra_ctx_tks) + len(self.CtxSepTokens)
+                    inner_window.max_window_size -= used_space
                     edit = edit.truncate_ctx(inner_window)
                     edit.input_tks = extra_ctx_tks + self.CtxSepTokens + edit.input_tks
                 yield edit
