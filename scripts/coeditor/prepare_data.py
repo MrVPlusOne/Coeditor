@@ -34,8 +34,7 @@ def make_or_load_datasets(
             print("=" * 20, group, "=" * 20)
             pretty_print_dict(dataset.overall_stats())
     else:
-        with timed_action(f"Load dataset from: {save_dir}"):
-            datasets = load_datasets(save_dir)
+        datasets = load_datasets(save_dir)
 
     return datasets
 

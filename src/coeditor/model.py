@@ -211,6 +211,15 @@ class DatasetDecodingResult:
     def __post_init__(self):
         assert_eq(len(self.input_ids), len(self.predictions), len(self.labels))
 
+    def subset(self, ids: Sequence[int]):
+        return DatasetDecodingResult(
+            self.eval_args,
+            self.dec_args,
+            [self.input_ids[i] for i in ids],
+            [self.labels[i] for i in ids],
+            [self.predictions[i] for i in ids],
+        )
+
     def edits(self):
         for inputs, labels in zip(self.input_ids, self.labels):
             yield TokenizedEdit(inputs, labels, ProjectPath("UNKNOWN", ""))
