@@ -144,12 +144,19 @@ class ModuleEdit:
     def is_empty(self) -> bool:
         return len(self.all_changes) == 0
 
-    def modified_functions(self) -> dict[ElemPath, Modified[PythonFunction]]:
+    def modified_functions(
+        self, ast_must_change=True
+    ) -> dict[ElemPath, Modified[PythonFunction]]:
         return {
             k: cast(Modified[PythonFunction], change)
             for k, change in self.modified.items()
             if isinstance(change.before, PythonFunction)
             and isinstance(change.after, PythonFunction)
+            and (
+                not ast_must_change
+                or normalize_code_by_ast(change.before.code)
+                != normalize_code_by_ast(change.after.code)
+            )
         }
 
     def sorted_elems(self, include_classes=True) -> list[ElemPath]:
@@ -545,6 +552,7 @@ def analyze_edits(
                 add_implicit_rel_imports=True,
                 add_override_usages=True,
             )
+
     def sort_usages(usages: Sequence[ProjectUsage]):
         "Make certain usages come first."
         return sorted(usages, key=lambda u: not u.is_certain)
@@ -572,7 +580,8 @@ def analyze_edits(
                 ]
                 if post_usages_in_ctx:
                     change_groups["post-usees"] = [
-                        u.used for u in sort_usages(post_analysis.user2used.get(path, []))
+                        u.used
+                        for u in sort_usages(post_analysis.user2used.get(path, []))
                     ]
             if users_in_ctx:
                 change_groups["users"] = [
@@ -580,7 +589,8 @@ def analyze_edits(
                 ]
                 if post_usages_in_ctx:
                     change_groups["post-users"] = [
-                        u.user for u in sort_usages(post_analysis.used2user.get(path, []))
+                        u.user
+                        for u in sort_usages(post_analysis.used2user.get(path, []))
                     ]
             grouped_ctx_changes = _select_change_ctx(path, ctx_changes, change_groups)
             ctx_edits.append(ContextualEdit(c, grouped_ctx_changes, pedit.commit_info))

@@ -473,7 +473,7 @@ class TokenizedEdit:
                     return False
         return True
 
-    def is_small_edit(self, max_changes: int = 8) -> bool:
+    def is_small_edit(self, max_changes: int = 5) -> bool:
         n_changes = sum(tk == Add_id or tk == Del_id for tk in self.output_tks)
         return n_changes <= max_changes
 
@@ -493,7 +493,7 @@ class FileBasedEditEncoder:
         self,
         medit: ModuleEdit,
     ) -> Iterable[TokenizedEdit]:
-        modifications = medit.modified_functions()
+        modifications = medit.modified_functions(ast_must_change=True)
         if not modifications:
             return
         mod_before = medit.before
@@ -560,7 +560,7 @@ class CstBasedEditEncoder:
         prompt = encode_basic("\n# EDIT:\n")
         ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
         for mname, medit in pedit.changes.items():
-            mod_fs = medit.modified_functions()
+            mod_fs = medit.modified_functions(ast_must_change=True)
             if not mod_fs:
                 continue
 
