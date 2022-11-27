@@ -452,6 +452,40 @@ def inc(x=Count):
     analysis.assert_usages("root.file6/inc", ("root.file6/Count", True))
 
 
+def test_type_usages():
+    code1 = """
+class Arg:
+    pass    
+
+class Namespace:
+    pass
+    
+class Struct:
+    def __init__(self, arg: Arg):
+        self.arg = arg
+"""
+
+    code2 = """
+from code1 import Namespace, Arg, Struct
+
+def f(x: Namespace, v):
+    assert isinstance(v, Arg)
+    return Struct(v)
+"""
+    project = project_from_code({"code1": code1, "code2": code2})
+    analysis = UsageAnalysis(project, record_type_usages=False)
+    analysis.assert_usages("code2/f", ("code1/Struct.__init__", True))
+
+    analysis = UsageAnalysis(project, record_type_usages=True)
+    analysis.assert_usages(
+        "code2/f",
+        ("code1/Struct.__init__", True),
+        ("code1/Struct", True),
+        ("code1/Arg", True),
+        ("code1/Namespace", True),
+    )
+
+
 def test_inheritance_usages():
     methods_usage = """
 # root.file1
@@ -997,7 +1031,7 @@ class A:
         start = range.start.line - 1
         end = range.end.line - 1
         snippet = "\n".join(lines[start : end + 1])
-        return dedent(snippet)
+        return snippet
 
     project = project_from_code({"file1": code1})
     m = project.modules["file1"]

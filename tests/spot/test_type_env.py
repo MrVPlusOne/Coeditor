@@ -110,7 +110,10 @@ def test_mypy_checker_1():
 
 
 def test_mypy_checker_2():
-    with mypy_checker(Path("data/code_output"), wait_before_check=0.0) as checker:
+    checker_dir = Path("data/code_output")
+    if not checker_dir.exists():
+        checker_dir.mkdir(parents=True)
+    with mypy_checker(checker_dir, wait_before_check=0.0) as checker:
         if Path("data/code_output/bad_code_1.py").exists():
             os.remove("data/code_output/bad_code_1.py")
         oe = checker.recheck_project().num_errors

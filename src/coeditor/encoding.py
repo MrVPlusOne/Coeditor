@@ -593,6 +593,7 @@ class AnalysisBasedEditEncoder:
     extra_ctx_size: int
     extra_ctx_names: Sequence[str] = ("usees",)
     collapse_unchanged: bool = True
+    record_type_usages: bool = False
 
     CtxSepTokens = encode_basic("\n# Usees ends\n")
 
@@ -600,7 +601,9 @@ class AnalysisBasedEditEncoder:
         self,
         pedits: Sequence[ProjectEdit],
     ) -> Iterable[TokenizedEdit]:
-        anlyses = analyze_edits(pedits, silent=True)
+        anlyses = analyze_edits(
+            pedits, record_type_usages=self.record_type_usages, silent=True
+        )
         # display(UsageAnalysis.TLogger.as_dataframe())
         cst_encoder = CstBasedEditEncoder(self.window, self.collapse_unchanged)
         for analysis in anlyses:
@@ -653,7 +656,16 @@ class CtxEncoder:
         if path in medit.all_changes:
             mod = medit.all_changes[path]
             elem = mod.before if isinstance(mod, Deleted) else mod.after
-            elem_tks = change_to_tokens(mod.map(lambda e: e.code))
+            if (
+                self.collapse_unchanged
+                and isinstance(mod, Deleted)
+                and isinstance(mod.before, PythonFunction)
+            ):
+                # as a special case, we also collapose the body of deleted functions
+                f_code = show_element(collapse_code(mod.before.tree), elem.in_class)
+                elem_tks = change_to_tokens(Deleted(f_code))
+            else:
+                elem_tks = change_to_tokens(mod.map(lambda e: e.code))
         elif path in module_after.elems_dict:
             elem = module_after.elems_dict[path]
             if self.collapse_unchanged and isinstance(elem, PythonFunction):

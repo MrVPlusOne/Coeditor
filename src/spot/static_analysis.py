@@ -760,8 +760,9 @@ def build_project_namespaces_(
         ):
             self.module_path = module_path
             self.module2ns: Mapping[ModuleName, ProjNamespace] = module2ns
-            self.star_imports = set[ModuleName]()
-            self.single_imports = dict[str, ProjectPath]()
+            self.symbol_map = dict[str, ProjectPath]()
+            # self.star_imports = set[ModuleName]()
+            # self.single_imports = dict[str, ProjectPath]()
 
         # todo: handle imported modules and renamed modules
         def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
@@ -780,10 +781,11 @@ def build_project_namespaces_(
                         return
                 else:
                     return
+
+            src_ns = self.module2ns[src_mod]
             if isinstance(node.names, cst.ImportStar):
-                self.star_imports.add(src_mod)
+                self.symbol_map.update(src_ns)
             else:
-                src_ns = self.module2ns[src_mod]
                 for name in node.names:
                     match name.name:
                         case cst.Name(value=n1) if n1 in src_ns:
@@ -792,7 +794,7 @@ def build_project_namespaces_(
                                 if isinstance(name.asname, cst.Name)
                                 else n1
                             )
-                            self.single_imports[n2] = src_ns[n1]
+                            self.symbol_map[n2] = src_ns[n1]
 
         def visit_FunctionDef(self, node) -> Optional[bool]:
             return False
@@ -807,18 +809,7 @@ def build_project_namespaces_(
             return False
 
         def build(self) -> ProjNamespace:
-            # for better performance, we will sacrifice some correctness here
-            # by not respecting the order of imports and built on the largest namespace
-            import_ns_list = [self.module2ns[m] for m in self.star_imports]
-            import_ns_list.sort(key=lambda ns: len(ns), reverse=True)
-            if import_ns_list:
-                ns = import_ns_list[0]
-                for ns2 in import_ns_list[1:]:
-                    ns = ns.update(ns2)
-            else:
-                ns: ProjNamespace = persist_map({})
-            ns = ns.update(self.single_imports)
-            return ns
+            return persist_map(self.symbol_map)
 
     """Return the visible project-defined symbols in each module."""
     timed = UsageAnalysis.TLogger.timed
@@ -876,11 +867,15 @@ class UsageAnalysis:
         mod2analysis: Mapping[ModuleName, "ModuleAnalysis"] | None = None,
         add_override_usages: bool = False,
         add_implicit_rel_imports: bool = False,
+        record_type_usages: bool = False,
     ):
         timed = self.TLogger.timed
+
         self.project = project
         self.add_override_usages = add_override_usages
         self.add_implicit_rel_imports = add_implicit_rel_imports
+        self.record_type_usages = record_type_usages
+
         self.ns_hier = ModuleHierarchy.from_modules(project.modules.keys())
         with timed("build_project_namespaces"):
             module2ns = build_project_namespaces_(project, self.ns_hier)
@@ -906,7 +901,9 @@ class UsageAnalysis:
 
         if mod2analysis is None:
             self.mod2analysis = {
-                mname: ModuleAnalysis(project.modules[mname])
+                mname: ModuleAnalysis(
+                    project.modules[mname], record_type_usages=self.record_type_usages
+                )
                 for mname in self.sorted_modules
             }
         else:
@@ -1007,7 +1004,7 @@ class UsageAnalysis:
         caller: ProjectPath,
         qname: QualifiedName,
         is_call: bool,
-    ):
+    ) -> Iterable[ProjectUsage]:
         def gen_class_usages(member_name: str):
             if member_name.startswith("__") and member_name.endswith("__"):
                 # skip common methods like __init__
@@ -1077,6 +1074,8 @@ class UsageAnalysis:
 
                 callee = ProjectPath(mname, ".".join(segs))
                 if callee in self.path2class:
+                    if self.record_type_usages:
+                        yield ProjectUsage(caller, callee, is_certain=True)
                     yield from gen_constructor_usages(self.path2class[callee])
                 elif callee in self.path2elem:
                     yield ProjectUsage(
@@ -1099,6 +1098,8 @@ class UsageAnalysis:
                     if callee is None:
                         continue
                     if callee in self.path2class:
+                        if self.record_type_usages:
+                            yield ProjectUsage(caller, callee, is_certain=True)
                         yield from gen_constructor_usages(self.path2class[callee])
                         break
                     elif callee in self.path2elem:
@@ -1143,13 +1144,15 @@ class ModuleAnalysis:
     module: PythonModule
     node2qnames: dict[cst.CSTNode, Collection[QualifiedName]]
     node2pos: dict[cst.CSTNode, CodeRange]
+    record_type_usages: bool
 
-    def __init__(self, mod: PythonModule):
+    def __init__(self, mod: PythonModule, record_type_usages: bool = False):
         self.module = mod
         wrapper = cst.MetadataWrapper(mod.tree, unsafe_skip_copy=True)
         # below need to be dict to be pickleable
         self.node2qnames = dict(wrapper.resolve(QualifiedNameProvider))
         self.node2pos = dict(wrapper.resolve(PositionProvider))
+        self.record_type_usages = record_type_usages
 
     @cached_property
     def module_usages(
@@ -1157,10 +1160,11 @@ class ModuleAnalysis:
     ) -> Sequence[tuple[ProjectPath, CodeRange, QualifiedName, bool]]:
         """
         Compute a mapping from each method/function to the methods and functions they use.
-        Also resolve the qualified name of superclasses.
         """
 
-        recorder = UsageRecorder(self.node2qnames, self.node2pos)
+        recorder = UsageRecorder(
+            self.node2qnames, self.node2pos, self.record_type_usages
+        )
         result = list[tuple[ProjectPath, CodeRange, QualifiedName, bool]]()
 
         for e in self.module.all_elements():
@@ -1197,7 +1201,7 @@ class ModuleAnalysis:
 
     @cached_property
     def superclass_map(self) -> Mapping[ProjectPath, Collection[QualifiedName]]:
-        """Update the superclasses field of each class in-place using the resolved qualified names."""
+        """Map the path of each class to its superclasses."""
         result = dict[ProjectPath, list[QualifiedName]]()
         for cls in self.module.all_classes():
             superclasses = list()
@@ -1438,7 +1442,6 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
                 parent_class=self.current_class.path if self.current_class else None,
             )
             self._record_elem(func, node)
-            return False
 
         def leave_FunctionDef(self, node) -> None:
             assert self.visit_stack[-1] == _VisitKind.Function
@@ -1598,15 +1601,18 @@ class UsageRecorder(cst.CSTVisitor):
         self,
         name_mapping: Mapping[cst.CSTNode, Collection[QualifiedName]],
         span_mapping,
+        record_type_usages: bool,
     ):
         super().__init__()
 
         self.name_mapping = name_mapping
         self.span_mapping = span_mapping
+        self.record_type_usages = record_type_usages
         self.parents = list[cst.CSTNode]()
         self.usages = list[tuple[CodeRange, QualifiedName, bool]]()
 
-    def _resolve(self, name: cst.CSTNode) -> list[QualifiedName]:
+    def resolve_ref(self, name: cst.CSTNode) -> list[QualifiedName]:
+        "Return a list of qualified names that the given name could refer to."
         if is_access_chain(name) and name in self.name_mapping:
             srcs = self.name_mapping[name]
             if len(srcs) == 0 and isinstance(name, cst.Name):
@@ -1621,11 +1627,11 @@ class UsageRecorder(cst.CSTVisitor):
         return len(self.parents) > 0 and isinstance(self.parents[-1], cst.Call)
 
     def record_name_use(self, name: cst.CSTNode):
-        for src in self._resolve(name):
+        for src in self.resolve_ref(name):
             self.usages.append((self.span_mapping[name], src, self.is_call_name()))
 
     def visit_Attribute(self, node: cst.Attribute):
-        if not self._resolve(node):
+        if not self.resolve_ref(node):
             # if the access cannot be resolved (e.g., is an expression), we record
             # the usage as potential method access.
             qname = QualifiedName(
@@ -1646,9 +1652,8 @@ class UsageRecorder(cst.CSTVisitor):
     def on_leave(self, node: cst.CSTNode) -> Optional[bool]:
         self.parents.pop()
 
-    # avoid using type annotation to track usages
     def visit_Annotation(self, node: cst.Annotation):
-        return False
+        return self.record_type_usages
 
 
 @lru_cache(maxsize=128)
