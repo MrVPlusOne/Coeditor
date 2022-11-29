@@ -12,12 +12,9 @@ def make_or_load_datasets(
     dataset_name: str,
     recreate_data: bool = False,
 ) -> dict[str, TokenizedEditDataset]:
-    window = WindowArgs(4096)
-    # encoder = FileBasedEditEncoder(window)
-    # encoder = CstBasedEditEncoder(window)
-    encoder = AnalysisBasedEditEncoder(
-        window=window, extra_ctx_size=1000, extra_ctx_names=("usees", "post-usees")
-    )
+    encoder = FileBasedEditEncoder()
+    # encoder = CstBasedEditEncoder()
+    # encoder = AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees"))
     save_dir = get_dataset_dir(dataset_name) / repr_modified_args(encoder)
 
     if recreate_data or not save_dir.exists():

@@ -1,5 +1,6 @@
 # utils to encode and decode code changes into CodeT5 format.
 
+from abc import ABC, abstractmethod
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import field
@@ -85,7 +86,7 @@ def decode_tokens(tokens: TokenSeq) -> str:
     return _Tokenizer.decode(tokens, add_special_tokens=False)
 
 
-def encode_basic(text: str):
+def encode_basic(text: str) -> TokenSeq:
     "Encode a string into a token sequence using the base tokenizer."
     return _BaseTokenizer.encode(text, add_special_tokens=False)
 
@@ -339,34 +340,20 @@ class WindowArgs:
         return WindowArgs(4096, 0.5)
 
 
-@dataclass
-class TokenizedEdit:
+def extract_edit_change(input_tks: TokenSeq, output_tks: TokenSeq) -> Modified[str]:
+    inlined = inline_output_tokens(input_tks, output_tks)
+    return tokens_to_change(inlined)
+
+
+class TokenizedEdit(ABC):
     input_tks: TokenSeq
     output_tks: TokenSeq
+    main_tks: TokenSeq
     path: ProjectPath
 
-    def truncate_ctx(
-        self,
-        args: WindowArgs,
-    ) -> "TokenizedEdit":
-        return TokenizedEdit(
-            args.truncate_ctx(self.input_tks),
-            self.output_tks,
-            path=self.path,
-        )
-
-    def as_change(self, main_code_only: bool = False) -> Modified[str]:
-        input_tks = self.get_main_tks() if main_code_only else self.input_tks
-        inlined = inline_output_tokens(input_tks, self.output_tks)
-        return tokens_to_change(inlined)
-
-    def get_main_tks(self) -> TokenSeq:
-        lines = split_list(self.input_tks, Newline_id)
-        main_lines = list[TokenSeq]()
-        for line in lines:
-            if line and is_extra_id(line[0]):
-                main_lines.append(line)
-        return join_list(main_lines, Newline_id)
+    @abstractmethod
+    def all_ctxs(self) -> dict[str, TokenSeq]:
+        pass
 
     def show(self, ctx_tks: int = 2048) -> str:
         return self.show_prediction(None, ctx_tks)
@@ -389,20 +376,8 @@ class TokenizedEdit:
                 lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
             return "\n".join(lines)
 
-        extra_id_poses = [i for i, tk in enumerate(self.input_tks) if is_extra_id(tk)]
-        l, r = extra_id_poses[0], extra_id_poses[-1]
-        left_ctx = self.input_tks[max(0, l - ctx_tks) : l]
-        right_ctx = self.input_tks[r + 1 : min(len(self.input_tks), r + ctx_tks)]
-        main_tks = self.input_tks[l : r + 1]
-
-        main_lines = output_ids_as_seqs(main_tks)
+        main_lines = output_ids_as_seqs(self.main_tks)
         id_map = {k: i for i, k in enumerate(main_lines)}
-        new_main_tks = []
-        for tk in main_tks:
-            if is_extra_id(tk):
-                new_main_tks.extend(encode_basic(show_label(id_map[tk])))
-            else:
-                new_main_tks.append(tk)
 
         pred_lines = (
             ["========Prediction========", f"{show_extra_tokens(pred_tks, main_lines)}"]
@@ -410,15 +385,14 @@ class TokenizedEdit:
             else []
         )
         outputs = [
-            f"========Left Context========",
-            decode_tokens(left_ctx),
             "========Ground Truth========",
             show_extra_tokens(self.output_tks, main_lines),
             *pred_lines,
             "========Main Code========",
-            decode_tokens(new_main_tks),
-            "========Right Context========",
-            decode_tokens(right_ctx),
+            decode_tokens(self.main_tks),
+        ] + [
+            f"==========={name}===========\n" + decode_tokens(tks)
+            for name, tks in self.all_ctxs().items()
         ]
         return "\n".join(outputs)
 
@@ -478,21 +452,86 @@ class TokenizedEdit:
         return n_changes <= max_changes
 
 
+class TruncateAt(enum.Enum):
+    Left = 0
+    Right = 1
+
+
+def truncate_sections(
+    max_tks: int,
+    sections: dict[str, tuple[TokenSeq, TruncateAt, int]],
+) -> dict[str, TokenSeq]:
+    section_lens = dict[str, int]()
+    remaining = max_tks
+    for k, (tks, truncate_dir, limit) in sections.items():
+        l = min(len(tks), limit, remaining)
+        remaining -= l
+        section_lens[k] = l
+
+    for k, (tks, truncate_dir, limit) in sections.items():
+        if remaining <= 0:
+            break
+        inc = min(remaining, len(tks) - section_lens[k])
+        section_lens[k] += inc
+        remaining -= inc
+
+    result = dict[str, TokenSeq]()
+    for k, (tks, truncate_dir, limit) in sections.items():
+        l = section_lens[k]
+        if l < len(tks):
+            if truncate_dir == TruncateAt.Left:
+                tks = tks[-l:]
+                if tks:
+                    tks[0] = BOS_id
+            else:
+                assert truncate_dir == TruncateAt.Right
+                tks = tks[:l]
+                if tks:
+                    tks[-1] = EOS_id
+        result[k] = tks
+    return result
+
+
+@dataclass
+class FileBasedTokenizedEdit(TokenizedEdit):
+    main_tks: TokenSeq
+    left_tks: TokenSeq
+    right_tks: TokenSeq
+    output_tks: TokenSeq
+    path: ProjectPath
+
+    @property
+    def input_tks(self) -> TokenSeq:
+        return self.left_tks + self.main_tks + self.right_tks
+
+    def all_ctxs(self) -> dict[str, TokenSeq]:
+        return {
+            "left context": self.left_tks,
+            "right context": self.right_tks,
+        }
+
+
+MainPrompt = encode_basic("\n# EDIT:\n")
+
+
 @dataclass
 class FileBasedEditEncoder:
-    window: WindowArgs
+    n_max_tks: int = 4000
+    n_main_tks: int = 1000
+    n_left_tks: int = 2000
+    n_right_tks: int = 2000
 
     def encode_pedit(
         self,
         pedit: ProjectEdit,
-    ) -> Iterable[TokenizedEdit]:
+    ) -> Iterable[FileBasedTokenizedEdit]:
         for me in pedit.changes.values():
             yield from self.encode_medit(me)
 
     def encode_medit(
         self,
         medit: ModuleEdit,
-    ) -> Iterable[TokenizedEdit]:
+    ) -> Iterable[FileBasedTokenizedEdit]:
         modifications = medit.modified_functions(ast_must_change=True)
         if not modifications:
             return
@@ -501,7 +540,7 @@ class FileBasedEditEncoder:
         mod_after = medit.after
         code_after = mod_after.code.split("\n")
         mod_name = mod_after.name
-        ctx_lines = self.window.max_window_size // 2
+        ctx_lines = self.n_max_tks // 2
 
         for path, c in modifications.items():
             after_range = mod_after.location_map[c.after.tree]
@@ -536,28 +575,69 @@ class FileBasedEditEncoder:
             input, output = change_to_input_output(
                 Modified(code_main_before, code_main_after)
             )
+            truncated = truncate_sections(
+                self.n_max_tks,
+                {
+                    "main": (input, TruncateAt.Right, self.n_main_tks),
+                    "left": (above_tks, TruncateAt.Left, self.n_left_tks),
+                    "right": (below_tks, TruncateAt.Right, self.n_right_tks),
+                },
+            )
+            truncated["main"].append(Newline_id)
+            truncated["left"].extend(MainPrompt)
 
-            ex = TokenizedEdit([], [], path=ProjectPath(mod_name, path))
-            ex.input_tks.extend(above_tks)
-            ex.input_tks.append(Newline_id)
-            ex.input_tks.extend(input)
-            ex.input_tks.append(Newline_id)
-            ex.output_tks = output
-            ex.input_tks.extend(below_tks)
-            ex = ex.truncate_ctx(self.window)
-            yield ex
+            edit = FileBasedTokenizedEdit(
+                main_tks=truncated["main"],
+                left_tks=truncated["left"],
+                right_tks=truncated["right"],
+                output_tks=output,
+                path=ProjectPath(mod_name, path),
+            )
+            yield edit
+
+
+@dataclass
+class CstBasedTokenizedEdit(TokenizedEdit):
+    main_tks: TokenSeq
+    left_tks: TokenSeq
+    right_tks: TokenSeq
+    output_tks: TokenSeq
+    path: ProjectPath
+    elems: set[ProjectPath]
+
+    @property
+    def input_tks(self) -> TokenSeq:
+        return self.left_tks + self.main_tks + self.right_tks
+
+    def all_ctxs(self) -> dict[str, TokenSeq]:
+        return {
+            "left context": self.left_tks,
+            "right context": self.right_tks,
+        }
 
 
 @dataclass
 class CstBasedEditEncoder:
-    window: WindowArgs
+    n_max_tks: int = 4000
+    n_main_tks: int = 1000
+    n_left_tks: int = 2000
+    n_right_tks: int = 2000
     collapse_unchanged: bool = True
 
     def encode_pedit(
         self,
         pedit: ProjectEdit,
-    ) -> Iterable[TokenizedEdit]:
-        prompt = encode_basic("\n# EDIT:\n")
+    ) -> Iterable[CstBasedTokenizedEdit]:
+        def get_selected(
+            elems: Iterable[ProjectPath], elem_lens: Iterable[int], selection_len: int
+        ):
+            for e, e_len in zip(elems, elem_lens):
+                yield e
+                selection_len -= e_len
+                if selection_len <= 0:
+                    break
+            pass
+
         ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
         for mname, medit in pedit.changes.items():
             mod_fs = medit.modified_functions(ast_must_change=True)
@@ -573,24 +653,79 @@ class CstBasedEditEncoder:
                     continue
                 main_change = c.map(lambda x: x.code)
                 main_tks, output_tks = change_to_input_output(main_change)
-                left_ctx = join_list(
-                    (ctx_encoder.encode_ctx_element(p) for p in sorted_elems[:i]),
-                    sep=Newline_id,
+                left_etks = [
+                    ctx_encoder.encode_ctx_element(p) for p in sorted_elems[:i]
+                ]
+                left_ctx = join_list(left_etks, sep=Newline_id)
+                right_etks = [
+                    ctx_encoder.encode_ctx_element(p) for p in sorted_elems[i + 1 :]
+                ]
+                right_ctx = join_list(right_etks, sep=Newline_id)
+                truncated = truncate_sections(
+                    self.n_max_tks,
+                    {
+                        "main": (main_tks, TruncateAt.Right, self.n_main_tks),
+                        "left": (left_ctx, TruncateAt.Left, self.n_left_tks),
+                        "right": (right_ctx, TruncateAt.Right, self.n_right_tks),
+                    },
                 )
-                right_ctx = join_list(
-                    (ctx_encoder.encode_ctx_element(p) for p in sorted_elems[i + 1 :]),
-                    sep=Newline_id,
+                selected = {path}
+                for e in get_selected(
+                    reversed(sorted_elems[:i]),
+                    reversed([len(e) for e in left_etks]),
+                    len(truncated["left"]),
+                ):
+                    selected.add(e)
+
+                for e in get_selected(
+                    sorted_elems[i + 1 :],
+                    [len(e) for e in right_etks],
+                    len(truncated["right"]),
+                ):
+                    selected.add(e)
+
+                truncated["main"].append(Newline_id)
+                truncated["left"].extend(MainPrompt)
+                ex = CstBasedTokenizedEdit(
+                    truncated["main"],
+                    truncated["left"],
+                    truncated["right"],
+                    output_tks=output_tks,
+                    path=path,
+                    elems=selected,
                 )
-                input_tks = left_ctx + prompt + main_tks + [Newline_id] + right_ctx
-                ex = TokenizedEdit(input_tks, output_tks, path=path)
-                ex = ex.truncate_ctx(self.window)
                 yield ex
 
 
 @dataclass
+class AnalysisBasedTokenizedEdit(TokenizedEdit):
+    main_tks: TokenSeq
+    left_tks: TokenSeq
+    right_tks: TokenSeq
+    extra_tks: TokenSeq
+    output_tks: TokenSeq
+    path: ProjectPath
+    elems: set[ProjectPath]
+
+    @property
+    def input_tks(self) -> TokenSeq:
+        return self.extra_tks + self.left_tks + self.main_tks + self.right_tks
+
+    def all_ctxs(self) -> dict[str, TokenSeq]:
+        return {
+            "extra context": self.extra_tks,
+            "left context": self.left_tks,
+            "right context": self.right_tks,
+        }
+
+
+@dataclass
 class AnalysisBasedEditEncoder:
-    window: WindowArgs
-    extra_ctx_size: int
+    n_max_tks: int = 4000
+    n_main_tks: int = 500
+    n_extra_tks: int = 1500
+    n_left_tks: int = 1000
+    n_right_tks: int = 1000
     extra_ctx_names: Sequence[str] = ("usees",)
     collapse_unchanged: bool = True
     record_type_usages: bool = False
@@ -601,40 +736,51 @@ class AnalysisBasedEditEncoder:
         self,
         pedits: Sequence[ProjectEdit],
     ) -> Iterable[TokenizedEdit]:
-        anlyses = analyze_edits(
+        analyses = analyze_edits(
             pedits, record_type_usages=self.record_type_usages, silent=True
         )
         # display(UsageAnalysis.TLogger.as_dataframe())
-        cst_encoder = CstBasedEditEncoder(self.window, self.collapse_unchanged)
-        for analysis in anlyses:
+        cst_encoder = CstBasedEditEncoder(
+            n_max_tks=self.n_main_tks + self.n_left_tks + self.n_right_tks,
+            n_main_tks=self.n_main_tks,
+            n_left_tks=self.n_left_tks,
+            n_right_tks=self.n_right_tks,
+            collapse_unchanged=self.collapse_unchanged,
+        )
+        for analysis in analyses:
             pedit = analysis.pedit
             ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
             path_to_cxt_edit = {e.path: e for e in analysis.ctx_edits}
             tk_edits = list(cst_encoder.encode_pedit(pedit))
             for edit in tk_edits:
-                module = edit.path.module
                 ctx_edit = path_to_cxt_edit[edit.path]
                 ctx_changes = [
                     c
                     for group in self.extra_ctx_names
                     for c in ctx_edit.grouped_ctx_changes[group]
-                    if get_change_path(c).module != module
+                    if get_change_path(c) not in edit.elems
                 ]
                 if ctx_changes:
                     extra_ctx_tks = ctx_encoder.encode_ctx_changes(ctx_changes)
                     max_ctx_size = max(
-                        self.extra_ctx_size,
-                        self.window.max_window_size - len(edit.input_tks),
+                        self.n_extra_tks,
+                        self.n_max_tks - len(edit.input_tks),
                     )
                     if len(extra_ctx_tks) > max_ctx_size:
                         extra_ctx_tks = extra_ctx_tks[:max_ctx_size]
                         extra_ctx_tks[-1] = EOS_id
-                    inner_window = copy.deepcopy(self.window)
-                    used_space = len(extra_ctx_tks) + len(self.CtxSepTokens)
-                    inner_window.max_window_size -= used_space
-                    edit = edit.truncate_ctx(inner_window)
-                    edit.input_tks = extra_ctx_tks + self.CtxSepTokens + edit.input_tks
-                yield edit
+                else:
+                    extra_ctx_tks = TokenSeq()
+
+                yield AnalysisBasedTokenizedEdit(
+                    edit.main_tks,
+                    edit.left_tks,
+                    edit.right_tks,
+                    extra_tks=extra_ctx_tks,
+                    output_tks=edit.output_tks,
+                    path=edit.path,
+                    elems={get_change_path(c) for c in ctx_changes} | edit.elems,
+                )
 
 
 @dataclass

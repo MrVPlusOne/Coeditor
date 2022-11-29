@@ -7,6 +7,7 @@ from coeditor.encoding import (
     TokenizedEdit,
     WindowArgs,
     _Tokenizer,
+    extract_edit_change,
     is_extra_id,
     BOS_id,
     EOS_id,
@@ -45,7 +46,6 @@ class DecodingArgs:
 @dataclass
 class TrainingArgs:
     max_batch_tokens: int
-    window: WindowArgs
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     quicktest: bool = False
@@ -54,7 +54,6 @@ class TrainingArgs:
 @dataclass
 class EvalArgs:
     max_batch_tokens: int
-    window: WindowArgs
 
 
 @dataclass
@@ -127,7 +126,7 @@ class CoeditorModel:
     ) -> "DatasetDecodingResult":
         eval_edits = list(eval_data.all_edits())
         dataset = edits_to_dataset(
-            [e.truncate_ctx(eval_args.window) for e in eval_edits],
+            eval_edits,
             self.data_args,
             add_ex_id=True,
         )
@@ -141,6 +140,7 @@ class CoeditorModel:
         return DatasetDecodingResult(
             eval_args,
             dec_args,
+            edits=eval_edits,
             input_ids=dataset["input_ids"],
             labels=dataset["labels"],
             predictions=pred_seq,
@@ -172,7 +172,7 @@ class CoeditorModel:
     ):
         eval_edits = list(eval_data.all_edits())
         eval_loader = edits_to_dataloader(
-            [e.truncate_ctx(eval_args.window) for e in eval_edits],
+            eval_edits,
             eval_args.max_batch_tokens,
             self.data_args,
             shuffle=True,
@@ -204,6 +204,7 @@ class CoeditorModel:
 class DatasetDecodingResult:
     eval_args: "EvalArgs"
     dec_args: DecodingArgs
+    edits: list[TokenizedEdit]
     input_ids: list[TokenSeq]
     labels: list[TokenSeq]
     predictions: list[TokenSeq]
@@ -215,22 +216,17 @@ class DatasetDecodingResult:
         return DatasetDecodingResult(
             self.eval_args,
             self.dec_args,
+            [self.edits[i] for i in ids],
             [self.input_ids[i] for i in ids],
             [self.labels[i] for i in ids],
             [self.predictions[i] for i in ids],
         )
 
-    def edits(self):
-        for inputs, labels in zip(self.input_ids, self.labels):
-            yield TokenizedEdit(inputs, labels, ProjectPath("UNKNOWN", ""))
-
     def exact_match_accuracy(self) -> WeightedSum[int, int]:
         exact_match = WeightedSum(0, 0)
-        for pred, edit in zip(self.predictions, self.edits()):
-            true_code = edit.as_change(True).after
-            pred_code = (
-                TokenizedEdit(edit.input_tks, pred, edit.path).as_change(True).after
-            )
+        for x, y, pred in zip(self.input_ids, self.labels, self.predictions):
+            true_code = extract_edit_change(x, y).after
+            pred_code = extract_edit_change(x, pred).after
             is_correct = normalize_code_by_ast(true_code) == normalize_code_by_ast(
                 pred_code
             )
@@ -244,19 +240,16 @@ class DatasetDecodingResult:
         (out_dir / "correct").mkdir(parents=True, exist_ok=True)
         (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
 
-        edits = list(self.edits())
-        preds = self.predictions
         for ex_id in tqdm(ex_ids, desc="saving examples"):
-            edit = edits[ex_id]
-            pred_tks = preds[ex_id]
-            true_code = edit.as_change(True).after
-            pred_code = (
-                TokenizedEdit(edit.input_tks, pred_tks, edit.path).as_change(True).after
-            )
+            pred_tks = self.predictions[ex_id]
+            true_code = extract_edit_change(
+                self.input_ids[ex_id], self.labels[ex_id]
+            ).after
+            pred_code = extract_edit_change(self.input_ids[ex_id], pred_tks).after
             is_correct = normalize_code_by_ast(true_code) == normalize_code_by_ast(
                 pred_code
             )
-            compare_str = edit.show_prediction(pred_tks, ctx_tks=ctx_tks)
+            compare_str = self.edits[ex_id].show_prediction(pred_tks, ctx_tks=ctx_tks)
             out_file = (
                 out_dir / ("correct" if is_correct else "incorrect") / f"ex-{ex_id}.txt"
             )
@@ -280,13 +273,13 @@ def train_coeditor_model(
         eval_edits = eval_edits[:2]
 
     train_lodader = edits_to_dataloader(
-        [e.truncate_ctx(train_args.window) for e in train_edits],
+        train_edits,
         train_args.max_batch_tokens,
         args=model.data_args,
         shuffle=True,
     )
     eval_loader = edits_to_dataloader(
-        [e.truncate_ctx(eval_args.window) for e in eval_edits],
+        eval_edits,
         eval_args.max_batch_tokens,
         args=model.data_args,
         shuffle=True,

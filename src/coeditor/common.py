@@ -10,6 +10,7 @@ from textwrap import dedent
 from pathlib import Path
 from tqdm import tqdm
 import subprocess
+import enum
 from spot.utils import (
     DefaultWorkers,
     assert_eq,

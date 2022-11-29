@@ -518,6 +518,7 @@ def analyze_edits(
     usees_in_ctx: bool = True,
     users_in_ctx: bool = True,
     post_usages_in_ctx: bool = True,
+    record_type_usages: bool = False,
     silent=False,
 ) -> list[EditAnalysis]:
     """Perform incremental edit analysis from a sequence of edits."""
@@ -531,7 +532,8 @@ def analyze_edits(
         "Performing intial module-level analysis...", silent=silent
     ), timer.timed("ModuleAnlaysis/Initial"):
         module_analysis = {
-            mname: ModuleAnalysis(m) for mname, m in edits[0].before.modules.items()
+            mname: ModuleAnalysis(m, record_type_usages=record_type_usages)
+            for mname, m in edits[0].before.modules.items()
         }
 
     def analyze_project_(project: PythonProject) -> UsageAnalysis:
@@ -544,13 +546,16 @@ def analyze_edits(
                 and module_analysis[mname].module.code == module.code
             ):
                 with timer.timed("ModuleAnlaysis/Incremental"):
-                    module_analysis[mname] = ModuleAnalysis(module)
+                    module_analysis[mname] = ModuleAnalysis(
+                        module, record_type_usages=record_type_usages
+                    )
         with timer.timed("UsageAnalysis"):
             return UsageAnalysis(
                 project,
                 module_analysis,
                 add_implicit_rel_imports=True,
                 add_override_usages=True,
+                record_type_usages=record_type_usages,
             )
 
     def sort_usages(usages: Sequence[ProjectUsage]):

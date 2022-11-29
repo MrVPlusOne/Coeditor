@@ -25,23 +25,21 @@ def check_save_dir(model_name: str):
 os.chdir(proj_root())
 
 dataset_name = "medium"
-model_variant = "-analysis-post_usees"
+# model_variant = "-analysis-post_usees"
+model_variant = "-file"
 
 data_args = DataTransformArgs(
     shuffle_extra_ids=True,
 )
 train_args = TrainingArgs(
     max_batch_tokens=4096,
-    window=WindowArgs(4096),
     quicktest=True,
 )
 valid_args = EvalArgs(
     max_batch_tokens=4096 * 2,
-    window=WindowArgs(4096),
 )
 test_args = EvalArgs(
     max_batch_tokens=4096 * 2,
-    window=WindowArgs(4096),
 )
 dec_args = DecodingArgs()
 
@@ -52,7 +50,7 @@ if train_args.quicktest:
 
 check_save_dir(model_name)
 
-datasets = make_or_load_datasets("medium")
+datasets = make_or_load_datasets(dataset_name, recreate_data=True)
 
 config_dict = {
     k: get_modified_args(v)
