@@ -1,7 +1,6 @@
 from pathlib import Path
 from textwrap import dedent
 
-from numpy import False_
 from spot.static_analysis import (
     ModuleHierarchy,
     ModuleName,

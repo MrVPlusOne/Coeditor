@@ -2,13 +2,11 @@
 
 from abc import ABC, abstractmethod
 import asyncio
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import field
 import difflib
 import copy
 import random
 
-from functools import cache
 from textwrap import indent
 from spot.static_analysis import (
     ProjectPath,
@@ -372,24 +370,33 @@ class TokenizedEdit(ABC):
                     # show the delted line
                     origin_line = main_tk_lines.get(k, [])
                     seg = seg + origin_line
-                label = show_label(id_map[k] if k in id_map else -1)
+                label = show_label(id_map.get(k, -1))
                 lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
             return "\n".join(lines)
 
-        main_lines = output_ids_as_seqs(self.main_tks)
-        id_map = {k: i for i, k in enumerate(main_lines)}
+        main_segs = output_ids_as_seqs(self.main_tks)
+        id_map = {k: i for i, k in enumerate(main_segs)}
+        main_lines = list[str]()
+        for line_tks in split_list(self.main_tks, Newline_id):
+            if line_tks and is_extra_id(line_tks[0]):
+                line = show_label(id_map.get(line_tks[0], -1)) + decode_tokens(
+                    line_tks[1:]
+                )
+            else:
+                line = decode_tokens(line_tks)
+            main_lines.append(line)
 
         pred_lines = (
-            ["========Prediction========", f"{show_extra_tokens(pred_tks, main_lines)}"]
+            ["========Prediction========", f"{show_extra_tokens(pred_tks, main_segs)}"]
             if pred_tks
             else []
         )
         outputs = [
             "========Ground Truth========",
-            show_extra_tokens(self.output_tks, main_lines),
+            show_extra_tokens(self.output_tks, main_segs),
             *pred_lines,
             "========Main Code========",
-            decode_tokens(self.main_tks),
+            "\n".join(main_lines),
         ] + [
             f"==========={name}===========\n" + decode_tokens(tks)
             for name, tks in self.all_ctxs().items()
@@ -573,7 +580,7 @@ class FileBasedEditEncoder:
             above_tks = change_to_tokens(above_change)
             below_tks = change_to_tokens(below_change)
             input, output = change_to_input_output(
-                Modified(code_main_before, code_main_after)
+                Modified(code_main_before.strip("\n"), code_main_after.strip("\n"))
             )
             truncated = truncate_sections(
                 self.n_max_tks,

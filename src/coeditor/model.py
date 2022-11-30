@@ -1,3 +1,4 @@
+import copy
 from dataclasses import field
 import shutil
 import torch
@@ -8,6 +9,7 @@ from coeditor.encoding import (
     WindowArgs,
     _Tokenizer,
     extract_edit_change,
+    get_extra_id,
     is_extra_id,
     BOS_id,
     EOS_id,
@@ -249,6 +251,11 @@ class DatasetDecodingResult:
             is_correct = normalize_code_by_ast(true_code) == normalize_code_by_ast(
                 pred_code
             )
+            id_map = {
+                k: get_extra_id(i)
+                for i, k in enumerate(output_ids_as_seqs(self.input_ids[ex_id]))
+            }
+            pred_tks = [id_map.get(t, t) for t in pred_tks]
             compare_str = self.edits[ex_id].show_prediction(pred_tks, ctx_tks=ctx_tks)
             out_file = (
                 out_dir / ("correct" if is_correct else "incorrect") / f"ex-{ex_id}.txt"
