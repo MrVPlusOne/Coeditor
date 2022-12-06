@@ -109,25 +109,6 @@ def test_mypy_checker_1():
         assert Path("data/code/bad_code_2.py").resolve() in check_r.error_dict
 
 
-def test_mypy_checker_2():
-    checker_dir = Path("data/code_output")
-    if not checker_dir.exists():
-        checker_dir.mkdir(parents=True)
-    with mypy_checker(checker_dir, wait_before_check=0.0) as checker:
-        if Path("data/code_output/bad_code_1.py").exists():
-            os.remove("data/code_output/bad_code_1.py")
-        oe = checker.recheck_project().num_errors
-        write_file("data/code_output/bad_code_1.py", parsed.code)
-        assert checker.recheck_project().num_errors > oe
-        new_code = apply_annotations(parsed, code_1_patch).code
-        write_file(
-            "data/code_output/bad_code_1.py",
-            new_code,
-        )
-        c_r = checker.recheck_project()
-        assert c_r.num_errors == oe, f"mypy_output: {c_r.output_str}\ncode: {new_code}"
-
-
 def test_type_parsing():
     # test quoted types
     assert parse_type_str("'Foo[int]'") == parse_type_str("Foo[int]")

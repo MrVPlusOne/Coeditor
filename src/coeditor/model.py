@@ -6,7 +6,6 @@ import torch
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import (
     TokenizedEdit,
-    WindowArgs,
     _Tokenizer,
     extract_edit_change,
     get_extra_id,
@@ -299,7 +298,7 @@ def train_coeditor_model(
         def get_eval_dataloader(self, eval_dataset):
             return eval_loader
 
-    eval_interval = 5 * len(eval_loader)
+    eval_interval = 6 * len(eval_loader)
     trainer_args = Seq2SeqTrainingArguments(
         output_dir=str(train_dir),
         overwrite_output_dir=True,
@@ -322,7 +321,7 @@ def train_coeditor_model(
     trainer = DynamicTrainer(
         model.codet5,
         trainer_args,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
     trainer.train()

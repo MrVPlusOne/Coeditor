@@ -7,7 +7,6 @@ from coeditor.encoding import (
     TokenizedEdit,
     Newline_id,
     Add_id,
-    WindowArgs,
     decode_tokens,
     encode_basic,
 )

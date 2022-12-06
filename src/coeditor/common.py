@@ -246,7 +246,7 @@ def normalize_code_by_ast(code: str) -> str:
     """Normalize the code by parsing and unparsing it using the AST module.
     If parsing fails, return the original code."""
     try:
-        tree = ast.parse(code)
+        tree = ast.parse(dedent(code))
         return ast.unparse(tree)
     except SyntaxError:
         return code

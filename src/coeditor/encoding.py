@@ -285,59 +285,6 @@ def encode_diffs(diffs: list[str]) -> TokenSeq:
     return tokens
 
 
-@dataclass
-class WindowArgs:
-    max_window_size: int
-    left_ctx_ratio: float = 0.5
-
-    def truncate_ctx(
-        self,
-        input_tks: TokenSeq,
-    ) -> TokenSeq:
-        """
-        Truncate the input to make it fit within the max window size.
-        The cutoff is centered around the <extra_id> tokens.
-        """
-        assert self.max_window_size > 0
-        extra_id_poses = [i for i, tk in enumerate(input_tks) if is_extra_id(tk)]
-        assert extra_id_poses
-        assert 0 <= self.left_ctx_ratio <= 1
-        main_left = extra_id_poses[0]
-        main_end = min(extra_id_poses[-1] + 1, main_left + self.max_window_size)
-        main_size = main_end - main_left
-        assert main_size >= 0
-
-        if main_size > self.max_window_size:
-            # the main part is too long, truncate it
-            left_ctx_start = main_left
-            right_ctx_end = left_ctx_start + self.max_window_size
-        else:
-            left_size = int((self.max_window_size - main_size) * self.left_ctx_ratio)
-            right_size = self.max_window_size - main_size - left_size
-            assert right_size >= 0, f"right_size: {right_size}"
-
-            right_ctx_end = min(len(input_tks), main_end + right_size)
-            right_size = right_ctx_end - main_end
-            assert right_size >= 0, f"right_size: {right_size}"
-
-            # if right_size doesn't use up all the space, we can expand the left context
-            left_size = self.max_window_size - main_size - right_size
-            left_ctx_start = max(0, extra_id_poses[0] - left_size)
-            assert left_size >= 0
-
-        new_input = input_tks[left_ctx_start:right_ctx_end]
-        if left_ctx_start > 0:
-            new_input[0] = BOS_id
-        if right_ctx_end < len(input_tks):
-            new_input[-1] = EOS_id
-        assert len(new_input) <= self.max_window_size
-        return new_input
-
-    @staticmethod
-    def Default() -> "WindowArgs":
-        return WindowArgs(4096, 0.5)
-
-
 def extract_edit_change(input_tks: TokenSeq, output_tks: TokenSeq) -> Modified[str]:
     inlined = inline_output_tokens(input_tks, output_tks)
     return tokens_to_change(inlined)
@@ -438,6 +385,10 @@ class TokenizedEdit(ABC):
                         for ref in ctx_addtions
                     )
                 elif line == [Del_id]:
+                    if line_key not in main_lines:
+                        print(f"Key {decode_tokens([line_key])} not found.")
+                        print("Main tokens:")
+                        print(decode_tokens(self.main_tks))
                     deleted = main_lines[line_key]
                     return any(
                         as_any(sentence_bleu([ref], deleted)) > blue_threshold
@@ -448,7 +399,10 @@ class TokenizedEdit(ABC):
             else:
                 return True
 
-        for k, seg in output_ids_as_seqs(self.output_tks).items():
+        out_segs = output_ids_as_seqs(self.output_tks)
+        if all(not s for s in out_segs.values()):
+            return False
+        for k, seg in out_segs.items():
             for line in split_list(seg, Newline_id):
                 if not has_match(line, k):
                     return False
@@ -464,39 +418,51 @@ class TruncateAt(enum.Enum):
     Right = 1
 
 
-def truncate_sections(
-    max_tks: int,
-    sections: dict[str, tuple[TokenSeq, TruncateAt, int]],
-) -> dict[str, TokenSeq]:
-    section_lens = dict[str, int]()
-    remaining = max_tks
-    for k, (tks, truncate_dir, limit) in sections.items():
-        l = min(len(tks), limit, remaining)
-        remaining -= l
-        section_lens[k] = l
+def truncate_section(sec: TokenSeq, direction: TruncateAt, limit: int) -> TokenSeq:
+    if len(sec) <= limit:
+        return sec
 
-    for k, (tks, truncate_dir, limit) in sections.items():
+    if direction == TruncateAt.Left:
+        sec = sec[-limit:]
+        if sec:
+            sec[0] = BOS_id
+    else:
+        assert direction == TruncateAt.Right
+        sec = sec[:limit]
+        if sec:
+            sec[-1] = EOS_id
+    return sec
+
+
+def truncate_sections(
+    total_limit: int,
+    *sections: tuple[TokenSeq, TruncateAt],
+) -> tuple[TokenSeq, ...]:
+    """Truncate a list of token sequences to fit within a total length limit.
+    Earlier sections have priority over later sections.
+    """
+    
+    # first, reserve equal space to each section
+    section_lens = [total_limit // len(sections) for _ in sections]
+    remaining = total_limit
+    for i, (tks, _) in enumerate(sections):
+        l = min(len(tks), section_lens[i])
+        remaining -= l
+        section_lens[i] = l
+    assert remaining >= 0
+
+    # for the unused space, assign to ealier sections when possible
+    for i, (tks, _) in enumerate(sections):
         if remaining <= 0:
             break
-        inc = min(remaining, len(tks) - section_lens[k])
-        section_lens[k] += inc
+        inc = min(remaining, len(tks) - section_lens[i])
+        section_lens[i] += inc
         remaining -= inc
 
-    result = dict[str, TokenSeq]()
-    for k, (tks, truncate_dir, limit) in sections.items():
-        l = section_lens[k]
-        if l < len(tks):
-            if truncate_dir == TruncateAt.Left:
-                tks = tks[-l:]
-                if tks:
-                    tks[0] = BOS_id
-            else:
-                assert truncate_dir == TruncateAt.Right
-                tks = tks[:l]
-                if tks:
-                    tks[-1] = EOS_id
-        result[k] = tks
-    return result
+    return tuple(
+        truncate_section(tks, truncate_dir, section_lens[i])
+        for i, (tks, truncate_dir) in enumerate(sections)
+    )
 
 
 @dataclass
@@ -524,9 +490,6 @@ MainPrompt = encode_basic("\n# EDIT:\n")
 @dataclass
 class FileBasedEditEncoder:
     n_max_tks: int = 4000
-    n_main_tks: int = 1000
-    n_left_tks: int = 2000
-    n_right_tks: int = 2000
 
     def encode_pedit(
         self,
@@ -582,22 +545,20 @@ class FileBasedEditEncoder:
             input, output = change_to_input_output(
                 Modified(code_main_before.strip("\n"), code_main_after.strip("\n"))
             )
-            truncated = truncate_sections(
-                self.n_max_tks,
-                {
-                    "main": (input, TruncateAt.Right, self.n_main_tks),
-                    "left": (above_tks, TruncateAt.Left, self.n_left_tks),
-                    "right": (below_tks, TruncateAt.Right, self.n_right_tks),
-                },
+            main_tks, above_tks, below_tks = truncate_sections(
+                self.n_max_tks - len(MainPrompt) - 1,
+                (input, TruncateAt.Right),
+                (above_tks, TruncateAt.Left),
+                (below_tks, TruncateAt.Right),
             )
-            truncated["main"].append(Newline_id)
-            truncated["left"].extend(MainPrompt)
+            main_tks.append(Newline_id)
+            above_tks.extend(MainPrompt)
 
             edit = FileBasedTokenizedEdit(
-                main_tks=truncated["main"],
-                left_tks=truncated["left"],
-                right_tks=truncated["right"],
-                output_tks=output,
+                main_tks=main_tks,
+                left_tks=above_tks,
+                right_tks=below_tks,
+                output_tks=truncate_output_tks(main_tks, output),
                 path=ProjectPath(mod_name, path),
             )
             yield edit
@@ -622,13 +583,24 @@ class CstBasedTokenizedEdit(TokenizedEdit):
             "right context": self.right_tks,
         }
 
+    def truncate_ctx_(self, length: int):
+        ctx_len = length - len(self.main_tks)
+        current_ctx = len(self.left_tks) + len(self.right_tks)
+        assert current_ctx > ctx_len, "Can't truncate to a larger length"
+        ratio = ctx_len / current_ctx
+        n_left = int(len(self.left_tks) * ratio)
+        n_right = ctx_len - n_left
+        self.left_tks = self.left_tks[-n_left:]
+        if self.left_tks:
+            self.left_tks[0] = BOS_id
+        self.right_tks = self.right_tks[:n_right]
+        if self.right_tks:
+            self.right_tks[-1] = EOS_id
+
 
 @dataclass
 class CstBasedEditEncoder:
     n_max_tks: int = 4000
-    n_main_tks: int = 1000
-    n_left_tks: int = 2000
-    n_right_tks: int = 2000
     collapse_unchanged: bool = True
 
     def encode_pedit(
@@ -668,36 +640,35 @@ class CstBasedEditEncoder:
                     ctx_encoder.encode_ctx_element(p) for p in sorted_elems[i + 1 :]
                 ]
                 right_ctx = join_list(right_etks, sep=Newline_id)
-                truncated = truncate_sections(
-                    self.n_max_tks,
-                    {
-                        "main": (main_tks, TruncateAt.Right, self.n_main_tks),
-                        "left": (left_ctx, TruncateAt.Left, self.n_left_tks),
-                        "right": (right_ctx, TruncateAt.Right, self.n_right_tks),
-                    },
+                main_tks, left_tks, right_tks = truncate_sections(
+                    self.n_max_tks - len(MainPrompt) - 1,
+                    (main_tks, TruncateAt.Right),
+                    (left_ctx, TruncateAt.Left),
+                    (right_ctx, TruncateAt.Right),
                 )
+
                 selected = {path}
                 for e in get_selected(
                     reversed(sorted_elems[:i]),
                     reversed([len(e) for e in left_etks]),
-                    len(truncated["left"]),
+                    len(left_tks),
                 ):
                     selected.add(e)
 
                 for e in get_selected(
                     sorted_elems[i + 1 :],
                     [len(e) for e in right_etks],
-                    len(truncated["right"]),
+                    len(right_tks),
                 ):
                     selected.add(e)
 
-                truncated["main"].append(Newline_id)
-                truncated["left"].extend(MainPrompt)
+                main_tks.append(Newline_id)
+                left_tks.extend(MainPrompt)
                 ex = CstBasedTokenizedEdit(
-                    truncated["main"],
-                    truncated["left"],
-                    truncated["right"],
-                    output_tks=output_tks,
+                    main_tks=main_tks,
+                    left_tks=left_tks,
+                    right_tks=right_tks,
+                    output_tks=truncate_output_tks(main_tks, output_tks),
                     path=path,
                     elems=selected,
                 )
@@ -729,10 +700,6 @@ class AnalysisBasedTokenizedEdit(TokenizedEdit):
 @dataclass
 class AnalysisBasedEditEncoder:
     n_max_tks: int = 4000
-    n_main_tks: int = 500
-    n_extra_tks: int = 1500
-    n_left_tks: int = 1000
-    n_right_tks: int = 1000
     extra_ctx_names: Sequence[str] = ("usees",)
     collapse_unchanged: bool = True
     record_type_usages: bool = False
@@ -748,10 +715,7 @@ class AnalysisBasedEditEncoder:
         )
         # display(UsageAnalysis.TLogger.as_dataframe())
         cst_encoder = CstBasedEditEncoder(
-            n_max_tks=self.n_main_tks + self.n_left_tks + self.n_right_tks,
-            n_main_tks=self.n_main_tks,
-            n_left_tks=self.n_left_tks,
-            n_right_tks=self.n_right_tks,
+            n_max_tks=self.n_max_tks,
             collapse_unchanged=self.collapse_unchanged,
         )
         for analysis in analyses:
@@ -769,21 +733,22 @@ class AnalysisBasedEditEncoder:
                 ]
                 if ctx_changes:
                     extra_ctx_tks = ctx_encoder.encode_ctx_changes(ctx_changes)
-                    max_ctx_size = max(
-                        self.n_extra_tks,
-                        self.n_max_tks - len(edit.input_tks),
-                    )
-                    if len(extra_ctx_tks) > max_ctx_size:
-                        extra_ctx_tks = extra_ctx_tks[:max_ctx_size]
-                        extra_ctx_tks[-1] = EOS_id
                 else:
                     extra_ctx_tks = TokenSeq()
 
+                main_tks, extra_tks, left_tks, right_tks = truncate_sections(
+                    self.n_max_tks,
+                    (edit.main_tks, TruncateAt.Right),
+                    (extra_ctx_tks, TruncateAt.Left),
+                    (edit.left_tks, TruncateAt.Left),
+                    (edit.right_tks, TruncateAt.Right),
+                )
+
                 yield AnalysisBasedTokenizedEdit(
-                    edit.main_tks,
-                    edit.left_tks,
-                    edit.right_tks,
-                    extra_tks=extra_ctx_tks,
+                    main_tks=main_tks,
+                    left_tks=left_tks,
+                    right_tks=right_tks,
+                    extra_tks=extra_tks,
                     output_tks=edit.output_tks,
                     path=edit.path,
                     elems={get_change_path(c) for c in ctx_changes} | edit.elems,
@@ -883,3 +848,13 @@ def random_extra_id_map() -> dict[Token, Token]:
     used to improve the training such that every extra_id appears with the same frequency."""
     random.shuffle(__random_extra_ids)
     return dict(zip(__ordered_extra_ids, __random_extra_ids))
+
+
+def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq):
+    keys = [tk for tk in in_tks if is_extra_id(tk)]
+    if keys:
+        key = keys[-1]
+        i = out_tks.index(key)
+        return out_tks[:i]
+    else:
+        return out_tks

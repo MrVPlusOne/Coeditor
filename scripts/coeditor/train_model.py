@@ -5,7 +5,6 @@ from typing import *
 import wandb
 from coeditor.common import *
 from coeditor.dataset import TokenizedEditDataset
-from coeditor.encoding import WindowArgs
 from coeditor.model import *
 from prepare_data import make_or_load_datasets
 
@@ -35,12 +34,8 @@ train_args = TrainingArgs(
     max_batch_tokens=4096,
     quicktest=True,
 )
-valid_args = EvalArgs(
-    max_batch_tokens=4096 * 2,
-)
-test_args = EvalArgs(
-    max_batch_tokens=4096 * 2,
-)
+valid_args = EvalArgs(max_batch_tokens=4096 * 2)
+test_args = EvalArgs(max_batch_tokens=4096 * 2)
 dec_args = DecodingArgs()
 
 model_name = f"coeditor-{dataset_name}"
