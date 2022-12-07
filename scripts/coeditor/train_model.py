@@ -85,20 +85,28 @@ def train_model(
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
 
+    max_saved_samples = 200
+
     with timed_action("Accuracy Evaluating"):
         dec_result = model.predict_on_data(datasets["test"], test_args, dec_args)
         pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
-        wandb.log({"test/exact-acc": dec_result.exact_match_accuracy().average()})
+        exact_acc, exact_correct_map = dec_result.exact_match_accuracy()
+        wandb.log({"test/exact-acc": exact_acc.average()})
 
-    with timed_action("Saving samples"):
-        max_saved_samples = 200
-        random.seed(42)
-        exs_to_save = list(range(len(dec_result.predictions)))
-        random.shuffle(exs_to_save)
-        exs_to_save = exs_to_save[:max_saved_samples]
-        out_dir = get_model_dir() / model_name / "pred_samples"
-        dec_result.save_examples_to_dir(out_dir, exs_to_save)
-        print("Output examples saved to:", out_dir)
+        out_dir = get_model_dir() / model_name / "exact_match_samples"
+        dec_result.save_examples_to_dir(
+            out_dir, random_subset(exact_correct_map, max_saved_samples)
+        )
+        print("Exact-match samples saved to:", out_dir)
+
+        if isinstance(encoder, AnalysisBasedEditEncoder):
+            call_acc, call_correct_map = dec_result.call_update_accuracy()
+            wandb.log({"test/call-update-acc": call_acc.average()})
+            out_dir = get_model_dir() / model_name / "call_update_samples"
+            dec_result.save_examples_to_dir(
+                out_dir, random_subset(call_correct_map, max_saved_samples)
+            )
+            print("Call-update samples saved to:", out_dir)
 
 
 if __name__ == "__main__":

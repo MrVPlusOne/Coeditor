@@ -300,10 +300,13 @@ class TokenizedEdit(ABC):
     def all_ctxs(self) -> dict[str, TokenSeq]:
         pass
 
-    def show(self, ctx_tks: int = 2048) -> str:
-        return self.show_prediction(None, ctx_tks)
+    def meta_data_lines(self) -> list[str]:
+        return [f"path: {str(self.path)}"]
 
-    def show_prediction(self, pred_tks: TokenSeq | None = None, ctx_tks: int = 1000):
+    def show(self) -> str:
+        return self.show_prediction(None)
+
+    def show_prediction(self, pred_tks: TokenSeq | None = None) -> str:
         def show_label(i: int):
             return f" <{i}>" if i <= 9 else f"<{i}>"
 
@@ -339,6 +342,7 @@ class TokenizedEdit(ABC):
             else []
         )
         outputs = [
+            *self.meta_data_lines(),
             "========Ground Truth========",
             show_extra_tokens(self.output_tks, main_segs),
             *pred_lines,
@@ -486,9 +490,20 @@ class FileBasedTokenizedEdit(TokenizedEdit):
 
 MainPrompt = encode_basic("\n# EDIT:\n")
 
+TEdit = TypeVar("TEdit", bound=TokenizedEdit)
+
+
+class EditEncoder(Generic[TEdit]):
+    @abstractmethod
+    def encode_pedit(
+        self,
+        pedit: ProjectEdit,
+    ) -> Iterable[TEdit]:
+        pass
+
 
 @dataclass
-class FileBasedEditEncoder:
+class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
     n_max_tks: int = 4000
 
     def encode_pedit(
@@ -599,7 +614,7 @@ class CstBasedTokenizedEdit(TokenizedEdit):
 
 
 @dataclass
-class CstBasedEditEncoder:
+class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
     n_max_tks: int = 4000
     collapse_unchanged: bool = True
 
@@ -684,6 +699,11 @@ class AnalysisBasedTokenizedEdit(TokenizedEdit):
     output_tks: TokenSeq
     path: ProjectPath
     elems: set[ProjectPath]
+    updated_calls: list[tuple[ProjectPath, Modified[cst.Call]]]
+
+    def meta_data_lines(self) -> list[str]:
+        updated_calls = [f"Call updated: {str(p)}" for p, _ in self.updated_calls]
+        return [f"path: {str(self.path)}", *updated_calls]
 
     @property
     def input_tks(self) -> TokenSeq:
@@ -698,18 +718,19 @@ class AnalysisBasedTokenizedEdit(TokenizedEdit):
 
 
 @dataclass
-class AnalysisBasedEditEncoder:
+class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
     n_max_tks: int = 4000
     extra_ctx_names: Sequence[str] = ("usees",)
     collapse_unchanged: bool = True
     record_type_usages: bool = False
 
+    # currently not used
     CtxSepTokens = encode_basic("\n# Usees ends\n")
 
     def encode_pedits(
         self,
         pedits: Sequence[ProjectEdit],
-    ) -> Iterable[TokenizedEdit]:
+    ) -> Iterable[AnalysisBasedTokenizedEdit]:
         analyses = analyze_edits(
             pedits, record_type_usages=self.record_type_usages, silent=True
         )
@@ -752,6 +773,7 @@ class AnalysisBasedEditEncoder:
                     output_tks=edit.output_tks,
                     path=edit.path,
                     elems={get_change_path(c) for c in ctx_changes} | edit.elems,
+                    updated_calls=ctx_edit.updated_calls,
                 )
 
 
@@ -858,6 +880,3 @@ def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq):
         return out_tks[:i]
     else:
         return out_tks
-
-
-EditEncoder = FileBasedEditEncoder | CstBasedEditEncoder | AnalysisBasedEditEncoder

@@ -1,7 +1,9 @@
+from argparse import ArgumentError
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
+import random
 from typing import *
 
 import libcst as cst
@@ -14,6 +16,7 @@ import enum
 from spot.utils import (
     DefaultWorkers,
     assert_eq,
+    show_expr,
     show_string_diff,
     timed_action,
     TimeLogger,
@@ -25,6 +28,7 @@ from spot.utils import (
     not_none,
     get_modified_args,
     repr_modified_args,
+    PickleCache,
 )
 from IPython.display import display, HTML
 import html
@@ -74,7 +78,7 @@ def get_dataset_dir(dataname: str) -> Path:
 
 def get_model_dir(trained=True) -> Path:
     post = "trained" if trained else "training"
-    return Path(get_config("models_root")) / "models" / post
+    return Path(get_config("models_root")) / post
 
 
 def run_command(args: Sequence[str], cwd: str | Path) -> str:
@@ -242,6 +246,9 @@ class WeightedSum(Generic[V, W]):
         return f"(mean={self.mean():.5g}, weight={self.weight})"
 
 
+CountedSum = WeightedSum[int, int]
+
+
 def normalize_code_by_ast(code: str) -> str:
     """Normalize the code by parsing and unparsing it using the AST module.
     If parsing fails, return the original code."""
@@ -250,3 +257,36 @@ def normalize_code_by_ast(code: str) -> str:
         return ast.unparse(tree)
     except SyntaxError:
         return code
+
+
+def code_equal(code1: str | cst.CSTNode, code2: str | cst.CSTNode) -> bool:
+    if isinstance(code1, cst.CSTNode):
+        code1 = show_expr(code1, quoted=False)
+    if isinstance(code2, cst.CSTNode):
+        code2 = show_expr(code2, quoted=False)
+    code1 = normalize_code_by_ast(code1)
+    code2 = normalize_code_by_ast(code2)
+    return code1 == code2
+
+
+@overload
+def random_subset(all: Sequence[T1], n: int, seed: int = 42) -> list[T1]:
+    ...
+
+
+@overload
+def random_subset(all: Mapping[T1, T2], n: int, seed: int = 42) -> dict[T1, T2]:
+    ...
+
+
+def random_subset(all, n: int, seed: int = 42):
+    if isinstance(all, Sequence):
+        xs = [x for x in all]
+        random.Random(seed).shuffle(xs)
+        return xs[:n]
+    elif isinstance(all, Mapping):
+        keys = [k for k in all]
+        random.Random(seed).shuffle(keys)
+        return {k: all[k] for k in keys[:n]}
+    else:
+        raise ArgumentError(all, f"Unsupported arg type: {type(all)}")

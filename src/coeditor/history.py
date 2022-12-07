@@ -479,7 +479,7 @@ class ContextualEdit:
     main_change: Modified[PythonElem]
     grouped_ctx_changes: dict[str, Sequence[Change[PythonElem]]]
     commit_info: CommitInfo | None
-    refactor_calls: list[tuple[ProjectPath, Modified[cst.Call]]]
+    updated_calls: list[tuple[ProjectPath, Modified[cst.Call]]]
 
     @property
     def path(self) -> ProjectPath:
@@ -580,7 +580,7 @@ def analyze_edits(
 
         post_analysis = analyze_project_(pedit.after)
 
-        refactorings = identify_refactorings(pedit, pre_analysis, post_analysis)
+        refactorings = find_refactored_calls(pedit, pre_analysis, post_analysis)
 
         # create contextual edits
         ctx_edits = list[ContextualEdit]()
@@ -637,11 +637,13 @@ def _select_ast_calls(
                 yield n
 
 
-def identify_refactorings(
+def find_refactored_calls(
     pedit: ProjectEdit,
     pre_analysis: UsageAnalysis,
     post_analysis: UsageAnalysis,
-):
+) -> dict[ProjectPath, list[tuple[ProjectPath, Modified[cst.Call]]]]:
+    """Analyze project changes and return a mapping from each function `f` to
+    the refactored callsites within `f`."""
 
     changed_apis = set[ProjectPath]()
     for c in pedit.all_elem_changes():
@@ -664,7 +666,7 @@ def identify_refactorings(
             if u.callsite
         }
         call_changes = list[tuple[ProjectPath, Modified[cst.Call]]]()
-        for k in pre_usages.keys() & pos_usages.keys():
+        for k in changed_apis & pre_usages.keys() & pos_usages.keys():
             call_before = normalize_code_by_ast(show_expr(pre_usages[k], quoted=False))
             call_after = normalize_code_by_ast(show_expr(pos_usages[k], quoted=False))
             if call_before != call_after:
@@ -709,7 +711,7 @@ class EditSelectors:
                 ce.main_change,
                 {"users": changed_users},
                 ce.commit_info,
-                ce.refactor_calls,
+                ce.updated_calls,
             )
         return None
 
@@ -725,7 +727,7 @@ class EditSelectors:
                 ce.main_change,
                 {"usees": usees, "post_usees": post_usees},
                 ce.commit_info,
-                ce.refactor_calls,
+                ce.updated_calls,
             )
         return None
 

@@ -1,10 +1,14 @@
 import copy
 from dataclasses import field
+import logging
 import shutil
 import torch
 
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import (
+    AnalysisBasedEditEncoder,
+    AnalysisBasedTokenizedEdit,
+    TEdit,
     TokenizedEdit,
     _Tokenizer,
     extract_edit_change,
@@ -17,6 +21,7 @@ from coeditor.encoding import (
 from spot.data import output_ids_as_seqs
 from spot.model import dynamic_dataloader, DataLoader
 from spot.static_analysis import ProjectPath
+from spot.utils import show_expr
 from .common import *
 from transformers.models.t5.modeling_t5 import (
     T5ForConditionalGeneration,
@@ -202,10 +207,10 @@ class CoeditorModel:
 
 
 @dataclass
-class DatasetDecodingResult:
+class DatasetDecodingResult(Generic[TEdit]):
     eval_args: "EvalArgs"
     dec_args: DecodingArgs
-    edits: list[TokenizedEdit]
+    edits: list[TEdit]
     input_ids: list[TokenSeq]
     labels: list[TokenSeq]
     predictions: list[TokenSeq]
@@ -223,43 +228,94 @@ class DatasetDecodingResult:
             [self.predictions[i] for i in ids],
         )
 
-    def exact_match_accuracy(self) -> WeightedSum[int, int]:
-        exact_match = WeightedSum(0, 0)
-        for x, y, pred in zip(self.input_ids, self.labels, self.predictions):
+    def exact_match_accuracy(self) -> tuple[CountedSum, dict[int, bool]]:
+        ex2correct = dict[int, bool]()
+        for i, (x, y, pred) in enumerate(
+            zip(self.input_ids, self.labels, self.predictions)
+        ):
             true_code = extract_edit_change(x, y).after
             pred_code = extract_edit_change(x, pred).after
-            is_correct = normalize_code_by_ast(true_code) == normalize_code_by_ast(
-                pred_code
-            )
-            exact_match += WeightedSum(int(is_correct), 1)
-        return exact_match
+            is_correct = code_equal(pred_code, true_code)
+            ex2correct[i] = is_correct
+        correct_count = CountedSum(sum(ex2correct.values()), len(ex2correct))
+        return correct_count, ex2correct
 
-    def save_examples_to_dir(
-        self, out_dir: Path, ex_ids: Sequence[int], ctx_tks: int = 2000
-    ):
+    def call_update_accuracy(self) -> tuple[CountedSum, dict[int, bool]]:
+        correct_count = CountedSum(0, 0)
+        ex2correct = dict[int, bool]()
+        failed_to_parse = CountedSum(0, 0)
+        for ex_i in range(len(self.input_ids)):
+            edit = self.edits[ex_i]
+            assert isinstance(edit, AnalysisBasedTokenizedEdit)
+            if not (calls := edit.updated_calls):
+                continue
+
+            pred_tks = self.predictions[ex_i]
+            id_map = {
+                k: get_extra_id(i)
+                for i, k in enumerate(output_ids_as_seqs(self.labels[ex_i]))
+            }
+            pred_tks = [id_map.get(t, t) for t in pred_tks]
+            main_tks = self.edits[ex_i].main_tks
+            pred_code = dedent(extract_edit_change(main_tks, pred_tks).after)
+            try:
+                mod = cst.parse_module(pred_code)
+            except (cst.ParserSyntaxError, cst.CSTValidationError) as e:
+                # consider all calls incorrect
+                parsed = True
+                correct_count += CountedSum(0, len(calls))
+                ex_correct = False
+            else:
+                parsed = False
+                expect_calls = {
+                    show_expr(c.after.func, quoted=False): c for _, c in calls
+                }
+                ex_correct = True
+                for c in find_calls(mod):
+                    f_str = show_expr(c.func, quoted=False)
+                    if (expect := expect_calls.get(f_str)) is None:
+                        continue
+                    correct = code_equal(c, expect.after)
+                    correct_count += CountedSum(int(correct), 1)
+                    if not correct:
+                        ex_correct = False
+            ex2correct[ex_i] = ex_correct
+            failed_to_parse += CountedSum(int(parsed), 1)
+        print(
+            f"{failed_to_parse.sum} / {failed_to_parse.weight} resulting code failed to parse."
+        )
+        return correct_count, ex2correct
+
+    def save_examples_to_dir(self, out_dir: Path, ex2correct: dict[int, bool]) -> None:
         shutil.rmtree(out_dir, ignore_errors=True)
         (out_dir / "correct").mkdir(parents=True, exist_ok=True)
         (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
 
-        for ex_id in tqdm(ex_ids, desc="saving examples"):
+        for ex_id, correct in tqdm(ex2correct.items(), desc="saving examples"):
             pred_tks = self.predictions[ex_id]
-            true_code = extract_edit_change(
-                self.input_ids[ex_id], self.labels[ex_id]
-            ).after
-            pred_code = extract_edit_change(self.input_ids[ex_id], pred_tks).after
-            is_correct = normalize_code_by_ast(true_code) == normalize_code_by_ast(
-                pred_code
-            )
             id_map = {
                 k: get_extra_id(i)
-                for i, k in enumerate(output_ids_as_seqs(self.input_ids[ex_id]))
+                for i, k in enumerate(output_ids_as_seqs(self.labels[ex_id]))
             }
             pred_tks = [id_map.get(t, t) for t in pred_tks]
-            compare_str = self.edits[ex_id].show_prediction(pred_tks, ctx_tks=ctx_tks)
+            compare_str = self.edits[ex_id].show_prediction(pred_tks)
             out_file = (
-                out_dir / ("correct" if is_correct else "incorrect") / f"ex-{ex_id}.txt"
+                out_dir / ("correct" if correct else "incorrect") / f"ex-{ex_id}.txt"
             )
             out_file.write_text(compare_str)
+
+
+def find_calls(node: cst.CSTNode) -> list[cst.Call]:
+    all_calls = list[cst.Call]()
+
+    class CallFinder(cst.CSTVisitor):
+        def on_visit(self, node: cst.CSTNode):
+            if isinstance(node, cst.Call):
+                all_calls.append(node)
+            return True
+
+    node.visit(CallFinder())
+    return all_calls
 
 
 def train_coeditor_model(

@@ -5,6 +5,7 @@ from coeditor.encoding import (
     FileBasedEditEncoder,
     CstBasedEditEncoder,
     EditEncoder,
+    TEdit,
     TokenizedEdit,
     Newline_id,
     Add_id,
@@ -24,8 +25,8 @@ import pandas as pd
 
 
 @dataclass
-class TokenizedEditDataset:
-    project2edits: dict[Path, list[TokenizedEdit]]
+class TokenizedEditDataset(Generic[TEdit]):
+    project2edits: dict[Path, list[TEdit]]
 
     def __repr__(self) -> str:
         n_projects = len(self.project2edits)
@@ -35,7 +36,7 @@ class TokenizedEditDataset:
     def subset(self, repos: Iterable[Path]) -> "TokenizedEditDataset":
         return TokenizedEditDataset({repo: self.project2edits[repo] for repo in repos})
 
-    def map(self, f: Callable[[TokenizedEdit], TokenizedEdit]):
+    def map(self, f: Callable[[TEdit], TEdit]) -> "TokenizedEditDataset[TEdit]":
         return TokenizedEditDataset(
             {repo: [f(e) for e in edits] for repo, edits in self.project2edits.items()}
         )
@@ -65,19 +66,21 @@ class TokenizedEditDataset:
             "output_size": scalar_stats(output_sizes),
         }
 
-    def all_edits(self) -> list[TokenizedEdit]:
+    def all_edits(self) -> list[TEdit]:
         return join_list(self.project2edits.values())
 
     @staticmethod
     def from_edits(
-        edits: Iterable[TokenizedEdit], path=Path("all")
-    ) -> "TokenizedEditDataset":
+        edits: Iterable[TEdit], path=Path("all")
+    ) -> "TokenizedEditDataset[TEdit]":
         return TokenizedEditDataset({path: list(edits)})
 
 
-def _process_commits(root: Path, commits: Sequence[CommitInfo], encoder: EditEncoder):
+def _process_commits(
+    root: Path, commits: Sequence[CommitInfo], encoder: EditEncoder[TEdit]
+) -> list[TEdit]:
     edits = edits_from_commit_history(root, commits)
-    tk_edits = list[TokenizedEdit]()
+    tk_edits = list()
     if isinstance(encoder, AnalysisBasedEditEncoder):
         tk_edits.extend(encoder.encode_pedits(list(edits)))
     else:
@@ -88,17 +91,15 @@ def _process_commits(root: Path, commits: Sequence[CommitInfo], encoder: EditEnc
 
 def dataset_from_projects(
     project_roots: Sequence[Path],
-    encoder: EditEncoder,
+    encoder: EditEncoder[TEdit],
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
-) -> "TokenizedEditDataset":
+) -> "TokenizedEditDataset[TEdit]":
     """
-    Create a file-based editing dataset from the given list of project roots.
+    Create a TokenizedEditDataset from a list of project roots and a given encoder.
     Args:
         - max_history_per_repo (int, optional): When the repo history is longer than
         this value, only the oldest portion is going to be used. Defaults to 1000.
-        - history_chunk_size (int, optional): Would break the commit history into chunks
-        of this size for parallel processing. Defaults to 100.
     """
     histories = pmap(
         get_commit_history,
@@ -126,10 +127,10 @@ def dataset_from_projects(
         desc="Create tokenized edits",
         max_workers=workers,
         tqdm_args={"unit": "chunk"},
-    )
-
-    project2edits = dict[Path, list[TokenizedEdit]]()
+    )  # return type cannot be inferred correctly without using TypeVarTuple
+    project2edits = dict[Path, list[TEdit]]()
     for root, edits in zip(roots, tk_edits):
+        edits = cast(list[TEdit], edits)
         if root in project2edits:
             project2edits[root].extend(edits)
         else:
@@ -140,10 +141,10 @@ def dataset_from_projects(
 
 def datasets_from_repos(
     repos_root: Path,
-    encoder: EditEncoder,
+    encoder: EditEncoder[TEdit],
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
-) -> dict[str, TokenizedEditDataset]:
+) -> dict[str, TokenizedEditDataset[TEdit]]:
     splits = ["test", "valid", "train"]
     projects = dict[str, list[Path]]()
     for split in splits:
