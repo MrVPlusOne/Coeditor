@@ -354,6 +354,75 @@ class TokenizedEdit(ABC):
         ]
         return "\n".join(outputs)
 
+    def inline_changes(self, lines: int) -> "TokenizedEdit | None":
+        """Inline the first `lines` lines of the output changes into the main code.
+        Will return None if the remaining changes to be predicted are empty.
+        """
+        out_dict = output_ids_as_seqs(self.output_tks)
+        to_inline = TokenSeq()
+        to_predict = TokenSeq()
+        for i, k in enumerate(out_dict.keys()):
+            if i < lines:
+                to_inline.append(k)
+                to_inline.extend(out_dict[k])
+            else:
+                to_predict.append(k)
+                to_predict.extend(out_dict[k])
+        if not to_predict:
+            # the remaining changes are empty
+            return None
+        main_tks = inline_output_tokens(
+            self.main_tks, to_inline, leave_unpredicted=True
+        )
+        edit = copy.copy(self)
+        edit.main_tks = main_tks
+        edit.output_tks = to_predict
+        return edit
+
+    def inline_signature_changes(self) -> "TokenizedEdit | None":
+        """If this edit is applied on a function, inline all the changes
+        appeared in the function signature."""
+        if EOS_id in self.main_tks:
+            return None
+        change = extract_edit_change(self.main_tks, self.output_tks)
+        try:
+            mod = cst.parse_module(dedent(change.before))
+        except Exception:
+            print("Failed to parse the code:\n" + change.before)
+            raise
+        match mod.body:
+            case [cst.FunctionDef() as f]:
+                f = f.with_changes(body=cst.IndentedBlock([]))
+                f_code = show_expr(f, quoted=False)
+                header_lines = len(f_code.split("\n")) - 1
+                return self.inline_changes(lines=header_lines)
+        return None
+
+    def prefix_from_signature(self) -> TokenSeq:
+        """Get a the prefix of the output_ids corresponding to the function
+        signature changes. This can be used to constrain decoding."""
+        if EOS_id in self.main_tks:
+            return TokenSeq()
+        change = extract_edit_change(self.main_tks, self.output_tks)
+        try:
+            mod = cst.parse_module(dedent(change.before))
+        except Exception:
+            print("Failed to parse the code:\n" + change.before)
+            return TokenSeq()
+        match mod.body:
+            case [cst.FunctionDef() as f]:
+                f = f.with_changes(body=cst.IndentedBlock([]))
+                f_code = show_expr(f, quoted=False)
+                header_lines = len(f_code.split("\n")) - 1
+                out_dict = output_ids_as_seqs(self.output_tks)
+                prefix_tks = TokenSeq()
+                for i, k in enumerate(out_dict.keys()):
+                    if i < header_lines:
+                        prefix_tks.append(k)
+                        prefix_tks.extend(out_dict[k])
+                return prefix_tks
+        return TokenSeq()
+
     import warnings
 
     # turn off redundant BLEU warnings

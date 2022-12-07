@@ -64,18 +64,15 @@ class EvalArgs:
 
 @dataclass
 class CoeditorModel:
-    """
-    args:
-    - skip_unchanged: whether to skip <extra_id>s that are not followed by a
-    change in the output sequence.
-    """
-
     codet5: CodeT5Model
     data_args: "DataTransformArgs"
 
     @torch.autocast("cuda")
     def predict(
-        self, input_tks: TokenSeq, decode_args: DecodingArgs | None = None
+        self,
+        input_tks: TokenSeq,
+        decode_args: DecodingArgs | None = None,
+        output_prefix: TokenSeq | None = None,
     ) -> TokenSeq:
         if decode_args is None:
             decode_args = DecodingArgs()
@@ -90,8 +87,25 @@ class CoeditorModel:
             top_p=decode_args.top_p,
             num_beams=decode_args.num_beams,
             length_penalty=decode_args.length_penalty,
+            prefix_allowed_tokens_fn=(
+                self._prefix_constraint([output_prefix]) if output_prefix else None
+            ),
         )[0]
         return output.tolist()
+
+    @staticmethod
+    def _prefix_constraint(output_prefix: list[TokenSeq]):
+        all_tks = list(range(len(_Tokenizer)))
+
+        def constraint(batch: int, decoded: torch.Tensor) -> list[Token]:
+            t = decoded.size(0) - 1
+            prefix = output_prefix[batch]
+            if t < len(prefix):
+                return [prefix[t]]
+            else:
+                return all_tks
+
+        return constraint
 
     def predict_on_batch(
         self,
@@ -99,6 +113,13 @@ class CoeditorModel:
         decode_args: DecodingArgs,
     ) -> list[TokenSeq]:
         x = batch["input_ids"].to(self.codet5.device)
+        if "output_prefix_len" in batch:
+            labels = batch["labels"]
+            prefixes = [labels[i][:l] for i, l in enumerate(batch["output_prefix_len"])]
+            prefix_allowed_tokens_fn = self._prefix_constraint(prefixes)
+        else:
+            prefix_allowed_tokens_fn = None
+
         output = self.codet5.generate(
             x,
             max_length=decode_args.max_output_tks,
@@ -106,6 +127,7 @@ class CoeditorModel:
             top_p=decode_args.top_p,
             num_beams=decode_args.num_beams,
             length_penalty=decode_args.length_penalty,
+            prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
         )
         return [y.tolist() for y in output]
 
@@ -262,27 +284,29 @@ class DatasetDecodingResult(Generic[TEdit]):
                 mod = cst.parse_module(pred_code)
             except (cst.ParserSyntaxError, cst.CSTValidationError) as e:
                 # consider all calls incorrect
-                parsed = True
                 correct_count += CountedSum(0, len(calls))
+                failed_to_parse += CountedSum(len(calls), len(calls))
                 ex_correct = False
             else:
-                parsed = False
                 expect_calls = {
                     show_expr(c.after.func, quoted=False): c for _, c in calls
                 }
+                failed_to_parse += CountedSum(0, len(calls))
+
                 ex_correct = True
+                correct_calls = 0
                 for c in find_calls(mod):
                     f_str = show_expr(c.func, quoted=False)
-                    if (expect := expect_calls.get(f_str)) is None:
+                    if (expect := expect_calls.pop(f_str, None)) is None:
                         continue
                     correct = code_equal(c, expect.after)
-                    correct_count += CountedSum(int(correct), 1)
+                    correct_calls += int(correct)
                     if not correct:
                         ex_correct = False
+                correct_count += CountedSum(correct_calls, len(calls))
             ex2correct[ex_i] = ex_correct
-            failed_to_parse += CountedSum(int(parsed), 1)
         print(
-            f"{failed_to_parse.sum} / {failed_to_parse.weight} resulting code failed to parse."
+            f"{failed_to_parse.sum} / {failed_to_parse.weight} calls were considered incorrect since they failed to parse."
         )
         return correct_count, ex2correct
 
@@ -471,6 +495,19 @@ def drop_empty_labels(x: TokenSeq) -> TokenSeq:
 
 @dataclass
 class DataTransformArgs:
+    """
+    Args
+    - `use_signature_prefix`: If True, constrain the decoding to use ground-truth
+    changes for function signature changes.
+    - `skip_unchanged`: If True, omit the <extra_id>s whose corresponding lines
+    do not change when encoding the output tokens.
+    - `shuffle_extra_ids`: If True, randomly substitute the <extra_id>s such that
+    all <extra_id>s are equally likely to be used.
+    - `max_label_tks`: The maximum number of tokens in the output sequence. Will
+    truncate from the end if the output sequence is longer than this.
+    """
+
+    use_signature_prefix: bool = False
     skip_unchanged: bool = False
     shuffle_extra_ids: bool = False
     max_label_tks: int = 512
@@ -483,9 +520,18 @@ def edits_to_dataset(
 ) -> Dataset:
     def process_edit(e: TokenizedEdit):
         labels = e.output_tks
+        if args.use_signature_prefix:
+            output_prefix = e.prefix_from_signature()
+        else:
+            output_prefix = TokenSeq()
         if args.skip_unchanged:
             labels = drop_empty_labels(labels)
+            output_prefix = drop_empty_labels(output_prefix)
+
         labels = wrap_bos(labels)
+        if args.use_signature_prefix:
+            output_prefix = [BOS_id] + output_prefix
+
         if len(labels) > args.max_label_tks:
             labels = labels[: args.max_label_tks]
 
@@ -495,14 +541,17 @@ def edits_to_dataset(
             id_map = random_extra_id_map()
             input_ids = [id_map.get(tk, tk) for tk in input_ids]
             labels = [id_map.get(tk, tk) for tk in labels]
+            output_prefix = [id_map.get(tk, tk) for tk in output_prefix]
 
-        return input_ids, labels
+        return input_ids, labels, output_prefix
 
     processed = [process_edit(e) for e in edits]
     d: dict[str, Any] = {
         "input_ids": [x[0] for x in processed],
         "labels": [x[1] for x in processed],
     }
+    if args.use_signature_prefix:
+        d["output_prefix_len"] = [len(x[2]) for x in processed]
     if add_ex_id:
         d["ex_ids"] = list(range(len(edits)))
     return Dataset.from_dict(d)

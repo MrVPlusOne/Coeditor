@@ -10,7 +10,7 @@ from coeditor.model import *
 from prepare_data import make_or_load_datasets
 
 
-def check_save_dir(model_name: str):
+def check_save_dir(model_name: str) -> None:
     to_check = [get_model_dir(b) / model_name for b in [True, False]]
     exists = [path for path in to_check if path.exists()]
     if exists:
@@ -107,6 +107,7 @@ def train_model(
                 out_dir, random_subset(call_correct_map, max_saved_samples)
             )
             print("Call-update samples saved to:", out_dir)
+    return model
 
 
 if __name__ == "__main__":
