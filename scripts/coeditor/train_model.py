@@ -5,6 +5,7 @@ from typing import *
 import wandb
 from coeditor.common import *
 from coeditor.dataset import TokenizedEditDataset
+from coeditor.encoding import AnalysisBasedEditEncoder, EditEncoder
 from coeditor.model import *
 from prepare_data import make_or_load_datasets
 
@@ -21,82 +22,85 @@ def check_save_dir(model_name: str):
             exit(1)
 
 
-os.chdir(proj_root())
+def train_model(
+    dataset_name="medium",
+    model_variant="-analysis-post_usees",
+    encoder: EditEncoder = AnalysisBasedEditEncoder(
+        extra_ctx_names=("usees", "post-usees")
+    ),
+    max_batch_tokens: int = 4096,
+    quicktest: bool = False,
+):
+    # model_variant = "-file"
+    model_name = f"coeditor-{dataset_name}"
+    model_name += model_variant
 
-dataset_name = "medium"
-# model_variant = "-analysis-post_usees"
-model_variant = "-file"
+    data_args = DataTransformArgs(shuffle_extra_ids=True)
+    train_args = TrainingArgs(max_batch_tokens=max_batch_tokens, quicktest=quicktest)
+    valid_args = EvalArgs(max_batch_tokens=max_batch_tokens * 2)
+    test_args = EvalArgs(max_batch_tokens=max_batch_tokens * 2)
+    dec_args = DecodingArgs()
+    if train_args.quicktest:
+        model_name = "quicktest-" + model_name
 
-data_args = DataTransformArgs(
-    shuffle_extra_ids=True,
-)
-train_args = TrainingArgs(
-    max_batch_tokens=4096,
-    quicktest=True,
-)
-valid_args = EvalArgs(max_batch_tokens=4096 * 2)
-test_args = EvalArgs(max_batch_tokens=4096 * 2)
-dec_args = DecodingArgs()
+    check_save_dir(model_name)
 
-model_name = f"coeditor-{dataset_name}"
-model_name += model_variant
-if train_args.quicktest:
-    model_name = "quicktest-" + model_name
+    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=True)
 
-check_save_dir(model_name)
+    config_dict = {
+        k: get_modified_args(v)
+        for k, v in {
+            "data_args": data_args,
+            "train_args": train_args,
+            "valid_args": valid_args,
+            "test_args": test_args,
+            "dec_args": dec_args,
+        }.items()
+    }
 
-datasets = make_or_load_datasets(dataset_name, recreate_data=True)
+    project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
+    wandb.init(dir="..", project=project, name=model_name, config=config_dict)
 
-config_dict = {
-    k: get_modified_args(v)
-    for k, v in {
-        "data_args": data_args,
-        "train_args": train_args,
-        "valid_args": valid_args,
-        "test_args": test_args,
-        "dec_args": dec_args,
-    }.items()
-}
+    if train_args.quicktest:
+        print("Using fewer data for quick test.")
+        for name, dataset in datasets.items():
+            datasets[name] = TokenizedEditDataset.from_edits(dataset.all_edits()[:10])
 
-project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
-wandb.init(dir="..", project=project, name=model_name, config=config_dict)
+    model = CoeditorModel.from_code_t5(data_args)
 
-if train_args.quicktest:
-    print("Using fewer data for quick test.")
-    for name, dataset in datasets.items():
-        datasets[name] = TokenizedEditDataset.from_edits(list(dataset.all_edits())[:10])
+    if os.getenv("CUDA_VISIBLE_DEVICES") is None:
+        warnings.warn(
+            "CUDA_VISIBLE_DEVICES not set, using 0. Note that "
+            "the Huggingface Trainer will use all visible GPUs for training."
+        )
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-model = CoeditorModel.from_code_t5(data_args)
+    with timed_action("Training"):
+        model.train_on_data(
+            model_name, datasets["train"], datasets["valid"], train_args, valid_args
+        )
 
-if os.getenv("CUDA_VISIBLE_DEVICES") is None:
-    warnings.warn(
-        "CUDA_VISIBLE_DEVICES not set, using 0. Note that "
-        "the Huggingface Trainer will use all visible GPUs for training."
-    )
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    with timed_action("Loss Evaluating"):
+        eval_result = model.eval_loss_on_data(datasets["test"], test_args)
+        eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
+        wandb.log(eval_dict)
+
+    with timed_action("Accuracy Evaluating"):
+        dec_result = model.predict_on_data(datasets["test"], test_args, dec_args)
+        pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
+        wandb.log({"test/exact-acc": dec_result.exact_match_accuracy().average()})
+
+    with timed_action("Saving samples"):
+        max_saved_samples = 200
+        random.seed(42)
+        exs_to_save = list(range(len(dec_result.predictions)))
+        random.shuffle(exs_to_save)
+        exs_to_save = exs_to_save[:max_saved_samples]
+        out_dir = get_model_dir() / model_name / "pred_samples"
+        dec_result.save_examples_to_dir(out_dir, exs_to_save)
+        print("Output examples saved to:", out_dir)
 
 
-with timed_action("Training"):
-    model.train_on_data(
-        model_name, datasets["train"], datasets["valid"], train_args, valid_args
-    )
-
-with timed_action("Loss Evaluating"):
-    eval_result = model.eval_loss_on_data(datasets["test"], test_args)
-    eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
-    wandb.log(eval_dict)
-
-with timed_action("Accuracy Evaluating"):
-    dec_result = model.predict_on_data(datasets["test"], test_args, dec_args)
-    pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
-    wandb.log({"test/exact-acc": dec_result.exact_match_accuracy().average()})
-
-with timed_action("Saving samples"):
-    max_saved_samples = 200
-    random.seed(42)
-    exs_to_save = list(range(len(dec_result.predictions)))
-    random.shuffle(exs_to_save)
-    exs_to_save = exs_to_save[:max_saved_samples]
-    out_dir = get_model_dir() / model_name / "pred_samples"
-    dec_result.save_examples_to_dir(out_dir, exs_to_save)
-    print("Output examples saved to:", out_dir)
+if __name__ == "__main__":
+    os.chdir(proj_root())
+    train_model()

@@ -125,7 +125,7 @@ class CoeditorModel:
         eval_args: "EvalArgs",
         dec_args: DecodingArgs,
     ) -> "DatasetDecodingResult":
-        eval_edits = list(eval_data.all_edits())
+        eval_edits = eval_data.all_edits()
         dataset = edits_to_dataset(
             eval_edits,
             self.data_args,
@@ -171,7 +171,7 @@ class CoeditorModel:
         eval_data: TokenizedEditDataset,
         eval_args: "EvalArgs",
     ):
-        eval_edits = list(eval_data.all_edits())
+        eval_edits = eval_data.all_edits()
         eval_loader = edits_to_dataloader(
             eval_edits,
             eval_args.max_batch_tokens,
@@ -272,8 +272,8 @@ def train_coeditor_model(
 ):
     train_dir = get_model_dir(trained=False) / training_name
 
-    train_edits = list(train_data.all_edits())
-    eval_edits = list(eval_data.all_edits())
+    train_edits = train_data.all_edits()
+    eval_edits = eval_data.all_edits()
     if train_args.quicktest:
         train_edits = train_edits[:10]
         eval_edits = eval_edits[:2]

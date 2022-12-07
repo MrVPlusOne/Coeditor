@@ -10,11 +10,9 @@ from spot.utils import pretty_print_dict
 
 def make_or_load_datasets(
     dataset_name: str,
+    encoder: EditEncoder,
     recreate_data: bool = False,
 ) -> dict[str, TokenizedEditDataset]:
-    encoder = FileBasedEditEncoder()
-    # encoder = CstBasedEditEncoder()
-    # encoder = AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees"))
     save_dir = get_dataset_dir(dataset_name) / repr_modified_args(encoder)
 
     if recreate_data or not save_dir.exists():
@@ -41,4 +39,5 @@ if __name__ == "__main__":
 
     # dataset_name = "SPOT"
     dataset_name = "medium"
-    datasets = make_or_load_datasets(dataset_name, recreate_data=True)
+    encoder = AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees"))
+    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=True)

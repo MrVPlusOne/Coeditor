@@ -673,6 +673,7 @@ class ProjectUsage:
     user: ProjectPath
     used: ProjectPath
     is_certain: bool  # some usage might not be certain, e.g. if it's a method call on an expression
+    callsite: cst.Call | None
 
     def __str__(self):
         return (
@@ -935,12 +936,16 @@ class UsageAnalysis:
             for a in cls.attributes.values():
                 if self.add_override_usages and a.name in members:
                     # override usages
-                    all_usages.append(ProjectUsage(a.path, members[a.name].path, False))
+                    all_usages.append(
+                        ProjectUsage(a.path, members[a.name].path, False, None)
+                    )
                 members[a.name] = a
             for m in cls.methods.values():
                 if self.add_override_usages and m.name in members:
                     # override usages
-                    all_usages.append(ProjectUsage(m.path, members[m.name].path, False))
+                    all_usages.append(
+                        ProjectUsage(m.path, members[m.name].path, False, None)
+                    )
                 members[m.name] = m
             for name, el in members.items():
                 self.path2elem[cpath.append(name)] = el
@@ -964,10 +969,8 @@ class UsageAnalysis:
         with timed("generate usages"):
             for mname in self.sorted_modules:
                 ma = self.mod2analysis[mname]
-                for caller, span, qname, is_call in ma.module_usages:
-                    all_usages.extend(
-                        self.generate_usages(mname, caller, qname, is_call)
-                    )
+                for caller, span, qname, call in ma.module_usages:
+                    all_usages.extend(self.generate_usages(mname, caller, qname, call))
 
         best_usages = dict[tuple[ProjectPath, ProjectPath], ProjectUsage]()
         for u in all_usages:
@@ -1003,14 +1006,17 @@ class UsageAnalysis:
         mname: ModuleName,
         caller: ProjectPath,
         qname: QualifiedName,
-        is_call: bool,
+        parent_call: cst.Call | None,
     ) -> Iterable[ProjectUsage]:
+        def usage(used: ProjectPath, is_certain: bool):
+            return ProjectUsage(caller, used, is_certain, parent_call)
+
         def gen_class_usages(member_name: str):
             if member_name.startswith("__") and member_name.endswith("__"):
                 # skip common methods like __init__
                 return
             for e in self.name2class_member.get(member_name, []):
-                yield ProjectUsage(caller, e.path, is_certain=False)
+                yield usage(e.path, is_certain=False)
 
         def visible_fixtures(fix_name: str) -> Generator[ProjectPath, None, None]:
             psegs = caller.path.split(".")
@@ -1034,11 +1040,11 @@ class UsageAnalysis:
                 return
             for vf in visible_fixtures(fix_name):
                 if vf in candidates:
-                    yield ProjectUsage(caller, vf, is_certain=True)
+                    yield usage(vf, is_certain=True)
                     return
 
         def gen_constructor_usages(cls: PythonClass):
-            if not is_call:
+            if not parent_call:
                 return
             cpath = cls.path
             used_elems = list[tuple[ProjectPath, bool]]()
@@ -1053,7 +1059,7 @@ class UsageAnalysis:
                     if isinstance(el, PythonVariable):
                         used_elems.append((el.path, False))
             for u, certain in used_elems:
-                yield ProjectUsage(caller, self.path2elem[u].path, is_certain=certain)
+                yield usage(self.path2elem[u].path, is_certain=certain)
 
         def resolve_local_usages(name: str):
             segs = name.split(".")
@@ -1075,12 +1081,10 @@ class UsageAnalysis:
                 callee = ProjectPath(mname, ".".join(segs))
                 if callee in self.path2class:
                     if self.record_type_usages:
-                        yield ProjectUsage(caller, callee, is_certain=True)
+                        yield usage(callee, is_certain=True)
                     yield from gen_constructor_usages(self.path2class[callee])
                 elif callee in self.path2elem:
-                    yield ProjectUsage(
-                        caller, self.path2elem[callee].path, is_certain=True
-                    )
+                    yield usage(self.path2elem[callee].path, is_certain=True)
                 elif len(segs) >= 2 and segs[-2] != "<locals>":
                     # method fuzzy match case 3
                     yield from gen_class_usages(segs[-1])
@@ -1099,13 +1103,11 @@ class UsageAnalysis:
                         continue
                     if callee in self.path2class:
                         if self.record_type_usages:
-                            yield ProjectUsage(caller, callee, is_certain=True)
+                            yield usage(callee, is_certain=True)
                         yield from gen_constructor_usages(self.path2class[callee])
                         break
                     elif callee in self.path2elem:
-                        yield ProjectUsage(
-                            caller, self.path2elem[callee].path, is_certain=True
-                        )
+                        yield usage(self.path2elem[callee].path, is_certain=True)
                         break
             case QualifiedNameSource.LOCAL:
                 yield from resolve_local_usages(qname.name)
@@ -1157,7 +1159,7 @@ class ModuleAnalysis:
     @cached_property
     def module_usages(
         self,
-    ) -> Sequence[tuple[ProjectPath, CodeRange, QualifiedName, bool]]:
+    ) -> Sequence[tuple[ProjectPath, CodeRange, QualifiedName, Optional[cst.Call]]]:
         """
         Compute a mapping from each method/function to the methods and functions they use.
         """
@@ -1165,7 +1167,7 @@ class ModuleAnalysis:
         recorder = UsageRecorder(
             self.node2qnames, self.node2pos, self.record_type_usages
         )
-        result = list[tuple[ProjectPath, CodeRange, QualifiedName, bool]]()
+        result = list[tuple[ProjectPath, CodeRange, QualifiedName, cst.Call | None]]()
 
         for e in self.module.all_elements():
             match e:
@@ -1179,7 +1181,7 @@ class ModuleAnalysis:
                             fix_name = QualifiedName(
                                 f"<fixture>.{arg.name.value}", QualifiedNameSource.LOCAL
                             )
-                            fix_usage = (self.node2pos[arg.name], fix_name, True)
+                            fix_usage = (self.node2pos[arg.name], fix_name, None)
                             recorder.usages.append(fix_usage)
                 case PythonVariable():
                     self_names = []
@@ -1187,14 +1189,17 @@ class ModuleAnalysis:
                         if a.value:
                             a.value.visit(recorder)
             # we only keep the first occurance of each qualified name to save space
-            best_callee = dict[QualifiedName, tuple[bool, CodeRange]]()
-            for span, qn, is_call in recorder.usages:
+            best_callee = dict[QualifiedName, tuple[cst.Call | None, CodeRange]]()
+            for span, qn, parent_call in recorder.usages:
                 if qn in self_names:
                     continue  # don't record self references
-                if qn not in best_callee or int(is_call) > int(best_callee[qn][0]):
-                    best_callee[qn] = (is_call, span)
-            for qn, (is_call, span) in best_callee.items():
-                result.append((e.path, span, qn, is_call))
+                if qn not in best_callee or (
+                    best_callee[qn][0] is None and parent_call is not None
+                ):
+                    best_callee[qn] = (parent_call, span)
+
+            for qn, (parent_call, span) in best_callee.items():
+                result.append((e.path, span, qn, parent_call))
             recorder.usages.clear()
 
         return result
@@ -1609,7 +1614,7 @@ class UsageRecorder(cst.CSTVisitor):
         self.span_mapping = span_mapping
         self.record_type_usages = record_type_usages
         self.parents = list[cst.CSTNode]()
-        self.usages = list[tuple[CodeRange, QualifiedName, bool]]()
+        self.usages = list[tuple[CodeRange, QualifiedName, cst.Call | None]]()
 
     def resolve_ref(self, name: cst.CSTNode) -> list[QualifiedName]:
         "Return a list of qualified names that the given name could refer to."
@@ -1623,12 +1628,16 @@ class UsageRecorder(cst.CSTVisitor):
                 return [s for s in srcs if s.name != "builtins.None"]
         return []
 
-    def is_call_name(self) -> bool:
-        return len(self.parents) > 0 and isinstance(self.parents[-1], cst.Call)
+    def parent_call(self) -> cst.Call | None:
+        match self.parents:
+            case [*_, cst.Call() as c]:
+                return c
+            case _:
+                return None
 
     def record_name_use(self, name: cst.CSTNode):
         for src in self.resolve_ref(name):
-            self.usages.append((self.span_mapping[name], src, self.is_call_name()))
+            self.usages.append((self.span_mapping[name], src, self.parent_call()))
 
     def visit_Attribute(self, node: cst.Attribute):
         if not self.resolve_ref(node):
@@ -1638,7 +1647,7 @@ class UsageRecorder(cst.CSTVisitor):
                 f"<attr>.{node.attr.value}", QualifiedNameSource.LOCAL
             )
             span = self.span_mapping[node]
-            self.usages.append((span, qname, self.is_call_name()))
+            self.usages.append((span, qname, self.parent_call()))
             return True
         else:
             # if this access is resolved, do not record remaining prefixes as usages

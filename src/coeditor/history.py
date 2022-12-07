@@ -227,9 +227,13 @@ class ProjectEdit:
     changes: dict[ModuleName, ModuleEdit]
     commit_info: "CommitInfo | None"
 
-    def all_elem_changes(self) -> Generator[Change[PythonElem], None, None]:
+    def all_elem_changes(self) -> Iterable[Change[PythonElem]]:
         for medit in self.changes.values():
             yield from medit.all_changes.values()
+
+    def modified_functions(self) -> Iterable[Modified[PythonFunction]]:
+        for medit in self.changes.values():
+            yield from medit.modified_functions().values()
 
     def __repr__(self):
         if self.commit_info is None:
@@ -475,6 +479,7 @@ class ContextualEdit:
     main_change: Modified[PythonElem]
     grouped_ctx_changes: dict[str, Sequence[Change[PythonElem]]]
     commit_info: CommitInfo | None
+    refactor_calls: list[tuple[ProjectPath, Modified[cst.Call]]]
 
     @property
     def path(self) -> ProjectPath:
@@ -575,6 +580,8 @@ def analyze_edits(
 
         post_analysis = analyze_project_(pedit.after)
 
+        refactorings = identify_refactorings(pedit, pre_analysis, post_analysis)
+
         # create contextual edits
         ctx_edits = list[ContextualEdit]()
         for path, c in modifications.items():
@@ -598,7 +605,14 @@ def analyze_edits(
                         for u in sort_usages(post_analysis.used2user.get(path, []))
                     ]
             grouped_ctx_changes = _select_change_ctx(path, ctx_changes, change_groups)
-            ctx_edits.append(ContextualEdit(c, grouped_ctx_changes, pedit.commit_info))
+            ctx_edits.append(
+                ContextualEdit(
+                    c,
+                    grouped_ctx_changes,
+                    pedit.commit_info,
+                    refactorings.get(path, []),
+                )
+            )
         analyzed.append(EditAnalysis(ctx_edits, pedit))
         pre_analysis = post_analysis
 
@@ -621,6 +635,42 @@ def _select_ast_calls(
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
             if n.func.id == f_name:
                 yield n
+
+
+def identify_refactorings(
+    pedit: ProjectEdit,
+    pre_analysis: UsageAnalysis,
+    post_analysis: UsageAnalysis,
+):
+
+    changed_apis = set[ProjectPath]()
+    for c in pedit.all_elem_changes():
+        match c:
+            case Modified(before=PythonFunction(), after=PythonFunction()):
+                if is_signature_changed(c):
+                    changed_apis.add(c.before.path)
+
+    refactorings = dict[ProjectPath, list[tuple[ProjectPath, Modified[cst.Call]]]]()
+    for c in pedit.modified_functions():
+        path = c.before.path
+        pre_usages = {
+            u.used: u.callsite
+            for u in pre_analysis.user2used.get(path, [])
+            if u.callsite
+        }
+        pos_usages = {
+            u.used: u.callsite
+            for u in post_analysis.user2used.get(path, [])
+            if u.callsite
+        }
+        call_changes = list[tuple[ProjectPath, Modified[cst.Call]]]()
+        for k in pre_usages.keys() & pos_usages.keys():
+            call_before = normalize_code_by_ast(show_expr(pre_usages[k], quoted=False))
+            call_after = normalize_code_by_ast(show_expr(pos_usages[k], quoted=False))
+            if call_before != call_after:
+                call_changes.append((k, Modified(pre_usages[k], pos_usages[k])))
+        refactorings[path] = call_changes
+    return refactorings
 
 
 class EditSelectors:
@@ -656,7 +706,10 @@ class EditSelectors:
                     changed_users.append(c)
         if changed_users:
             return ContextualEdit(
-                ce.main_change, {"users": changed_users}, ce.commit_info
+                ce.main_change,
+                {"users": changed_users},
+                ce.commit_info,
+                ce.refactor_calls,
             )
         return None
 
@@ -672,6 +725,7 @@ class EditSelectors:
                 ce.main_change,
                 {"usees": usees, "post_usees": post_usees},
                 ce.commit_info,
+                ce.refactor_calls,
             )
         return None
 

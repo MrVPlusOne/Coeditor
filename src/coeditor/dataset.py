@@ -4,6 +4,7 @@ from coeditor.encoding import (
     Del_id,
     FileBasedEditEncoder,
     CstBasedEditEncoder,
+    EditEncoder,
     TokenizedEdit,
     Newline_id,
     Add_id,
@@ -72,9 +73,6 @@ class TokenizedEditDataset:
         edits: Iterable[TokenizedEdit], path=Path("all")
     ) -> "TokenizedEditDataset":
         return TokenizedEditDataset({path: list(edits)})
-
-
-EditEncoder = FileBasedEditEncoder | CstBasedEditEncoder | AnalysisBasedEditEncoder
 
 
 def _process_commits(root: Path, commits: Sequence[CommitInfo], encoder: EditEncoder):

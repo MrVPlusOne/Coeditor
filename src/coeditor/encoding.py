@@ -441,7 +441,7 @@ def truncate_sections(
     """Truncate a list of token sequences to fit within a total length limit.
     Earlier sections have priority over later sections.
     """
-    
+
     # first, reserve equal space to each section
     section_lens = [total_limit // len(sections) for _ in sections]
     remaining = total_limit
@@ -858,3 +858,6 @@ def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq):
         return out_tks[:i]
     else:
         return out_tks
+
+
+EditEncoder = FileBasedEditEncoder | CstBasedEditEncoder | AnalysisBasedEditEncoder
