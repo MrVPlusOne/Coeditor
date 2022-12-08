@@ -38,8 +38,9 @@ class TokenizedEditDataset(Generic[TEdit]):
         return TokenizedEditDataset({repo: self.project2edits[repo] for repo in repos})
 
     def map(self, f: Callable[[TEdit], TEdit]) -> "TokenizedEditDataset[TEdit]":
+        repos = tqdm(self.project2edits.items(), desc="transforming dataset")
         return TokenizedEditDataset(
-            {repo: [f(e) for e in edits] for repo, edits in self.project2edits.items()}
+            {repo: [f(e) for e in edits] for repo, edits in repos}
         )
 
     def per_repo_stats(self) -> pd.DataFrame:
@@ -180,9 +181,10 @@ def datasets_from_repos(
     return {k: dataset.subset(v) for k, v in projects.items()}
 
 
-def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path):
+def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path) -> None:
     for name, dataset in datasets.items():
         pickle_dump(save_dir / f"{name}.pkl", dataset)
+    subprocess.run(["du", "-sh", save_dir])
 
 
 def load_datasets(

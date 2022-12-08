@@ -326,7 +326,7 @@ class TokenizedEdit(ABC):
                     seg = seg + origin_line
                 label = show_label(id_map.get(k, -1))
                 lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
-            return "\n".join(lines)
+            return "".join(lines)
 
         main_segs = output_ids_as_seqs(self.main_tks)
         id_map = {k: i for i, k in enumerate(main_segs)}
@@ -489,6 +489,13 @@ class TokenizedEdit(ABC):
         n_changes = sum(tk == Add_id or tk == Del_id for tk in self.output_tks)
         return n_changes <= max_changes
 
+    def check_extra_ids(self) -> None:
+        main_keys = {k for k in self.main_tks if is_extra_id(k)}
+        out_keys = {k for k in self.output_tks if is_extra_id(k)}
+        assert out_keys.issubset(
+            main_keys
+        ), f"Output keys not in main keys: {out_keys - main_keys}"
+
 
 class TruncateAt(enum.Enum):
     Left = 0
@@ -637,6 +644,7 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
             input, output = change_to_input_output(
                 Modified(code_main_before.strip("\n"), code_main_after.strip("\n"))
             )
+
             main_tks, above_tks, below_tks = truncate_sections(
                 self.n_max_tks - len(MainPrompt) - 1,
                 (input, TruncateAt.Right),
@@ -645,12 +653,16 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
             )
             main_tks.append(Newline_id)
             above_tks.extend(MainPrompt)
+            output_tks = truncate_output_tks(main_tks, output)
+            if not output_tks:
+                # can happen if input too long
+                continue
 
             edit = FileBasedTokenizedEdit(
                 main_tks=main_tks,
+                output_tks=output_tks,
                 left_tks=above_tks,
                 right_tks=below_tks,
-                output_tks=truncate_output_tks(main_tks, output),
                 path=ProjectPath(mod_name, path),
                 change_type=c.map(lambda _: None),
             )
@@ -742,10 +754,6 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
                     print("Body change:\n", body_change)
                     print("Main change:\n", c.map(lambda x: x.code))
                     raise RuntimeError("No output tokens")
-                output_tks = truncate_output_tks(main_tks, output_tks)
-                if not output_tks:
-                    # can happen if input too long
-                    continue
                 left_etks = [
                     ctx_encoder.encode_ctx_element(p) for p in sorted_elems[:i]
                 ]
@@ -762,6 +770,10 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
                     (left_ctx, TruncateAt.Left),
                     (right_ctx, TruncateAt.Right),
                 )
+                output_tks = truncate_output_tks(main_tks, output_tks)
+                if not output_tks:
+                    # can happen if input too long
+                    continue
 
                 selected = {path}
                 for e in get_selected(
@@ -876,7 +888,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
                     left_tks=left_tks,
                     right_tks=right_tks,
                     extra_tks=extra_tks,
-                    output_tks=edit.output_tks,
+                    output_tks=truncate_output_tks(main_tks, edit.output_tks),
                     path=edit.path,
                     change_type=edit.change_type,
                     elems={get_change_path(c) for c in ctx_changes} | edit.elems,
@@ -979,7 +991,7 @@ def random_extra_id_map() -> dict[Token, Token]:
     return dict(zip(__ordered_extra_ids, __random_extra_ids))
 
 
-def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq):
+def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq) -> TokenSeq:
     keys = {tk: None for tk in in_tks if is_extra_id(tk)}
     segs = output_ids_as_seqs(out_tks)
     if keys.keys() == segs.keys():

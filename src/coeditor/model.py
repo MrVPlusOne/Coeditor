@@ -19,7 +19,7 @@ from coeditor.encoding import (
     random_extra_id_map,
 )
 from spot.data import output_ids_as_seqs
-from spot.model import dynamic_dataloader, DataLoader
+from spot.model import dynamic_dataloader, DataLoader, input_cost_model
 from spot.static_analysis import ProjectPath
 from spot.utils import show_expr
 from .common import *
@@ -51,7 +51,7 @@ class DecodingArgs:
 
 @dataclass
 class TrainingArgs:
-    max_batch_cost: float
+    max_batch_cost: float = input_cost_model(4600)
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     quicktest: bool = False
@@ -59,7 +59,7 @@ class TrainingArgs:
 
 @dataclass
 class EvalArgs:
-    max_batch_cost: float
+    max_batch_cost: float = 2 * input_cost_model(4600)
 
 
 @dataclass

@@ -272,19 +272,21 @@ def dynamic_dataloader(
     ids.sort(key=lambda x: input_sizes[x], reverse=True)
     batches = list[list[int]]()
     t = 0
-    tbar = tqdm(desc="Arranging batches", total=len(ids))
-    while t < len(ids):
-        bsize = 1
-        for bsize in range(1, len(ids) - t):
-            if (cost := batch_cost(ids[t : t + bsize])) > max_batch_cost:
-                if bsize == 1:
-                    raise ValueError(f"`max_tokens` are too small: Batch cost: {cost}")
-                break
-        bsize = max(1, bsize - 1)
-        batch = ids[t : t + bsize]
-        batches.append(batch)
-        t += bsize
-        tbar.update(bsize)
+    with tqdm(desc="Arranging batches", total=len(ids)) as tbar:
+        while t < len(ids):
+            bsize = 1
+            for bsize in range(1, len(ids) - t):
+                if (cost := batch_cost(ids[t : t + bsize])) > max_batch_cost:
+                    if bsize == 1:
+                        raise ValueError(
+                            f"`example` is too small: Batch cost={cost}, limit={max_batch_cost}"
+                        )
+                    break
+            bsize = max(1, bsize - 1)
+            batch = ids[t : t + bsize]
+            batches.append(batch)
+            t += bsize
+            tbar.update(bsize)
     if shuffle:
         random.shuffle(batches)
 
