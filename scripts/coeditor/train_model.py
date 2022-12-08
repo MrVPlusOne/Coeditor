@@ -5,7 +5,7 @@ from typing import *
 import wandb
 from coeditor.common import *
 from coeditor.dataset import TokenizedEditDataset
-from coeditor.encoding import AnalysisBasedEditEncoder, EditEncoder
+from coeditor.encoding import AnalysisBasedEditEncoder, CstBasedEditEncoder, EditEncoder
 from coeditor.model import *
 from prepare_data import make_or_load_datasets
 
@@ -24,11 +24,12 @@ def check_save_dir(model_name: str) -> None:
 
 def train_model(
     dataset_name="medium",
-    model_variant="-analysis-post_usees",
+    model_variant="-sig-analysis-post_usees",
     encoder: EditEncoder = AnalysisBasedEditEncoder(
         extra_ctx_names=("usees", "post-usees")
     ),
     max_batch_tokens: int = 4096,
+    recreate_data: bool = False,
     quicktest: bool = False,
 ):
     # model_variant = "-file"
@@ -45,7 +46,7 @@ def train_model(
 
     check_save_dir(model_name)
 
-    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=True)
+    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=recreate_data)
 
     config_dict = {
         k: get_modified_args(v)
@@ -112,4 +113,10 @@ def train_model(
 
 if __name__ == "__main__":
     os.chdir(proj_root())
-    train_model()
+    train_model(
+        dataset_name="medium",
+        model_variant="-sig-cst",
+        encoder=CstBasedEditEncoder(),
+        recreate_data=True,
+        quicktest=False,
+    )

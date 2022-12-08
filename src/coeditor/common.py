@@ -105,6 +105,10 @@ def splitlines(text: str) -> list[str]:
     return text.split("\n")
 
 
+def count_lines(text: str) -> int:
+    return len(text.split("\n"))
+
+
 def split_list(
     lst: list[T1],
     sep: T1,

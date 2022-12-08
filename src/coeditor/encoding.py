@@ -161,7 +161,7 @@ def check_output_tokens(tks: TokenSeq) -> bool:
     return True
 
 
-def change_to_input_output(change: Modified[str]) -> tuple[TokenSeq, TokenSeq]:
+def change_to_input_output(change: Change[str]) -> tuple[TokenSeq, TokenSeq]:
     """
     Encode the change as a pair of input and output token sequences.
     If we inline the output tokens into the input tokens and drop the
@@ -295,6 +295,7 @@ class TokenizedEdit(ABC):
     output_tks: TokenSeq
     main_tks: TokenSeq
     path: ProjectPath
+    change_type: Change[None]
 
     @abstractmethod
     def all_ctxs(self) -> dict[str, TokenSeq]:
@@ -305,6 +306,9 @@ class TokenizedEdit(ABC):
 
     def show(self) -> str:
         return self.show_prediction(None)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(path={str(self.path)}, type={type(self.change_type).__name__}, len(input_tks)={len(self.input_tks)}, len(output_tks)={len(self.output_tks)})"
 
     def show_prediction(self, pred_tks: TokenSeq | None = None) -> str:
         def show_label(i: int):
@@ -545,6 +549,7 @@ class FileBasedTokenizedEdit(TokenizedEdit):
     right_tks: TokenSeq
     output_tks: TokenSeq
     path: ProjectPath
+    change_type: Change[None]
 
     @property
     def input_tks(self) -> TokenSeq:
@@ -557,7 +562,8 @@ class FileBasedTokenizedEdit(TokenizedEdit):
         }
 
 
-MainPrompt = encode_basic("\n# EDIT:\n")
+# MainPrompt = encode_basic("\n# EDIT:\n")
+MainPrompt = TokenSeq()
 
 TEdit = TypeVar("TEdit", bound=TokenizedEdit)
 
@@ -567,6 +573,7 @@ class EditEncoder(Generic[TEdit]):
     def encode_pedit(
         self,
         pedit: ProjectEdit,
+        include_additions: bool = False,
     ) -> Iterable[TEdit]:
         pass
 
@@ -578,6 +585,7 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
     def encode_pedit(
         self,
         pedit: ProjectEdit,
+        include_additions: bool = False,
     ) -> Iterable[FileBasedTokenizedEdit]:
         for me in pedit.changes.values():
             yield from self.encode_medit(me)
@@ -644,6 +652,7 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
                 right_tks=below_tks,
                 output_tks=truncate_output_tks(main_tks, output),
                 path=ProjectPath(mod_name, path),
+                change_type=c.map(lambda _: None),
             )
             yield edit
 
@@ -655,6 +664,7 @@ class CstBasedTokenizedEdit(TokenizedEdit):
     right_tks: TokenSeq
     output_tks: TokenSeq
     path: ProjectPath
+    change_type: Change[None]
     elems: set[ProjectPath]
 
     @property
@@ -690,6 +700,7 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
     def encode_pedit(
         self,
         pedit: ProjectEdit,
+        include_additions: bool = False,
     ) -> Iterable[CstBasedTokenizedEdit]:
         def get_selected(
             elems: Iterable[ProjectPath], elem_lens: Iterable[int], selection_len: int
@@ -704,6 +715,8 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
         ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
         for mname, medit in pedit.changes.items():
             mod_fs = medit.modified_functions(ast_must_change=True)
+            if include_additions:
+                mod_fs |= medit.added_functions()
             if not mod_fs:
                 continue
 
@@ -714,11 +727,30 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
             for i, path in enumerate(sorted_elems):
                 if (c := mod_fs.get(path.path)) is None:
                     continue
-                main_change = c.map(lambda x: x.code)
-                main_tks, output_tks = change_to_input_output(main_change)
+                body_change = c.map(lambda x: x.header_body_code[1])
+                if (
+                    isinstance(body_change, Modified)
+                    and count_lines(body_change.before) > 99
+                ):
+                    # skip functions that are too long
+                    continue
+                main_tks, output_tks = change_to_input_output(body_change)
+                output_tks = truncate_section(
+                    output_tks, TruncateAt.Right, self.n_max_tks
+                )
+                if not output_tks:
+                    print("Body change:\n", body_change)
+                    print("Main change:\n", c.map(lambda x: x.code))
+                    raise RuntimeError("No output tokens")
+                output_tks = truncate_output_tks(main_tks, output_tks)
+                if not output_tks:
+                    # can happen if input too long
+                    continue
                 left_etks = [
                     ctx_encoder.encode_ctx_element(p) for p in sorted_elems[:i]
                 ]
+                header_tks = change_to_tokens(c.map(lambda x: x.header_body_code[0]))
+                main_tks = header_tks + [Newline_id] + main_tks
                 left_ctx = join_list(left_etks, sep=Newline_id)
                 right_etks = [
                     ctx_encoder.encode_ctx_element(p) for p in sorted_elems[i + 1 :]
@@ -752,8 +784,9 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
                     main_tks=main_tks,
                     left_tks=left_tks,
                     right_tks=right_tks,
-                    output_tks=truncate_output_tks(main_tks, output_tks),
+                    output_tks=output_tks,
                     path=path,
+                    change_type=c.map(lambda _: None),
                     elems=selected,
                 )
                 yield ex
@@ -767,6 +800,7 @@ class AnalysisBasedTokenizedEdit(TokenizedEdit):
     extra_tks: TokenSeq
     output_tks: TokenSeq
     path: ProjectPath
+    change_type: Change[None]
     elems: set[ProjectPath]
     updated_calls: list[tuple[ProjectPath, Modified[cst.Call]]]
 
@@ -799,6 +833,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
     def encode_pedits(
         self,
         pedits: Sequence[ProjectEdit],
+        include_additions: bool = False,
     ) -> Iterable[AnalysisBasedTokenizedEdit]:
         analyses = analyze_edits(
             pedits, record_type_usages=self.record_type_usages, silent=True
@@ -812,7 +847,9 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
             pedit = analysis.pedit
             ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
             path_to_cxt_edit = {e.path: e for e in analysis.ctx_edits}
-            tk_edits = list(cst_encoder.encode_pedit(pedit))
+            tk_edits = list(
+                cst_encoder.encode_pedit(pedit, include_additions=include_additions)
+            )
             for edit in tk_edits:
                 ctx_edit = path_to_cxt_edit[edit.path]
                 ctx_changes = [
@@ -841,6 +878,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
                     extra_tks=extra_tks,
                     output_tks=edit.output_tks,
                     path=edit.path,
+                    change_type=edit.change_type,
                     elems={get_change_path(c) for c in ctx_changes} | edit.elems,
                     updated_calls=ctx_edit.updated_calls,
                 )
@@ -942,10 +980,13 @@ def random_extra_id_map() -> dict[Token, Token]:
 
 
 def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq):
-    keys = [tk for tk in in_tks if is_extra_id(tk)]
-    if keys:
-        key = keys[-1]
-        i = out_tks.index(key)
-        return out_tks[:i]
-    else:
+    keys = {tk: None for tk in in_tks if is_extra_id(tk)}
+    segs = output_ids_as_seqs(out_tks)
+    if keys.keys() == segs.keys():
         return out_tks
+    else:
+        out = TokenSeq()
+        for k in keys:
+            out.append(k)
+            out.extend(segs[k])
+        return out

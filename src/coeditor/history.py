@@ -145,8 +145,17 @@ class ModuleEdit:
         return len(self.all_changes) == 0
 
     def modified_functions(
-        self, ast_must_change=True
+        self,
+        ast_must_change=True,
+        body_must_change=True,
     ) -> dict[ElemPath, Modified[PythonFunction]]:
+        def norm_code(f: PythonFunction) -> str:
+            if body_must_change:
+                code = f.header_body_code[1]
+            else:
+                code = f.code
+            return normalize_code_by_ast(code)
+
         return {
             k: cast(Modified[PythonFunction], change)
             for k, change in self.modified.items()
@@ -154,9 +163,15 @@ class ModuleEdit:
             and isinstance(change.after, PythonFunction)
             and (
                 not ast_must_change
-                or normalize_code_by_ast(change.before.code)
-                != normalize_code_by_ast(change.after.code)
+                or norm_code(change.before) != norm_code(change.after)
             )
+        }
+
+    def added_functions(self) -> dict[ElemPath, Added[PythonFunction]]:
+        return {
+            k: cast(Added[PythonFunction], change)
+            for k, change in self.added.items()
+            if isinstance(change.after, PythonFunction)
         }
 
     def sorted_elems(self, include_classes=True) -> list[ElemPath]:
@@ -476,7 +491,7 @@ TAB = " " * 4
 
 @dataclass
 class ContextualEdit:
-    main_change: Modified[PythonElem]
+    main_change: Change[PythonElem]
     grouped_ctx_changes: dict[str, Sequence[Change[PythonElem]]]
     commit_info: CommitInfo | None
     updated_calls: list[tuple[ProjectPath, Modified[cst.Call]]]
@@ -572,10 +587,7 @@ def analyze_edits(
 
     for pedit in tqdm(edits, desc="Analyzing edits", disable=silent):
         ctx_changes = dict[ProjectPath, Change[PythonElem]]()
-        modifications = dict[ProjectPath, Modified[PythonElem]]()
         for c in pedit.all_elem_changes():
-            if isinstance(c, Modified):
-                modifications[c.before.path] = c
             ctx_changes[get_change_path(c)] = c
 
         post_analysis = analyze_project_(pedit.after)
@@ -584,7 +596,7 @@ def analyze_edits(
 
         # create contextual edits
         ctx_edits = list[ContextualEdit]()
-        for path, c in modifications.items():
+        for path, c in ctx_changes.items():
             change_groups = dict[str, list[ProjectPath]]()
             if usees_in_ctx:
                 change_groups["usees"] = [

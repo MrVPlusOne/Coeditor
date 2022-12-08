@@ -16,6 +16,7 @@ from spot.data import output_ids_as_seqs
 from spot.utils import scalar_stats
 from .common import *
 from coeditor.history import (
+    Added,
     CommitInfo,
     ProjectEdit,
     get_commit_history,
@@ -59,9 +60,11 @@ class TokenizedEditDataset(Generic[TEdit]):
     def overall_stats(self) -> dict:
         input_sizes = [len(e.input_tks) for e in self.all_edits()]
         output_sizes = [len(e.output_tks) for e in self.all_edits()]
+        n_added = sum(isinstance(e.change_type, Added) for e in self.all_edits())
         return {
             "n_projects": len(self.project2edits),
             "n_edits": len(input_sizes),
+            "n_additions": n_added,
             "input_size": scalar_stats(input_sizes),
             "output_size": scalar_stats(output_sizes),
         }
@@ -77,21 +80,25 @@ class TokenizedEditDataset(Generic[TEdit]):
 
 
 def _process_commits(
-    root: Path, commits: Sequence[CommitInfo], encoder: EditEncoder[TEdit]
+    root: Path,
+    commits: Sequence[CommitInfo],
+    encoder: EditEncoder[TEdit],
+    include_additions: bool,
 ) -> list[TEdit]:
     edits = edits_from_commit_history(root, commits)
     tk_edits = list()
     if isinstance(encoder, AnalysisBasedEditEncoder):
-        tk_edits.extend(encoder.encode_pedits(list(edits)))
+        tk_edits.extend(encoder.encode_pedits(list(edits), include_additions))
     else:
         for pe in edits:
-            tk_edits.extend(encoder.encode_pedit(pe))
+            tk_edits.extend(encoder.encode_pedit(pe, include_additions))
     return tk_edits
 
 
 def dataset_from_projects(
     project_roots: Sequence[Path],
     encoder: EditEncoder[TEdit],
+    is_train: Sequence[bool],
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
 ) -> "TokenizedEditDataset[TEdit]":
@@ -112,11 +119,13 @@ def dataset_from_projects(
     histories = [commits[-max_history_per_repo:] for commits in histories]
     # break long commit sequences into chunks for parallelization
     roots = list[Path]()
+    include_additions = list[bool]()
     chunked_histories = list[list[CommitInfo]]()
-    for root, h in zip(project_roots, histories):
+    for root, h, train in zip(project_roots, histories, is_train):
         history_chunk_size = max(50, math.ceil(len(h) / 4))
         for i in range(0, len(h), history_chunk_size):
             roots.append(root)
+            include_additions.append(train)
             # note that we need 1 extra overlapping commit to get all diffs
             chunked_histories.append(h[i : i + history_chunk_size + 1])
     tk_edits = pmap(
@@ -124,6 +133,7 @@ def dataset_from_projects(
         roots,
         chunked_histories,
         [encoder] * len(roots),
+        include_additions,
         desc="Create tokenized edits",
         max_workers=workers,
         tqdm_args={"unit": "chunk"},
@@ -143,22 +153,27 @@ def datasets_from_repos(
     repos_root: Path,
     encoder: EditEncoder[TEdit],
     max_history_per_repo: int = 1000,
+    predict_added_in_training: bool = True,
     workers: int = DefaultWorkers,
 ) -> dict[str, TokenizedEditDataset[TEdit]]:
     splits = ["test", "valid", "train"]
     projects = dict[str, list[Path]]()
+    split_include_additions = dict[str, list[bool]]()
     for split in splits:
         if not (repos_root / split).exists():
             warnings.warn(f"Split {split} not found at {repos_root / split}.")
             continue
         ps = [p for p in (repos_root / split).iterdir() if p.is_dir]
         projects[split] = ps
+        include_additions = predict_added_in_training and split == "train"
+        split_include_additions[split] = [include_additions] * len(ps)
         if not ps:
             warnings.warn(f"No projects found in {split} split")
 
     dataset = dataset_from_projects(
         join_list(projects.values()),
         encoder=encoder,
+        is_train=join_list(split_include_additions.values()),
         max_history_per_repo=max_history_per_repo,
         workers=workers,
     )

@@ -154,6 +154,18 @@ class PythonFunction:
     def code(self) -> str:
         return show_element(self.tree, self.in_class)
 
+    @cached_property
+    def header_lines(self) -> int:
+        headerless = self.tree.with_changes(body=cst.IndentedBlock([]))
+        return len(show_expr(headerless, quoted=False).split("\n")) - 1
+
+    @cached_property
+    def header_body_code(self) -> tuple[str, str]:
+        lines = self.code.split("\n")
+        header = "\n".join(lines[: self.header_lines])
+        body = "\n".join(lines[self.header_lines :])
+        return header, body
+
     @property
     def in_class(self) -> bool:
         return self.parent_class is not None
