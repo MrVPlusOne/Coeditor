@@ -32,8 +32,8 @@ from .utils import *
 class ModelTrainingArgs:
     train_ctx_args: CtxArgs
     dec_args: DecodingArgs
-    train_max_tokens: int
-    eval_max_tokens: int
+    train_batch_cost: float
+    eval_batch_cost: float
     max_epochs: int
     tc_args: TypeCheckArgs
     accumulate_grad_batches: int | dict | None = None
@@ -130,13 +130,13 @@ def train_spot_model(
     collate_fn = DataCollatorForSeq2Seq(lit_model.tokenizer, lit_model.model)
     train_dataloader = dynamic_dataloader(
         cast(Any, chunks["train"].data),
-        max_tokens=train_args.train_max_tokens,
+        max_batch_cost=train_args.train_batch_cost,
         collate_fn=collate_fn,
         shuffle=True,
     )
     valid_dataloader = dynamic_dataloader(
         cast(Any, chunks["valid"].data),
-        max_tokens=train_args.eval_max_tokens,
+        max_batch_cost=train_args.eval_batch_cost,
         collate_fn=collate_fn,
         shuffle=True,  # doesn't hurt
     )

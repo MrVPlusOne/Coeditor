@@ -8,6 +8,7 @@ from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import AnalysisBasedEditEncoder, CstBasedEditEncoder, EditEncoder
 from coeditor.model import *
 from prepare_data import make_or_load_datasets
+from spot.model import input_cost_model
 
 
 def check_save_dir(model_name: str) -> None:
@@ -28,7 +29,7 @@ def train_model(
     encoder: EditEncoder = AnalysisBasedEditEncoder(
         extra_ctx_names=("usees", "post-usees")
     ),
-    max_batch_tokens: int = 4096,
+    max_batch_tokens: int = 4600,
     recreate_data: bool = False,
     quicktest: bool = False,
 ):
@@ -37,16 +38,23 @@ def train_model(
     model_name += model_variant
 
     data_args = DataTransformArgs(shuffle_extra_ids=True)
-    train_args = TrainingArgs(max_batch_tokens=max_batch_tokens, quicktest=quicktest)
-    valid_args = EvalArgs(max_batch_tokens=max_batch_tokens * 2)
-    test_args = EvalArgs(max_batch_tokens=max_batch_tokens * 2)
+    train_args = TrainingArgs(
+        max_batch_cost=input_cost_model(max_batch_tokens), quicktest=quicktest
+    )
+    valid_args = EvalArgs(max_batch_cost=2 * input_cost_model(max_batch_tokens))
+    test_args = EvalArgs(max_batch_cost=2 * input_cost_model(max_batch_tokens))
     dec_args = DecodingArgs()
     if train_args.quicktest:
         model_name = "quicktest-" + model_name
 
     check_save_dir(model_name)
 
-    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=recreate_data)
+    datasets = make_or_load_datasets(
+        dataset_name,
+        encoder,
+        recreate_data=recreate_data,
+        # predict_added_in_training=False,
+    )
 
     config_dict = {
         k: get_modified_args(v)
@@ -117,6 +125,6 @@ if __name__ == "__main__":
         dataset_name="medium",
         model_variant="-sig-cst",
         encoder=CstBasedEditEncoder(),
-        recreate_data=True,
+        recreate_data=False,
         quicktest=False,
     )

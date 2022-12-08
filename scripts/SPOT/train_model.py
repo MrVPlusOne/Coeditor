@@ -16,7 +16,7 @@ from spot.data import (
     load_tokenized_srcsets,
     TypeCheckSettings,
 )
-from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
+from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper, input_cost_model
 from spot.train import TrainingConfig, TypeCheckArgs
 from spot.tokenized_src import PreprocessArgs
 from termcolor import colored
@@ -89,8 +89,8 @@ if not eval_only:
     train_args = ModelTrainingArgs(
         train_ctx_args,
         dec_args,
-        train_max_tokens=max_tokens_per_file,
-        eval_max_tokens=2 * max_tokens_per_file,
+        train_batch_cost=input_cost_model(max_tokens_per_file),
+        eval_batch_cost=2 * input_cost_model(max_tokens_per_file),
         max_epochs=1,
         tc_args=tc_args,
     )

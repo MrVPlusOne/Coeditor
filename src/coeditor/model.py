@@ -51,7 +51,7 @@ class DecodingArgs:
 
 @dataclass
 class TrainingArgs:
-    max_batch_tokens: int
+    max_batch_cost: float
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     quicktest: bool = False
@@ -59,7 +59,7 @@ class TrainingArgs:
 
 @dataclass
 class EvalArgs:
-    max_batch_tokens: int
+    max_batch_cost: float
 
 
 @dataclass
@@ -160,7 +160,7 @@ class CoeditorModel:
         )
         data_collator = DataCollatorForSeq2Seq(_Tokenizer)
         loader = dynamic_dataloader(
-            dataset, eval_args.max_batch_tokens, data_collator, shuffle=True
+            dataset, eval_args.max_batch_cost, data_collator, shuffle=True
         )
         pred_dict = self.predict_on_loader(loader, dec_args)
         pred_seq = [pred_dict[i] for i in range(len(eval_edits))]
@@ -201,7 +201,7 @@ class CoeditorModel:
         eval_edits = eval_data.all_edits()
         eval_loader = edits_to_dataloader(
             eval_edits,
-            eval_args.max_batch_tokens,
+            eval_args.max_batch_cost,
             self.data_args,
             shuffle=True,
         )
@@ -360,13 +360,13 @@ def train_coeditor_model(
 
     train_lodader = edits_to_dataloader(
         train_edits,
-        train_args.max_batch_tokens,
+        train_args.max_batch_cost,
         args=model.data_args,
         shuffle=True,
     )
     eval_loader = edits_to_dataloader(
         eval_edits,
-        eval_args.max_batch_tokens,
+        eval_args.max_batch_cost,
         args=model.data_args,
         shuffle=True,
     )
@@ -535,6 +535,9 @@ def edits_to_dataset(
         if len(labels) > args.max_label_tks:
             labels = labels[: args.max_label_tks]
 
+        if len(output_prefix) > args.max_label_tks:
+            output_prefix = output_prefix[: args.max_label_tks]
+
         input_ids = e.input_tks
 
         if args.shuffle_extra_ids:
@@ -545,7 +548,8 @@ def edits_to_dataset(
 
         return input_ids, labels, output_prefix
 
-    processed = [process_edit(e) for e in edits]
+    # processed = pmap(process_edit, edits, desc="Preprocessing edits")
+    processed = [process_edit(e) for e in tqdm(edits, desc="Preprocessing edits")]
     d: dict[str, Any] = {
         "input_ids": [x[0] for x in processed],
         "labels": [x[1] for x in processed],
@@ -559,11 +563,11 @@ def edits_to_dataset(
 
 def edits_to_dataloader(
     edits: Sequence[TokenizedEdit],
-    max_batch_tokens: int,
+    max_batch_cost: float,
     args: DataTransformArgs,
     add_ex_id: bool = False,
     shuffle: bool = False,
 ) -> DataLoader:
     dataset = edits_to_dataset(edits, args, add_ex_id)
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
-    return dynamic_dataloader(dataset, max_batch_tokens, data_collator, shuffle=shuffle)
+    return dynamic_dataloader(dataset, max_batch_cost, data_collator, shuffle=shuffle)

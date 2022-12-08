@@ -171,7 +171,7 @@ class ModelWrapper:
         collator = DataCollatorForSeq2Seq(self.tokenizer, model)
         loader = dynamic_dataloader(
             dataset,  # type: ignore
-            max_tokens=self.args.sampling_max_tokens,
+            max_batch_cost=input_cost_model(self.args.sampling_max_tokens),
             collate_fn=collator,
             shuffle=True,
         )
@@ -248,25 +248,43 @@ class ModelWrapper:
         return DatasetPredResult(chunks, preds)
 
 
+def input_cost_model(size: int) -> float:
+    return (size * size) / 500 + size
+
+
 def dynamic_dataloader(
     dataset: Dataset,
-    max_tokens: int,
+    max_batch_cost: float,
     collate_fn,
     shuffle: bool = False,
 ):
-    ex_sizes = [len(x) for x in dataset["input_ids"]]
-    ids = list(range(len(ex_sizes)))
+    input_sizes = [len(x) for x in dataset["input_ids"]]
+    output_sizes = [len(x) for x in dataset["labels"]]
+
+    def batch_cost(batch_ids: list[int]) -> float:
+        in_size = max(input_sizes[i] for i in batch_ids)
+        out_size = max(output_sizes[i] for i in batch_ids)
+        return input_cost_model(in_size + out_size) * len(batch_ids)
+
+    ids = list(range(len(input_sizes)))
     if shuffle:
         random.shuffle(ids)
-    ids.sort(key=lambda x: ex_sizes[x], reverse=True)
+    ids.sort(key=lambda x: input_sizes[x], reverse=True)
     batches = list[list[int]]()
     t = 0
+    tbar = tqdm(desc="Arranging batches", total=len(ids))
     while t < len(ids):
-        w = ex_sizes[ids[t]]
-        n = max(1, max_tokens // w)
-        batch = ids[t : t + n]
+        bsize = 1
+        for bsize in range(1, len(ids) - t):
+            if (cost := batch_cost(ids[t : t + bsize])) > max_batch_cost:
+                if bsize == 1:
+                    raise ValueError(f"`max_tokens` are too small: Batch cost: {cost}")
+                break
+        bsize = max(1, bsize - 1)
+        batch = ids[t : t + bsize]
         batches.append(batch)
-        t += len(batch)
+        t += bsize
+        tbar.update(bsize)
     if shuffle:
         random.shuffle(batches)
 

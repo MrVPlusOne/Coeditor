@@ -14,7 +14,8 @@ def make_or_load_datasets(
     predict_added_in_training: bool = True,
     recreate_data: bool = False,
 ) -> dict[str, TokenizedEditDataset[TEdit]]:
-    save_dir = get_dataset_dir(dataset_name) / repr_modified_args(encoder)
+    tag = "" if predict_added_in_training else "no_added-"
+    save_dir = get_dataset_dir(dataset_name) / (tag + repr_modified_args(encoder))
 
     if recreate_data or not save_dir.exists():
         if dataset_name == "SPOT":
@@ -49,4 +50,6 @@ if __name__ == "__main__":
     # dataset_name = "SPOT"
     dataset_name = "medium"
     encoder = AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees"))
-    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=True)
+    datasets = make_or_load_datasets(
+        dataset_name, encoder, recreate_data=True, predict_added_in_training=False
+    )
