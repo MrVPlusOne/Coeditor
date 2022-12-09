@@ -12,12 +12,20 @@ from spot.model import input_cost_model
 
 
 def check_save_dir(model_name: str) -> None:
-    to_check = [get_model_dir(b) / model_name for b in [True, False]]
-    exists = [path for path in to_check if path.exists()]
-    if exists:
-        for path in exists:
-            print(f"Path already exists:", path)
-        answer = input("Continue training? (y/n):")
+    training_dir = get_model_dir(False) / model_name
+    trained_dir = get_model_dir(True) / model_name
+    if training_dir.exists():
+        print(f"Training directory already exists:", training_dir)
+        answer = input("Remove and continue training? (y/n):")
+        if answer.lower().strip() == "y":
+            shutil.rmtree(training_dir)
+            return
+        else:
+            print("Training aborted.")
+            exit(1)
+    if trained_dir.exists():
+        print(f"Saved model already exists:", trained_dir)
+        answer = input("Model will be overriden at the end. Continue training? (y/n):")
         if answer.lower().strip() != "y":
             print("Training aborted.")
             exit(1)
@@ -53,7 +61,7 @@ def train_model(
         dataset_name,
         encoder,
         recreate_data=recreate_data,
-        # predict_added_in_training=False,
+        predict_added_in_training=not data_args.use_only_modified,
     )
 
     config_dict = {
@@ -123,7 +131,7 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     train_model(
         dataset_name="medium",
-        model_variant="-sig-cst",
+        model_variant="-sig-cst-run2",
         encoder=CstBasedEditEncoder(),
         recreate_data=False,
         quicktest=False,

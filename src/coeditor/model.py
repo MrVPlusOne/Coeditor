@@ -18,6 +18,7 @@ from coeditor.encoding import (
     EOS_id,
     random_extra_id_map,
 )
+from coeditor.history import Modified
 from spot.data import output_ids_as_seqs
 from spot.model import dynamic_dataloader, DataLoader, input_cost_model
 from spot.static_analysis import ProjectPath
@@ -52,7 +53,7 @@ class DecodingArgs:
 @dataclass
 class TrainingArgs:
     max_batch_cost: float = input_cost_model(4600)
-    learning_rate: float = 2e-5
+    learning_rate: float = 1e-4
     weight_decay: float = 0.01
     quicktest: bool = False
 
@@ -355,6 +356,7 @@ def train_coeditor_model(
     train_edits = train_data.all_edits()
     eval_edits = eval_data.all_edits()
     if train_args.quicktest:
+        print("Using fewer data for quick test.")
         train_edits = train_edits[:10]
         eval_edits = eval_edits[:2]
 
@@ -505,12 +507,15 @@ class DataTransformArgs:
     all <extra_id>s are equally likely to be used.
     - `max_label_tks`: The maximum number of tokens in the output sequence. Will
     truncate from the end if the output sequence is longer than this.
+    - `use_only_modified`: If True, will only use the Modified edits and discard
+    Added and Deleted edits.
     """
 
     use_signature_prefix: bool = False
     skip_unchanged: bool = False
     shuffle_extra_ids: bool = False
     max_label_tks: int = 512
+    use_only_modified: bool = True
 
 
 def edits_to_dataset(
@@ -549,6 +554,8 @@ def edits_to_dataset(
         return input_ids, labels, output_prefix
 
     # processed = pmap(process_edit, edits, desc="Preprocessing edits")
+    if args.use_only_modified:
+        edits = [e for e in edits if isinstance(e.change_type, Modified)]
     processed = [process_edit(e) for e in tqdm(edits, desc="Preprocessing edits")]
     d: dict[str, Any] = {
         "input_ids": [x[0] for x in processed],

@@ -11,10 +11,10 @@ from spot.utils import pretty_print_dict
 def make_or_load_datasets(
     dataset_name: str,
     encoder: EditEncoder[TEdit],
-    predict_added_in_training: bool = True,
+    predict_added_in_training: bool = False,
     recreate_data: bool = False,
 ) -> dict[str, TokenizedEditDataset[TEdit]]:
-    tag = "" if predict_added_in_training else "no_added-"
+    tag = "with_added-" if predict_added_in_training else ""
     save_dir = get_dataset_dir(dataset_name) / (tag + repr_modified_args(encoder))
 
     if recreate_data or not save_dir.exists():

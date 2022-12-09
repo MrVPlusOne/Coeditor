@@ -37,6 +37,7 @@ from libcst.metadata import CodePosition, CodeRange
 from sklearn.metrics import confusion_matrix
 import multiprocessing
 import textwrap
+from termcolor import colored
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm
@@ -538,11 +539,11 @@ def timed_action(name: str, silent: bool = False):
     if silent:
         yield
         return
-    print("Starting task:", name)
+    cprint("green", "Starting task:", name)
     start_time = time.time()
     yield
     duration = time.time() - start_time
-    print(f"({duration:.1f}s) Finished task:", name)
+    cprint("green", f"({duration:.1f}s) Finished task:", name)
 
 
 class PickleCache:
@@ -909,3 +910,7 @@ def show_expr(
     if quoted:
         s = f"cst'{s}'"
     return s
+
+
+def cprint(color: str, *elems, **print_args):
+    print(*(colored(str(e), color) for e in elems), **print_args)
