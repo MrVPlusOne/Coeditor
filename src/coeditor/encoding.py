@@ -84,9 +84,9 @@ def decode_tokens(tokens: TokenSeq) -> str:
     return _Tokenizer.decode(tokens, add_special_tokens=False)
 
 
-def encode_basic(text: str) -> TokenSeq:
+def encode_basic(text: str, add_special_tokens=False) -> TokenSeq:
     "Encode a string into a token sequence using the base tokenizer."
-    return _BaseTokenizer.encode(text, add_special_tokens=False)
+    return _BaseTokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
 def change_to_tokens(change: Change[str]) -> TokenSeq:
