@@ -992,13 +992,14 @@ def random_extra_id_map() -> dict[Token, Token]:
 
 
 def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq) -> TokenSeq:
-    keys = {tk: None for tk in in_tks if is_extra_id(tk)}
-    segs = output_ids_as_seqs(out_tks)
-    if keys.keys() == segs.keys():
+    in_keys = {tk: None for tk in in_tks if is_extra_id(tk)}
+    out_segs = output_ids_as_seqs(out_tks)
+    if in_keys.keys() == out_segs.keys():
         return out_tks
     else:
         out = TokenSeq()
-        for k in keys:
-            out.append(k)
-            out.extend(segs[k])
+        for k in in_keys:
+            if k in out_segs:
+                out.append(k)
+                out.extend(out_segs[k])
         return out

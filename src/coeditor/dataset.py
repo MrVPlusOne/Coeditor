@@ -86,10 +86,15 @@ def _process_commits(
     encoder: EditEncoder[TEdit],
     include_additions: bool,
 ) -> list[TEdit]:
-    edits = edits_from_commit_history(root, commits)
+    try:
+        edits = list(edits_from_commit_history(root, commits))
+    except UnicodeDecodeError as e:
+        # this might happen in rare cases
+        warnings.warn(f"Unable to process project: {root}\nError: {e}")
+        return []
     tk_edits = list()
     if isinstance(encoder, AnalysisBasedEditEncoder):
-        tk_edits.extend(encoder.encode_pedits(list(edits), include_additions))
+        tk_edits.extend(encoder.encode_pedits(edits, include_additions))
     else:
         for pe in edits:
             tk_edits.extend(encoder.encode_pedit(pe, include_additions))

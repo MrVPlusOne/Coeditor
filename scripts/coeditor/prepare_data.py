@@ -48,8 +48,15 @@ if __name__ == "__main__":
     os.chdir(proj_root())
 
     # dataset_name = "SPOT"
-    dataset_name = "medium"
-    encoder = AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees"))
-    datasets = make_or_load_datasets(
-        dataset_name, encoder, recreate_data=True, predict_added_in_training=False
-    )
+    dataset_name = "large"
+    encoders = [
+        CstBasedEditEncoder(),
+        AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees")),
+    ]
+    for encoder in encoders:
+        with timed_action(f"Preparing dataset with encoder {encoder}"):
+            make_or_load_datasets(
+                dataset_name,
+                encoder,
+                predict_added_in_training=True,
+            )
