@@ -219,10 +219,8 @@ class CoeditorModel:
         return CoeditorModel(codet5, data_args=dargs)
 
     @staticmethod
-    def from_code_t5(data_args: "DataTransformArgs", use_small_model=False):
-        path = (
-            "Salesforce/codet5-small" if use_small_model else "Salesforce/codet5-base"
-        )
+    def from_code_t5(data_args: "DataTransformArgs", size: str):
+        path = f"Salesforce/codet5-{size}"
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
         codet5.resize_token_embeddings(len(_Tokenizer))
