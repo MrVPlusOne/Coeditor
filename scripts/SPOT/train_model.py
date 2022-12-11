@@ -48,7 +48,7 @@ tc_args = TypeCheckArgs(check_in_isolation=config.check_in_isolation)
 
 max_tokens_per_file = config.ctx_size
 dec_args = DecodingArgs(
-    sampling_max_tokens=8 * max_tokens_per_file,
+    max_batch_cost=8 * input_cost_model(max_tokens_per_file, 256),
     ctx_args=config.dec_ctx_args(),
 )
 
@@ -89,8 +89,8 @@ if not eval_only:
     train_args = ModelTrainingArgs(
         train_ctx_args,
         dec_args,
-        train_batch_cost=input_cost_model(max_tokens_per_file),
-        eval_batch_cost=2 * input_cost_model(max_tokens_per_file),
+        train_batch_cost=input_cost_model(max_tokens_per_file, 256),
+        eval_batch_cost=2 * input_cost_model(max_tokens_per_file, 256),
         max_epochs=1,
         tc_args=tc_args,
     )
@@ -127,7 +127,7 @@ from spot.visualization import pretty_print_dict
 from spot.type_env import AccuracyMetric
 
 bs_args = DecodingArgs(
-    sampling_max_tokens=max_tokens_per_file,
+    max_batch_cost=input_cost_model(max_tokens_per_file, 256),
     ctx_args=config.dec_ctx_args(),
     do_sample=False,
     num_beams=16,

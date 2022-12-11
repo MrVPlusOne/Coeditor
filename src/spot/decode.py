@@ -66,7 +66,7 @@ def incr_inference_with_feedback(
     by `selector`.
     """
     ctx_args = wrapper.args.ctx_args
-    sampling_max_tokens = wrapper.args.sampling_max_tokens
+    sampling_max_tokens = wrapper.args.max_batch_cost
     srcs_to_check = src_data.all_srcs
     if log_to is not None:
         shutil.rmtree(log_to, ignore_errors=True)
@@ -487,7 +487,7 @@ def select_candidates_using_critic(
 
     dataloader = dynamic_dataloader(
         critic_dataset,
-        max_tokens=dec_args.sampling_max_tokens,
+        max_tokens=dec_args.max_batch_cost,
         collate_fn=CriticCollator(),
     )
     chunk2preds = critic.classify_data(

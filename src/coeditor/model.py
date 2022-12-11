@@ -52,7 +52,8 @@ class DecodingArgs:
 
 @dataclass
 class TrainingArgs:
-    max_batch_cost: float = input_cost_model(4600)
+    max_batch_cost: float = input_cost_model(4100, 512)
+    max_batch_size: int = 32
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     max_train_epochs: int = 3
@@ -61,7 +62,7 @@ class TrainingArgs:
 
 @dataclass
 class EvalArgs:
-    max_batch_cost: float = 2 * input_cost_model(4600)
+    max_batch_cost: float = 2 * input_cost_model(4100, 512)
 
 
 @dataclass
@@ -204,6 +205,7 @@ class CoeditorModel:
             train_edits,
             train_args.max_batch_cost,
             args=self.data_args,
+            max_batch_size=train_args.max_batch_size,
             shuffle=True,
         )
         eval_loader = edits_to_dataloader(
@@ -562,7 +564,14 @@ def edits_to_dataloader(
     args: DataTransformArgs,
     add_ex_id: bool = False,
     shuffle: bool = False,
+    max_batch_size: int | None = None,
 ) -> DataLoader:
     dataset = edits_to_dataset(edits, args, add_ex_id)
     data_collator = DataCollatorForSeq2Seq(_Tokenizer)
-    return dynamic_dataloader(dataset, max_batch_cost, data_collator, shuffle=shuffle)
+    return dynamic_dataloader(
+        dataset,
+        max_batch_cost,
+        data_collator,
+        shuffle=shuffle,
+        max_batch_size=max_batch_size,
+    )

@@ -4,11 +4,11 @@ import os
 import asyncio
 from typing import *
 
-from spot.utils import not_none, proj_root, get_data_dir
+from spot.utils import not_none, proj_root, get_dataroot
 
 os.chdir(proj_root())
 
-datadir = get_data_dir()
+datadir = get_dataroot()
 
 # %%
 # experiment configurations
@@ -63,7 +63,7 @@ from spot.dagger import DAggerModel
 import torch
 
 train_dec_args = DecodingArgs(
-    sampling_max_tokens=8 * config.ctx_size,
+    max_batch_cost=8 * config.ctx_size,
     ctx_args=config.dec_ctx_args(),
     do_sample=True,  # use necleus sampling during training
     top_p=0.9,
@@ -130,7 +130,7 @@ from spot.utils import pretty_print_dict, pretty_show_dict, PickleCache
 from spot.visualization import string_to_html
 
 test_dec_args = DecodingArgs(
-    sampling_max_tokens=8 * config.ctx_size,
+    max_batch_cost=8 * config.ctx_size,
     ctx_args=CtxArgs(
         ctx_size=4096,
         left_margin=2048,

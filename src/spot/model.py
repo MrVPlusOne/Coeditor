@@ -24,7 +24,7 @@ from .utils import *
 @dataclass
 class DecodingArgs:
     ctx_args: CtxArgs
-    sampling_max_tokens: int
+    max_batch_cost: float
     max_workers: int = DefaultWorkers
     # the maximal prediction length = tokens_per_type * num_types + slack_tokens
     tokens_per_type: int = 16
@@ -47,7 +47,7 @@ class DecodingArgs:
         result.ctx_args.ctx_size = ctx_size
         result.ctx_args.left_margin = left_margin
         result.ctx_args.right_margin = right_margin
-        result.sampling_max_tokens = round(self.sampling_max_tokens / factor**2)
+        result.max_batch_cost = round(self.max_batch_cost / factor**2)
 
         return result
 
@@ -171,7 +171,7 @@ class ModelWrapper:
         collator = DataCollatorForSeq2Seq(self.tokenizer, model)
         loader = dynamic_dataloader(
             dataset,  # type: ignore
-            max_batch_cost=input_cost_model(self.args.sampling_max_tokens),
+            max_batch_cost=self.args.max_batch_cost,
             collate_fn=collator,
             shuffle=True,
         )
@@ -248,14 +248,18 @@ class ModelWrapper:
         return DatasetPredResult(chunks, preds)
 
 
-def input_cost_model(size: int) -> float:
-    return (size * size) / 500 + size
+def input_cost_model(enc_size: int, dec_size: int) -> float:
+    a = 1 / 500
+    return (
+        a * (enc_size**2 + dec_size**2 + enc_size * dec_size) + enc_size + dec_size
+    )
 
 
 def dynamic_dataloader(
     dataset: Dataset,
     max_batch_cost: float,
     collate_fn,
+    max_batch_size: int | None = None,
     shuffle: bool = False,
 ):
     input_sizes = [len(x) for x in dataset["input_ids"]]
@@ -264,7 +268,7 @@ def dynamic_dataloader(
     def batch_cost(batch_ids: list[int]) -> float:
         in_size = max(input_sizes[i] for i in batch_ids)
         out_size = max(output_sizes[i] for i in batch_ids)
-        return input_cost_model(in_size + out_size) * len(batch_ids)
+        return input_cost_model(in_size, out_size) * len(batch_ids)
 
     ids = list(range(len(input_sizes)))
     if shuffle:
@@ -282,6 +286,8 @@ def dynamic_dataloader(
                             f"`example` is too small: Batch cost={cost}, limit={max_batch_cost}"
                         )
                     break
+                if max_batch_size is not None and bsize > max_batch_size:
+                    break
             bsize = max(1, bsize - 1)
             batch = ids[t : t + bsize]
             batches.append(batch)
@@ -289,6 +295,8 @@ def dynamic_dataloader(
             tbar.update(bsize)
     if shuffle:
         random.shuffle(batches)
+
+    pretty_print_dict({"batch_size": scalar_stats([len(b) for b in batches])})
 
     return DataLoader(
         cast(Any, dataset),

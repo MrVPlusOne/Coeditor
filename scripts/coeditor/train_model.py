@@ -37,7 +37,7 @@ def train_model(
     encoder: EditEncoder = AnalysisBasedEditEncoder(
         extra_ctx_names=("usees", "post-usees")
     ),
-    max_batch_tokens: int = 4550,
+    max_batch_tokens: int = 4100,
     recreate_data: bool = False,
     quicktest: bool = False,
 ):
@@ -47,10 +47,15 @@ def train_model(
 
     data_args = DataTransformArgs(shuffle_extra_ids=True)
     train_args = TrainingArgs(
-        max_batch_cost=input_cost_model(max_batch_tokens), quicktest=quicktest
+        max_batch_cost=input_cost_model(max_batch_tokens, data_args.max_label_tks),
+        quicktest=quicktest,
     )
-    valid_args = EvalArgs(max_batch_cost=2 * input_cost_model(max_batch_tokens))
-    test_args = EvalArgs(max_batch_cost=2 * input_cost_model(max_batch_tokens))
+    valid_args = EvalArgs(
+        max_batch_cost=2 * input_cost_model(max_batch_tokens, data_args.max_label_tks)
+    )
+    test_args = EvalArgs(
+        max_batch_cost=2 * input_cost_model(max_batch_tokens, data_args.max_label_tks)
+    )
     dec_args = DecodingArgs()
     if train_args.quicktest:
         model_name = "quicktest-" + model_name

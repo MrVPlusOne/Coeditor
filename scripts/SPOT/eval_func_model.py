@@ -93,7 +93,7 @@ from spot.experiments.typet5 import accs_as_table_row
 
 ctx_args = model.args.ctx_args
 ctx_args.max_labels = 16
-model.args.sampling_max_tokens = ctx_args.ctx_size
+model.args.max_batch_cost = ctx_args.ctx_size
 model.args.do_sample = False
 model.args.num_beams = 16
 model.args.tokens_per_type = 16
