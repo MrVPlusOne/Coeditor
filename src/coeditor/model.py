@@ -219,7 +219,7 @@ class CoeditorModel:
         return CoeditorModel(codet5, data_args=dargs)
 
     @staticmethod
-    def from_code_t5(data_args: "DataTransformArgs", size: str):
+    def from_code_t5(data_args: "DataTransformArgs", size: str="base"):
         path = f"Salesforce/codet5-{size}"
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
@@ -563,7 +563,9 @@ def edits_to_dataset(
         d["output_prefix_len"] = [len(x[2]) for x in processed]
     if add_ex_id:
         d["ex_ids"] = list(range(len(edits)))
-    return Dataset.from_dict(d)
+    with timed_action("Dataset.from_dict"):
+        data = Dataset.from_dict(d)
+    return data
 
 
 def edits_to_dataloader(

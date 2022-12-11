@@ -37,7 +37,7 @@ def train_model(
     encoder: EditEncoder = AnalysisBasedEditEncoder(
         extra_ctx_names=("usees", "post-usees")
     ),
-    max_batch_tokens: int = 4600,
+    max_batch_tokens: int = 4550,
     recreate_data: bool = False,
     quicktest: bool = False,
 ):
@@ -130,9 +130,10 @@ def train_model(
 if __name__ == "__main__":
     os.chdir(proj_root())
     train_model(
-        dataset_name="medium",
-        model_variant="-sig-cst-run2",
-        encoder=CstBasedEditEncoder(),
+        dataset_name="large",
+        model_variant="-analysis-post_usees",
+        # encoder=CstBasedEditEncoder(),
+        encoder=AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees")),
         recreate_data=False,
         quicktest=False,
     )

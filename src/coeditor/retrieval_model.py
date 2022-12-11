@@ -20,6 +20,8 @@ from torch import nn
 from coeditor.encoding import BOS_id, EOS_id, encode_basic
 import transformers
 
+PAD_id = 0
+
 
 class RetrievalEditorModel(T5PreTrainedModel):
     """
@@ -53,19 +55,22 @@ class RetrievalEditorModel(T5PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        self.pad_id = cast(int, self.config.pad_token_id)
         self.query_attened_ref = True
 
         # Model parallel
         # self.model_parallel = False
         # self.device_map = None
 
-    def encode_token_seqs(self, references: list[TokenSeq] | list[str]) -> LongTensor:
+    def encode_token_seqs(
+        self, references: list[TokenSeq] | list[str], pad_id=None
+    ) -> LongTensor:
         references = [encode_basic(ref) for ref in references if isinstance(ref, str)]
         max_len = max(len(ref) for ref in references)
+        if pad_id is None:
+            pad_id = PAD_id
         rows = []
         for ref in references:
-            row = ref + [self.pad_id] * (max_len - len(ref))
+            row = ref + [pad_id] * (max_len - len(ref))
             rows.append(row)
         out = LongTensor(rows).to(self.device)
         return cast(LongTensor, out)
@@ -91,7 +96,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     ) -> Seq2SeqLMOutput:
         """
         Shapes
-        - input_ids: (num_queries, seq_len,)
+        - input_ids: (n_queries, seq_len,)
         - references: (num_refs, ref_len)
         - ref_masks: for each query, a list of reference indices. If none,
         assume all references are accessible to all queries.
@@ -193,9 +198,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         return self.lm_head
 
     def get_encoder(self):
-        return RetrivalEncoder(
-            self.encoder, self.pad_id, query_attened_ref=self.query_attened_ref
-        )
+        return RetrivalEncoder(self.encoder, query_attened_ref=self.query_attened_ref)
 
     def get_decoder(self):
         return self.decoder
@@ -221,7 +224,6 @@ class RetrivalEncoderOutputs(transformers.utils.ModelOutput):
 @dataclass
 class RetrivalEncoder:
     encoder: T5Stack
-    pad_id: int
     query_attened_ref: bool
 
     def __call__(self, *args: Any, **kwds: Any) -> RetrivalEncoderOutputs:
@@ -239,27 +241,24 @@ class RetrivalEncoder:
     ) -> RetrivalEncoderOutputs:
         """
         Shapes
-        - input_ids: (num_queries, seq_len)
+        - input_ids: (n_queries, seq_len)
         - references: (num_refs, ref_len)
         - ref_masks: for each query, a list of reference indices. If none,
         assume all references are accessible to all queries.
         """
         if references is None:
-            references = cast(
-                LongTensor, LongTensor([[self.pad_id]]).to(input_ids.device)
-            )
+            references = cast(LongTensor, LongTensor([[PAD_id]]).to(input_ids.device))
 
         assert_eq(input_ids.dim(), 2)
         assert_eq(references.dim(), 2)
 
         n_queries = input_ids.size(0)
-        query_attention_mask = cast(BoolTensor, input_ids.ne(self.pad_id))
+        query_attention_mask = cast(BoolTensor, input_ids.ne(PAD_id))
 
         n_refs = references.size(0)
-        ref_attention_mask = cast(BoolTensor, references.ne(self.pad_id))
+        ref_attention_mask = cast(BoolTensor, references.ne(PAD_id))
 
         if ref_query_list is None:
-            # TODO: use the last index as the query index
             ref_query_list = [list(range(n_refs)) for _ in range(n_queries)]
 
         ref_outputs = self.encode_references(
@@ -331,10 +330,17 @@ class RetrivalEncoder:
         for q in range(n_queries):
             qrefs = [ref_state_list[r] for r in ref_query_list[q]]
             qrefs.append(query_state_list[q])
-            qref_rows.append(
-                torch.cat(qrefs, dim=0)
-            )  # (sum(ref_lens) + query_len, model_dim)
+            row_tensor = torch.cat(qrefs, dim=0)
+            assert row_tensor.ndim == 2  # (sum(ref_lens) + query_len, model_dim)
+            qref_rows.append(row_tensor)
         qref_states, qref_masks = stack_pad_tensors(qref_rows)
+        assert_eq(qref_states.size(0), n_queries)
+        if (qref_len := qref_states.size(1)) > (
+            pad_len := ref_len * n_refs + query_ids.size(1)
+        ):
+            raise AssertionError(f"{qref_len = }, {pad_len = }")
+
+        assert_eq(qref_states.size(2), model_d)
         return qref_states, qref_masks
 
     def encode_query_complex(
@@ -345,11 +351,14 @@ class RetrivalEncoder:
         ref_query_list: list[list[int]],
         ref_attention_mask: BoolTensor,
     ) -> tuple[Tensor, Tensor]:
+        assert (
+            query_ids[:, 0].ne(PAD_id).all()
+        ), "queries must be padded only at the end."
         n_queries = len(ref_query_list)
 
         qref_hidden_states = list[Tensor]()
         qref_attention_masks = list[BoolTensor]()
-        for i, ref_states in enumerate(not_none(ref_outputs.hidden_states)):
+        for ref_states in not_none(ref_outputs.hidden_states):
             n_refs, ref_len, model_d = ref_states.shape
             ref_state_list = [
                 ref_states[i, ref_attention_mask[i]] for i in range(n_refs)
@@ -359,6 +368,7 @@ class RetrivalEncoder:
             for q in range(n_queries):
                 qrefs = [ref_state_list[r] for r in ref_query_list[q]]
                 qref_rows.append(torch.cat(qrefs, dim=0))  # (sum(ref_lens), model_dim)
+            # qrefs are padded at the end
             qref_states, qref_masks = stack_pad_tensors(
                 qref_rows
             )  # (n_queries, sum(ref_lens), model_dim)
@@ -477,6 +487,8 @@ def encode_query_stack(
     assert not stack.is_decoder
     device = input_ids.device
 
+    assert input_ids[:, 0].ne(PAD_id).all(), "input_ids must be padded at only the end."
+
     input_shape = input_ids.size()
     batch_size, query_len = input_shape
     _, ref_len, model_dim = ref_hidden_states[0].size()
@@ -503,14 +515,24 @@ def encode_query_stack(
 
     attention_layer = cast(T5Block, stack.block[0]).layer[0].SelfAttention
     assert isinstance(attention_layer, T5Attention)
-    # FIXME: may need to change query_shift to be batch-specific
-    position_bias = compute_bias(
-        attention_layer,
-        query_len,
-        ref_len + query_len,
-        query_shift=ref_len,
-        device=device,
-    )
+
+    n_queries = input_ids.size(0)
+    ref_lens = ref_attention_mask.sum(dim=1)[:, None]  # (n_queries, 1)
+    # relative pos needs to be of shape (n_quries, query_len, ref_len + query_len)
+    ref_pos = torch.arange(ref_len, device=device, dtype=torch.long)[
+        None, :
+    ]  # (1, ref_len)
+    ref_pos = ref_pos + torch.zeros(
+        n_queries, 1, device=device, dtype=torch.long
+    )  # (n_queries, ref_len)
+    query_pos = (
+        torch.arange(query_len, device=device, dtype=torch.long)[None, :] + ref_lens
+    )  # (n_queries, query_len)
+    key_pos = torch.cat([ref_pos, query_pos], dim=1)  # (n_queries, ref_len + query_len)
+    relative_pos = (
+        key_pos[:, None, :] - query_pos[:, :, None]
+    )  # (n_queries, query_len, ref_len + query_len)
+    position_bias = compute_bias(attention_layer, relative_pos)
     position_bias = extended_attention_mask + position_bias
 
     assert stack.embed_tokens is not None
@@ -550,29 +572,20 @@ def encode_query_stack(
 
 def compute_bias(
     self: T5Attention,
-    query_length: int,
-    key_length: int,
-    query_shift: int | Tensor,
-    device=None,
-):
-    """Compute binned relative position bias"""
-    if device is None:
-        device = self.relative_attention_bias.weight.device
-    q_position = (
-        torch.arange(query_length, dtype=torch.long, device=device) + query_shift
-    )[:, None]
-    k_position = torch.arange(key_length, dtype=torch.long, device=device)[None, :]
-    relative_position = k_position - q_position  # shape (query_length, key_length)
+    relative_pos: Tensor,
+) -> Tensor:
+    """Compute binned relative position bias from `relative_pos` of
+    the shape `(n_queries, query_length, key_length)`"""
     relative_position_bucket = self._relative_position_bucket(
-        relative_position,  # shape (query_length, key_length)
+        relative_pos,  # shape (query_length, key_len)
         bidirectional=(not self.is_decoder),
         num_buckets=self.relative_attention_num_buckets,
         max_distance=self.relative_attention_max_distance,
     )
     values = self.relative_attention_bias(
         relative_position_bucket
-    )  # shape (query_length, key_length, num_heads)
-    values = values.permute([2, 0, 1]).unsqueeze(
-        0
-    )  # shape (1, num_heads, query_length, key_length)
+    )  # shape (n_qureis, query_len, key_len, n_heads)
+    values = values.permute(
+        [0, 3, 1, 2]
+    )  # shape (n_queries, n_heads, query_len, key_len)
     return values
