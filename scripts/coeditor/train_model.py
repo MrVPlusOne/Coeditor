@@ -16,7 +16,7 @@ def check_save_dir(model_name: str) -> None:
     trained_dir = get_model_dir(True) / model_name
     if training_dir.exists():
         print(f"Training directory already exists:", training_dir)
-        answer = input("Remove and continue training? (y/n):")
+        answer = input("Remove and retrain? (y/n):")
         if answer.lower().strip() == "y":
             shutil.rmtree(training_dir)
             return
@@ -25,7 +25,7 @@ def check_save_dir(model_name: str) -> None:
             exit(1)
     if trained_dir.exists():
         print(f"Saved model already exists:", trained_dir)
-        answer = input("Model will be overriden at the end. Continue training? (y/n):")
+        answer = input("Model will be overriden at the end. Continue? (y/n):")
         if answer.lower().strip() != "y":
             print("Training aborted.")
             exit(1)

@@ -55,6 +55,7 @@ class TrainingArgs:
     max_batch_cost: float = input_cost_model(4600)
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
+    max_train_epochs: int = 3
     quicktest: bool = False
 
 
@@ -190,9 +191,65 @@ class CoeditorModel:
         train_args: "TrainingArgs",
         eval_args: "EvalArgs",
     ) -> None:
-        train_coeditor_model(
-            self, training_name, train_data, eval_data, train_args, eval_args
+        train_dir = get_model_dir(trained=False) / training_name
+
+        train_edits = train_data.all_edits()
+        eval_edits = eval_data.all_edits()
+        if train_args.quicktest:
+            print("Using fewer data for quick test.")
+            train_edits = train_edits[:10]
+            eval_edits = eval_edits[:2]
+
+        train_lodader = edits_to_dataloader(
+            train_edits,
+            train_args.max_batch_cost,
+            args=self.data_args,
+            shuffle=True,
         )
+        eval_loader = edits_to_dataloader(
+            eval_edits,
+            eval_args.max_batch_cost,
+            args=self.data_args,
+            shuffle=True,
+        )
+
+        class DynamicTrainer(Seq2SeqTrainer):
+            def get_train_dataloader(self):
+                return train_lodader
+
+            def get_eval_dataloader(self, eval_dataset):
+                return eval_loader
+
+        eval_interval = max(1, len(train_lodader) // 4)
+        trainer_args = Seq2SeqTrainingArguments(
+            output_dir=str(train_dir),
+            overwrite_output_dir=True,
+            evaluation_strategy="steps",
+            save_strategy="steps",
+            eval_steps=eval_interval,
+            logging_steps=eval_interval,
+            save_steps=eval_interval,
+            save_total_limit=3,
+            prediction_loss_only=True,
+            learning_rate=train_args.learning_rate,
+            weight_decay=train_args.weight_decay,
+            num_train_epochs=train_args.max_train_epochs,
+            fp16=True,
+            load_best_model_at_end=True,
+            push_to_hub=False,
+            report_to=["wandb"],
+        )
+
+        trainer = DynamicTrainer(
+            self.codet5,
+            trainer_args,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
+        )
+
+        trainer.train()
+        save_dir = get_model_dir(trained=True) / training_name
+        self.save_pretrained(save_dir)
+        print("Model saved to:", save_dir)
 
     def eval_loss_on_data(
         self,
@@ -219,7 +276,7 @@ class CoeditorModel:
         return CoeditorModel(codet5, data_args=dargs)
 
     @staticmethod
-    def from_code_t5(data_args: "DataTransformArgs", size: str="base"):
+    def from_code_t5(data_args: "DataTransformArgs", size: str = "base"):
         path = f"Salesforce/codet5-{size}"
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
@@ -339,75 +396,6 @@ def find_calls(node: cst.CSTNode) -> list[cst.Call]:
 
     node.visit(CallFinder())
     return all_calls
-
-
-def train_coeditor_model(
-    model: CoeditorModel,
-    training_name: str,
-    train_data: TokenizedEditDataset,
-    eval_data: TokenizedEditDataset,
-    train_args: TrainingArgs,
-    eval_args: EvalArgs,
-):
-    train_dir = get_model_dir(trained=False) / training_name
-
-    train_edits = train_data.all_edits()
-    eval_edits = eval_data.all_edits()
-    if train_args.quicktest:
-        print("Using fewer data for quick test.")
-        train_edits = train_edits[:10]
-        eval_edits = eval_edits[:2]
-
-    train_lodader = edits_to_dataloader(
-        train_edits,
-        train_args.max_batch_cost,
-        args=model.data_args,
-        shuffle=True,
-    )
-    eval_loader = edits_to_dataloader(
-        eval_edits,
-        eval_args.max_batch_cost,
-        args=model.data_args,
-        shuffle=True,
-    )
-
-    class DynamicTrainer(Seq2SeqTrainer):
-        def get_train_dataloader(self):
-            return train_lodader
-
-        def get_eval_dataloader(self, eval_dataset):
-            return eval_loader
-
-    eval_interval = 6 * len(eval_loader)
-    trainer_args = Seq2SeqTrainingArguments(
-        output_dir=str(train_dir),
-        overwrite_output_dir=True,
-        evaluation_strategy="steps",
-        save_strategy="steps",
-        eval_steps=eval_interval,
-        logging_steps=eval_interval,
-        save_steps=eval_interval,
-        save_total_limit=3,
-        prediction_loss_only=True,
-        learning_rate=train_args.learning_rate,
-        weight_decay=train_args.weight_decay,
-        num_train_epochs=4,
-        fp16=True,
-        load_best_model_at_end=True,
-        push_to_hub=False,
-        report_to=["wandb"],
-    )
-
-    trainer = DynamicTrainer(
-        model.codet5,
-        trainer_args,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
-    )
-
-    trainer.train()
-    save_dir = get_model_dir(trained=True) / training_name
-    model.save_pretrained(save_dir)
-    print("Model saved to:", save_dir)
 
 
 @torch.no_grad()
