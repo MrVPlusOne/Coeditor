@@ -502,18 +502,20 @@ class TruncateAt(enum.Enum):
     Right = 1
 
 
-def truncate_section(sec: TokenSeq, direction: TruncateAt, limit: int) -> TokenSeq:
+def truncate_section(
+    sec: TokenSeq, direction: TruncateAt, limit: int, add_bos: bool
+) -> TokenSeq:
     if len(sec) <= limit:
         return sec
 
     if direction == TruncateAt.Left:
         sec = sec[-limit:]
-        if sec:
+        if add_bos and sec:
             sec[0] = BOS_id
     else:
         assert direction == TruncateAt.Right
         sec = sec[:limit]
-        if sec:
+        if add_bos and sec:
             sec[-1] = EOS_id
     return sec
 
@@ -521,6 +523,7 @@ def truncate_section(sec: TokenSeq, direction: TruncateAt, limit: int) -> TokenS
 def truncate_sections(
     total_limit: int,
     *sections: tuple[TokenSeq, TruncateAt],
+    add_bos: bool,
 ) -> tuple[TokenSeq, ...]:
     """Truncate a list of token sequences to fit within a total length limit.
     Earlier sections have priority over later sections.
@@ -544,7 +547,7 @@ def truncate_sections(
         remaining -= inc
 
     return tuple(
-        truncate_section(tks, truncate_dir, section_lens[i])
+        truncate_section(tks, truncate_dir, section_lens[i], add_bos)
         for i, (tks, truncate_dir) in enumerate(sections)
     )
 
@@ -557,10 +560,11 @@ class FileBasedTokenizedEdit(TokenizedEdit):
     output_tks: TokenSeq
     path: ProjectPath
     change_type: Change[None]
+    add_truncate_bos: bool
 
     @property
     def input_tks(self) -> TokenSeq:
-        return self.left_tks + self.main_tks + self.right_tks
+        return join_list([self.left_tks, self.main_tks, self.right_tks], sep=Newline_id)
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
         return {
@@ -575,7 +579,10 @@ MainPrompt = TokenSeq()
 TEdit = TypeVar("TEdit", bound=TokenizedEdit)
 
 
-class EditEncoder(Generic[TEdit]):
+class EditEncoder(Generic[TEdit], ABC):
+    # If True, will only add BOS and EOS tokens to the truncated sections.
+    add_truncate_bos: bool = True
+
     @abstractmethod
     def encode_pedit(
         self,
@@ -584,10 +591,25 @@ class EditEncoder(Generic[TEdit]):
     ) -> Iterable[TEdit]:
         pass
 
+    def maybe_wrap_bos(self, tks: TokenSeq) -> TokenSeq:
+        "Wrap the tokens with BOS and EOS tokens if `Add_Truncation_BOS` is False."
+        if self.add_truncate_bos:
+            return tks
+        else:
+            return [BOS_id] + tks + [EOS_id]
+
+    def maybe_wrap_bos_code(self, code: str) -> str:
+        "Wrap the tokens with BOS and EOS tokens if `Add_Truncation_BOS` is False."
+        if self.add_truncate_bos:
+            return code
+        else:
+            return f"<s>{code}</s>"
+
 
 @dataclass
 class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
     n_max_tks: int = 4000
+    add_truncate_bos: bool = True
 
     def encode_pedit(
         self,
@@ -605,9 +627,9 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
         if not modifications:
             return
         mod_before = medit.before
-        code_before = mod_before.code.split("\n")
+        code_before = self.maybe_wrap_bos_code(mod_before.code).split("\n")
         mod_after = medit.after
-        code_after = mod_after.code.split("\n")
+        code_after = self.maybe_wrap_bos_code(mod_after.code).split("\n")
         mod_name = mod_after.name
         ctx_lines = self.n_max_tks // 2
 
@@ -650,8 +672,8 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
                 (input, TruncateAt.Right),
                 (above_tks, TruncateAt.Left),
                 (below_tks, TruncateAt.Right),
+                add_bos=self.add_truncate_bos,
             )
-            main_tks.append(Newline_id)
             above_tks.extend(MainPrompt)
             output_tks = truncate_output_tks(main_tks, output)
             if not output_tks:
@@ -665,6 +687,7 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
                 right_tks=below_tks,
                 path=ProjectPath(mod_name, path),
                 change_type=c.map(lambda _: None),
+                add_truncate_bos=self.add_truncate_bos,
             )
             yield edit
 
@@ -681,7 +704,7 @@ class CstBasedTokenizedEdit(TokenizedEdit):
 
     @property
     def input_tks(self) -> TokenSeq:
-        return self.left_tks + self.main_tks + self.right_tks
+        return join_list([self.left_tks, self.main_tks, self.right_tks], sep=Newline_id)
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
         return {
@@ -708,6 +731,7 @@ class CstBasedTokenizedEdit(TokenizedEdit):
 class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
     n_max_tks: int = 4000
     collapse_unchanged: bool = True
+    add_truncate_bos: bool = True
 
     def encode_pedit(
         self,
@@ -748,7 +772,7 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
                     continue
                 main_tks, output_tks = change_to_input_output(body_change)
                 output_tks = truncate_section(
-                    output_tks, TruncateAt.Right, self.n_max_tks
+                    output_tks, TruncateAt.Right, self.n_max_tks, self.add_truncate_bos
                 )
                 if not output_tks:
                     print("Body change:\n", body_change)
@@ -757,18 +781,22 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
                 left_etks = [
                     ctx_encoder.encode_ctx_element(p) for p in sorted_elems[:i]
                 ]
-                header_tks = change_to_tokens(c.map(lambda x: x.header_body_code[0]))
-                main_tks = header_tks + [Newline_id] + main_tks
-                left_ctx = join_list(left_etks, sep=Newline_id)
                 right_etks = [
                     ctx_encoder.encode_ctx_element(p) for p in sorted_elems[i + 1 :]
                 ]
+                header_tks = change_to_tokens(c.map(lambda x: x.header_body_code[0]))
+                main_tks = header_tks + [Newline_id] + main_tks
+                left_ctx = join_list(left_etks, sep=Newline_id)
                 right_ctx = join_list(right_etks, sep=Newline_id)
+                if not self.add_truncate_bos:
+                    left_ctx = [BOS_id] + left_ctx
+                    right_ctx.append(EOS_id)
                 main_tks, left_tks, right_tks = truncate_sections(
                     self.n_max_tks - len(MainPrompt) - 1,
                     (main_tks, TruncateAt.Right),
                     (left_ctx, TruncateAt.Left),
                     (right_ctx, TruncateAt.Right),
+                    add_bos=self.add_truncate_bos,
                 )
                 output_tks = truncate_output_tks(main_tks, output_tks)
                 if not output_tks:
@@ -790,7 +818,6 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
                 ):
                     selected.add(e)
 
-                main_tks.append(Newline_id)
                 left_tks.extend(MainPrompt)
                 ex = CstBasedTokenizedEdit(
                     main_tks=main_tks,
@@ -822,7 +849,10 @@ class AnalysisBasedTokenizedEdit(TokenizedEdit):
 
     @property
     def input_tks(self) -> TokenSeq:
-        return self.extra_tks + self.left_tks + self.main_tks + self.right_tks
+        return join_list(
+            [self.extra_tks, self.left_tks, self.main_tks, self.right_tks],
+            sep=Newline_id,
+        )
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
         return {
@@ -838,9 +868,17 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
     extra_ctx_names: Sequence[str] = ("usees",)
     collapse_unchanged: bool = True
     record_type_usages: bool = False
+    add_truncate_bos: bool = True
 
     # currently not used
     CtxSepTokens = encode_basic("\n# Usees ends\n")
+
+    def encode_pedit(
+        self,
+        pedit: ProjectEdit,
+        include_additions: bool = False,
+    ):
+        raise NotImplementedError("Use `encode_pedits` instead.")
 
     def encode_pedits(
         self,
@@ -854,6 +892,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
         cst_encoder = CstBasedEditEncoder(
             n_max_tks=self.n_max_tks,
             collapse_unchanged=self.collapse_unchanged,
+            add_truncate_bos=self.add_truncate_bos,
         )
         for analysis in analyses:
             pedit = analysis.pedit
@@ -871,7 +910,9 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
                     if get_change_path(c) not in edit.elems
                 ]
                 if ctx_changes:
-                    extra_ctx_tks = ctx_encoder.encode_ctx_changes(ctx_changes)
+                    extra_ctx_tks = self.maybe_wrap_bos(
+                        ctx_encoder.encode_ctx_changes(ctx_changes)
+                    )
                 else:
                     extra_ctx_tks = TokenSeq()
 
@@ -881,6 +922,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
                     (extra_ctx_tks, TruncateAt.Left),
                     (edit.left_tks, TruncateAt.Left),
                     (edit.right_tks, TruncateAt.Right),
+                    add_bos=self.add_truncate_bos,
                 )
 
                 yield AnalysisBasedTokenizedEdit(

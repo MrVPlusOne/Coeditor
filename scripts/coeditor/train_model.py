@@ -37,6 +37,7 @@ def train_model(
     encoder: EditEncoder = AnalysisBasedEditEncoder(
         extra_ctx_names=("usees", "post-usees")
     ),
+    data_args=DataTransformArgs(shuffle_extra_ids=True),
     max_batch_tokens: int = 4100,
     recreate_data: bool = False,
     quicktest: bool = False,
@@ -45,7 +46,6 @@ def train_model(
     model_name = f"coeditor-{dataset_name}"
     model_name += model_variant
 
-    data_args = DataTransformArgs(shuffle_extra_ids=True)
     train_args = TrainingArgs(
         max_batch_cost=input_cost_model(max_batch_tokens, data_args.max_label_tks),
         quicktest=quicktest,
@@ -88,7 +88,7 @@ def train_model(
         for name, dataset in datasets.items():
             datasets[name] = TokenizedEditDataset.from_edits(dataset.all_edits()[:10])
 
-    model = CoeditorModel.from_code_t5(data_args)
+    model = CoeditorModel.from_code_t5(data_args, reuse_embed=True)
 
     if os.getenv("CUDA_VISIBLE_DEVICES") is None:
         warnings.warn(
@@ -136,9 +136,11 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     train_model(
         dataset_name="large",
-        model_variant="-analysis-post_usees",
+        model_variant="-analysis-post_usees-reuse",
         # encoder=CstBasedEditEncoder(),
-        encoder=AnalysisBasedEditEncoder(extra_ctx_names=("usees", "post-usees")),
+        encoder=AnalysisBasedEditEncoder(
+            extra_ctx_names=("usees", "post-usees"), add_truncate_bos=False
+        ),
         recreate_data=False,
         quicktest=False,
     )

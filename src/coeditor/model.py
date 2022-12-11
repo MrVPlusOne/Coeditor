@@ -6,8 +6,10 @@ import torch
 
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import (
+    Add_id,
     AnalysisBasedEditEncoder,
     AnalysisBasedTokenizedEdit,
+    Del_id,
     TEdit,
     TokenizedEdit,
     _Tokenizer,
@@ -17,6 +19,7 @@ from coeditor.encoding import (
     BOS_id,
     EOS_id,
     random_extra_id_map,
+    get_tk_id,
 )
 from coeditor.history import Modified
 from spot.data import output_ids_as_seqs
@@ -222,7 +225,7 @@ class CoeditorModel:
             def get_eval_dataloader(self, eval_dataset):
                 return eval_loader
 
-        eval_interval = max(1, len(train_lodader) // 4)
+        eval_interval = max(10, len(train_lodader) // 4)
         trainer_args = Seq2SeqTrainingArguments(
             output_dir=str(train_dir),
             overwrite_output_dir=True,
@@ -278,11 +281,17 @@ class CoeditorModel:
         return CoeditorModel(codet5, data_args=dargs)
 
     @staticmethod
-    def from_code_t5(data_args: "DataTransformArgs", size: str = "base"):
+    def from_code_t5(
+        data_args: "DataTransformArgs", size: str = "base", reuse_embed: bool = False
+    ):
         path = f"Salesforce/codet5-{size}"
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
-        codet5.resize_token_embeddings(len(_Tokenizer))
+        embed_layer = codet5.resize_token_embeddings(len(_Tokenizer))
+        if reuse_embed:
+            w_map = {Add_id: get_tk_id("+"), Del_id: get_tk_id("-")}
+            for k, v in w_map.items():
+                embed_layer.weight.data[k] = embed_layer.weight[v]
         return CoeditorModel(codet5, data_args=data_args)
 
 
