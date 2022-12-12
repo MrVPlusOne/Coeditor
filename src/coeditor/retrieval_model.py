@@ -79,7 +79,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         self,
         # encoder args
         input_ids: LongTensor | None = None,  # queries
-        references: LongTensor | None = None,
+        references: list[TokenSeq] | None = None,
         ref_masks: list[list[int]] | None = None,
         labels: LongTensor | None = None,
         # decoder args
@@ -232,7 +232,7 @@ class RetrivalEncoder:
     def forward(
         self,
         input_ids: LongTensor,
-        references: LongTensor | None = None,
+        references: list[TokenSeq] | None = None,
         ref_query_list: list[list[int]] | None = None,
         # not used arguments below:
         output_attentions=None,
@@ -247,25 +247,30 @@ class RetrivalEncoder:
         assume all references are accessible to all queries.
         """
         if references is None:
-            references = cast(LongTensor, LongTensor([[PAD_id]]).to(input_ids.device))
+            references = []
 
         assert_eq(input_ids.dim(), 2)
-        assert_eq(references.dim(), 2)
+        device = self.encoder.device
 
         n_queries = input_ids.size(0)
         query_attention_mask = cast(BoolTensor, input_ids.ne(PAD_id))
 
-        n_refs = references.size(0)
-        ref_attention_mask = cast(BoolTensor, references.ne(PAD_id))
+        n_refs = len(references)
 
         if ref_query_list is None:
             ref_query_list = [list(range(n_refs)) for _ in range(n_queries)]
 
-        ref_outputs = self.encode_references(
-            references,
-            attention_mask=ref_attention_mask,
-            output_hidden_states=self.query_attened_ref,
-        )
+        ref_outputs = [
+            cast(
+                BaseModelOutputWithPastAndCrossAttentions,
+                self.encoder.forward(
+                    torch.LongTensor([ref]).to(device),
+                    output_hidden_states=True,
+                    return_dict=True,
+                ),
+            )
+            for ref in references
+        ]
 
         if self.query_attened_ref:
             last_hidden_state, hidden_state_mask = self.encode_query_complex(
@@ -273,7 +278,6 @@ class RetrivalEncoder:
                 query_attention_mask=query_attention_mask,
                 ref_outputs=ref_outputs,
                 ref_query_list=ref_query_list,
-                ref_attention_mask=ref_attention_mask,
             )
         else:
             last_hidden_state, hidden_state_mask = self.encode_query_simple(
@@ -281,7 +285,6 @@ class RetrivalEncoder:
                 query_attention_mask=query_attention_mask,
                 ref_outputs=ref_outputs,
                 ref_query_list=ref_query_list,
-                ref_attention_mask=ref_attention_mask,
             )
 
         return RetrivalEncoderOutputs(
@@ -308,15 +311,12 @@ class RetrivalEncoder:
         self,
         query_ids: LongTensor,
         query_attention_mask: Tensor,
-        ref_outputs: BaseModelOutputWithPastAndCrossAttentions,
+        ref_outputs: Sequence[BaseModelOutputWithPastAndCrossAttentions],
         ref_query_list: list[list[int]],
-        ref_attention_mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         n_queries = len(ref_query_list)
-        ref_states = ref_outputs.last_hidden_state
-        n_refs, ref_len, model_d = ref_states.shape
 
-        ref_state_list = [ref_states[i, ref_attention_mask[i]] for i in range(n_refs)]
+        ref_state_list = [cast(Tensor, ro.last_hidden_state)[0] for ro in ref_outputs]
 
         query_outputs = self.encode_references(
             query_ids, attention_mask=query_attention_mask
@@ -334,40 +334,43 @@ class RetrivalEncoder:
             assert row_tensor.ndim == 2  # (sum(ref_lens) + query_len, model_dim)
             qref_rows.append(row_tensor)
         qref_states, qref_masks = stack_pad_tensors(qref_rows)
+        assert_eq(qref_states.ndim == 3)
         assert_eq(qref_states.size(0), n_queries)
-        if (qref_len := qref_states.size(1)) > (
-            pad_len := ref_len * n_refs + query_ids.size(1)
-        ):
-            raise AssertionError(f"{qref_len = }, {pad_len = }")
 
-        assert_eq(qref_states.size(2), model_d)
         return qref_states, qref_masks
 
     def encode_query_complex(
         self,
         query_ids: LongTensor,
         query_attention_mask: BoolTensor,
-        ref_outputs: BaseModelOutputWithPastAndCrossAttentions,
+        ref_outputs: Sequence[BaseModelOutputWithPastAndCrossAttentions],
         ref_query_list: list[list[int]],
-        ref_attention_mask: BoolTensor,
     ) -> tuple[Tensor, Tensor]:
         assert (
             query_ids[:, 0].ne(PAD_id).all()
         ), "queries must be padded only at the end."
         n_queries = len(ref_query_list)
+        device = self.encoder.device
+        model_d = self.encoder.config.d_model
 
         qref_hidden_states = list[Tensor]()
         qref_attention_masks = list[BoolTensor]()
-        for ref_states in not_none(ref_outputs.hidden_states):
-            n_refs, ref_len, model_d = ref_states.shape
+        n_stacks = len(self.encoder.block) + 1
+        if ref_outputs:
+            assert_eq(n_stacks, len(not_none(ref_outputs[0].hidden_states)))
+        for s in range(n_stacks):
             ref_state_list = [
-                ref_states[i, ref_attention_mask[i]] for i in range(n_refs)
+                cast(Tuple[Tensor, ...], ref_states.hidden_states)[s][0]
+                for ref_states in ref_outputs
             ]
 
             qref_rows = []
             for q in range(n_queries):
                 qrefs = [ref_state_list[r] for r in ref_query_list[q]]
-                qref_rows.append(torch.cat(qrefs, dim=0))  # (sum(ref_lens), model_dim)
+                if not qrefs:
+                    qref_rows.append(torch.empty(0, model_d).to(device))
+                else:
+                    qref_rows.append(torch.cat(qrefs, dim=0))
             # qrefs are padded at the end
             qref_states, qref_masks = stack_pad_tensors(
                 qref_rows
@@ -480,9 +483,11 @@ def encode_query_stack(
     ref_hidden_states: tuple[Tensor, ...],  # tuples of (n_queries, ref_len, model_dim)
     input_attention_mask: BoolTensor | None = None,  # (n_queries, query_len)
     ref_attention_mask: BoolTensor | None = None,  # (n_queries, ref_len)
+    RefDistance: int = 0,  # the added distance between the query and references
 ) -> BaseModelOutputWithPastAndCrossAttentions:
     """Run a T5Stack to encode the query. Instead of using self-attention, this uses
     a hybrid attention where the query is allowed to attend to both itself and the references.
+    The relative distances between the query and the references are treated as infinity.
     """
     assert not stack.is_decoder
     device = input_ids.device
@@ -519,7 +524,10 @@ def encode_query_stack(
     n_queries = input_ids.size(0)
     ref_lens = ref_attention_mask.sum(dim=1)[:, None]  # (n_queries, 1)
     # relative pos needs to be of shape (n_quries, query_len, ref_len + query_len)
-    ref_pos = torch.arange(ref_len, device=device, dtype=torch.long)[
+    # ref_pos = torch.arange(ref_len, device=device, dtype=torch.long)[
+    #     None, :
+    # ]  # (1, ref_len)
+    ref_pos = (torch.arange(ref_len, device=device, dtype=torch.long) - RefDistance)[
         None, :
     ]  # (1, ref_len)
     ref_pos = ref_pos + torch.zeros(
