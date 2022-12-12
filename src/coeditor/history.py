@@ -246,9 +246,15 @@ class ProjectEdit:
         for medit in self.changes.values():
             yield from medit.all_changes.values()
 
-    def modified_functions(self) -> Iterable[Modified[PythonFunction]]:
+    def modified_functions(
+        self,
+        ast_must_change=True,
+        body_must_change=True,
+    ) -> Iterable[Modified[PythonFunction]]:
         for medit in self.changes.values():
-            yield from medit.modified_functions().values()
+            yield from medit.modified_functions(
+                ast_must_change=ast_must_change, body_must_change=body_must_change
+            ).values()
 
     def __repr__(self):
         if self.commit_info is None:

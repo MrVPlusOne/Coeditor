@@ -304,6 +304,13 @@ class TokenizedEdit(ABC):
     def meta_data_lines(self) -> list[str]:
         return [f"path: {str(self.path)}"]
 
+    def stats(self) -> Mapping[str, int | float]:
+        return {
+            "input_tks": len(self.input_tks),
+            "output_tks": len(self.output_tks),
+            "main_tks": len(self.main_tks),
+        }
+
     def show(self) -> str:
         return self.show_prediction(None)
 
@@ -579,7 +586,7 @@ MainPrompt = TokenSeq()
 TEdit = TypeVar("TEdit", bound=TokenizedEdit)
 
 
-class EditEncoder(Generic[TEdit], ABC):
+class EditEncoder(Generic[T1], ABC):
     # If True, will only add BOS and EOS tokens to the truncated sections.
     add_truncate_bos: bool = True
 
@@ -588,7 +595,7 @@ class EditEncoder(Generic[TEdit], ABC):
         self,
         pedit: ProjectEdit,
         include_additions: bool = False,
-    ) -> Iterable[TEdit]:
+    ) -> Iterable[T1]:
         pass
 
     def maybe_wrap_bos(self, tks: TokenSeq) -> TokenSeq:

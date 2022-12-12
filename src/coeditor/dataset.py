@@ -43,32 +43,33 @@ class TokenizedEditDataset(Generic[TEdit]):
             {repo: [f(e) for e in edits] for repo, edits in repos}
         )
 
-    def per_repo_stats(self) -> pd.DataFrame:
-        rows = []
-        for repo, edits in self.project2edits.items():
-            avg_input_size = float(np.mean([len(e.input_tks) for e in edits]))
-            avg_output_size = float(np.mean([len(e.output_tks) for e in edits]))
-            rows.append(
-                {
-                    "repo": repo.name,
-                    "n_edits": len(edits),
-                    "avg_input_size": avg_input_size,
-                    "avg_target_size": avg_output_size,
-                }
-            )
-        return pd.DataFrame(rows)
+    # def per_repo_stats(self) -> pd.DataFrame:
+    #     rows = []
+    #     for repo, edits in self.project2edits.items():
+    #         avg_input_size = float(np.mean([len(e.input_tks) for e in edits]))
+    #         avg_output_size = float(np.mean([len(e.output_tks) for e in edits]))
+    #         stats = {"repo": repo.name, "n_edits": len(edits)}
+    #         [e.stats().items() for e in edits]
+    #         [e for e in edits]
+    #         rows.append(stats)
+    #     return pd.DataFrame(rows)
 
     def overall_stats(self) -> dict:
-        input_sizes = [len(e.input_tks) for e in self.all_edits()]
-        output_sizes = [len(e.output_tks) for e in self.all_edits()]
-        n_added = sum(isinstance(e.change_type, Added) for e in self.all_edits())
-        return {
+        all_edits = self.all_edits()
+        n_added = sum(isinstance(e.change_type, Added) for e in all_edits)
+        basic_stats = {
             "n_projects": len(self.project2edits),
-            "n_edits": len(input_sizes),
+            "n_edits": len(all_edits),
             "n_additions": n_added,
-            "input_size": scalar_stats(input_sizes),
-            "output_size": scalar_stats(output_sizes),
         }
+        extra_stats = dict[str, list]()
+        for e in all_edits:
+            for k, v in e.stats().items():
+                if k in extra_stats:
+                    extra_stats[k].append(v)
+                else:
+                    extra_stats[k] = [v]
+        return basic_stats | {k: scalar_stats(v) for k, v in extra_stats.items()}
 
     def all_edits(self) -> list[TEdit]:
         return join_list(self.project2edits.values())
@@ -83,9 +84,9 @@ class TokenizedEditDataset(Generic[TEdit]):
 def _process_commits(
     root: Path,
     commits: Sequence[CommitInfo],
-    encoder: EditEncoder[TEdit],
+    encoder: EditEncoder[T1],
     include_additions: bool,
-) -> list[TEdit]:
+) -> list[T1]:
     try:
         edits = list(edits_from_commit_history(root, commits))
     except UnicodeDecodeError as e:
