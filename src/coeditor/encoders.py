@@ -139,7 +139,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 input_tks=input_tks,
                 output_tks=output_tks,
                 path=path,
-                change_type=Added(None),
+                change_type=mf.map(lambda _: None),
                 tk_pedit=tk_pedit,
             )
         if query_data:

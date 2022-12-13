@@ -1,4 +1,11 @@
 import copy
+
+from coeditor.dataset import TokenizedEditDataset
+from coeditor.encoders import BasicTkQueryEdit
+from coeditor.history import Modified
+from coeditor.model import EvalArgs, TrainingArgs, compute_loss_metrics, wrap_bos
+from spot.utils import cprint, groupby, scalar_stats
+
 from .common import *
 from transformers.models.t5.modeling_t5 import (
     T5Config,
@@ -17,13 +24,47 @@ from transformers.models.t5.modeling_t5 import (
 import torch
 from torch import BoolTensor, FloatTensor, LongTensor, Tensor
 from torch import nn
-from coeditor.encoding import BOS_id, EOS_id, decode_tokens, encode_basic
+from coeditor.encoding import (
+    Add_id,
+    BOS_id,
+    Del_id,
+    EOS_id,
+    decode_tokens,
+    encode_basic,
+    get_tk_id,
+    random_extra_id_map,
+    _Tokenizer,
+)
 import transformers
+from transformers import (
+    Seq2SeqTrainingArguments,
+    Seq2SeqTrainer,
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
+    EvalPrediction,
+    BatchEncoding,
+)
+from transformers.trainer import EvalLoopOutput
+from datasets.arrow_dataset import Dataset
+
 
 PAD_id = 0
+CheckNaN: bool = False
+
+
+def check_nan(name: str, x: Tensor, inputs: dict):
+    if CheckNaN and torch.isnan(x).any():
+        print(f"NaN found in {name}")
+        print("Found value:", x)
+        for k, v in inputs.items():
+            print(k, "=", v)
+        raise Exception(f"NaN found in {name}")
 
 
 class RetrievalEditorModel(T5PreTrainedModel):
+    is_parallelizable = False
+    supports_gradient_checkpointing = False
+
     """
     A CodeT5 model that takes in multiple reference code snippets and a
     query code snippet with multiple masked spans and perdicts the maksed spans.
@@ -57,22 +98,156 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
         self.query_attened_ref = True
 
-        # Model parallel
-        # self.model_parallel = False
-        # self.device_map = None
+    def train_on_data(
+        self,
+        training_name: str,
+        train_data: TokenizedEditDataset,
+        eval_data: TokenizedEditDataset,
+        train_args: "TrainingArgs",
+        batch_args: "BatchArgs",
+    ) -> None:
+        train_dir = get_model_dir(trained=False) / training_name
+
+        train_edits = train_data.all_edits()
+        eval_edits = eval_data.all_edits()
+        assert len(train_edits) > 0, "No training edits provided."
+
+        train_lodader = edits_to_dataloader(
+            train_edits,
+            args=batch_args,
+            shuffle=True,
+        )
+        eval_batch_args = copy.deepcopy(batch_args)
+        eval_batch_args.max_queries *= 2
+        eval_batch_args.min_queires *= 2
+        eval_batch_args.max_ref_dropout = 0.0
+        eval_loader = edits_to_dataloader(
+            eval_edits,
+            args=eval_batch_args,
+            shuffle=False,
+        )
+
+        model = self
+
+        class DynamicTrainer(Seq2SeqTrainer):
+            def get_train_dataloader(self):
+                return train_lodader
+
+            def get_eval_dataloader(self, eval_dataset):
+                return eval_loader
+
+            def evaluation_loop(
+                self,
+                dataloader,
+                description: str,
+                prediction_loss_only: Optional[bool] = None,
+                ignore_keys: Optional[List[str]] = None,
+                metric_key_prefix: str = "eval",
+            ) -> EvalLoopOutput:
+                metrics = model.eval_loss_on_loader(dataloader)
+                n_samples = metrics["loss_per_ex"].weight
+                metrics = {
+                    f"{metric_key_prefix}_{k}": v.mean() for k, v in metrics.items()
+                }
+                return EvalLoopOutput(
+                    predictions=tuple(),
+                    label_ids=tuple(),
+                    metrics=metrics,
+                    num_samples=n_samples,
+                )
+
+        print("Number of training batches:", len(train_lodader))
+        eval_interval = max(10, len(train_lodader) // 4)
+        trainer_args = Seq2SeqTrainingArguments(
+            output_dir=str(train_dir),
+            overwrite_output_dir=True,
+            evaluation_strategy="steps",
+            save_strategy="steps",
+            eval_steps=eval_interval,
+            logging_steps=eval_interval,
+            save_steps=eval_interval,
+            save_total_limit=3,
+            # prediction_loss_only=True,
+            learning_rate=train_args.learning_rate,
+            weight_decay=train_args.weight_decay,
+            num_train_epochs=train_args.max_train_epochs,
+            metric_for_best_model="loss_per_tk",
+            fp16=True,
+            load_best_model_at_end=True,
+            push_to_hub=False,
+            report_to=["wandb"],
+        )
+
+        def compute_metrics(eval_pred: EvalPrediction):
+            metrics = dict()
+            print("eval_pred.label_ids:", eval_pred.label_ids)
+            print(f"{type(eval_pred.label_ids)}")
+            print("eval_pred.predictions:", eval_pred.predictions)
+            print(f"{type(eval_pred.predictions)}")
+            for pred, label in zip(eval_pred.predictions, eval_pred.label_ids):
+                print(f"{pred.shape=}, {label.shape=}")
+                for k, v in compute_loss_metrics(
+                    torch.tensor(pred, dtype=torch.float),
+                    torch.tensor(label, dtype=torch.long),
+                ).items():
+                    metrics[k] = metrics.get(k, WeightedSum(0, 0)) + v
+            return {k: v.average() for k, v in metrics.items()}
+
+        trainer = DynamicTrainer(
+            self,
+            trainer_args,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
+            compute_metrics=compute_metrics,
+        )
+
+        trainer.train()
+        save_dir = get_model_dir(trained=True) / training_name
+        self.save(save_dir)
+        print("Model saved to:", save_dir)
+
+    @torch.no_grad()
+    @torch.autocast("cuda")
+    def eval_loss_on_loader(self, dataloader):
+        core = self
+        core.eval()
+        metrics = dict[str, WeightedSum]()
+        for batch in tqdm(dataloader, desc="evaluate loss", unit="batch"):
+            batch["input_ids"] = batch["input_ids"].to(core.device)
+            batch["labels"] = batch["labels"].to(core.device)
+            outputs = core.forward(**batch)
+            assert isinstance(outputs, Seq2SeqLMOutput)
+            if CheckNaN:
+                if outputs.logits.isnan().any():
+                    print("loss:", not_none(outputs.loss).item())
+                    print("batch:", batch)
+                    raise ValueError("NaN in logits")
+            for k, v in compute_loss_metrics(outputs.logits, batch["labels"]).items():
+                v = v + metrics.get(k, WeightedSum(0.0, 0))
+                metrics[k] = v
+
+        return metrics
+
+    def save(self, save_dir: Path, *args, **kwargs):
+        super().save_pretrained(save_dir, *args, **kwargs)
+        extra_args = {
+            "query_attend_ref": self.query_attened_ref,
+        }
+        pickle_dump(save_dir / "extra_args.pkl", extra_args)
+
+    @staticmethod
+    def load(save_dir) -> "RetrievalEditorModel":
+        extra_args = pickle_load(save_dir / "extra_args.pkl")
+        model = RetrievalEditorModel.from_pretrained(save_dir)
+        assert isinstance(model, RetrievalEditorModel)
+        model.query_attened_ref = extra_args["query_attend_ref"]
+        return model
 
     def encode_token_seqs(
         self, references: list[TokenSeq] | list[str], pad_id=None
     ) -> LongTensor:
         references = [encode_basic(ref) for ref in references if isinstance(ref, str)]
-        max_len = max(len(ref) for ref in references)
-        if pad_id is None:
-            pad_id = PAD_id
-        rows = []
-        for ref in references:
-            row = ref + [pad_id] * (max_len - len(ref))
-            rows.append(row)
-        out = LongTensor(rows).to(self.device)
+        out = pad_token_seqs(references, pad_id=pad_id)
+        out = out.to(self.device)
         return cast(LongTensor, out)
 
     def forward(
@@ -80,7 +255,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         # encoder args
         input_ids: LongTensor | None = None,  # queries
         references: list[TokenSeq] | None = None,
-        ref_query_list: list[list[int]] | None = None,
+        query_ref_list: list[list[int]] | None = None,
         labels: LongTensor | None = None,
         # decoder args
         encoder_outputs: "RetrivalEncoderOutputs | None" = None,
@@ -107,10 +282,20 @@ class RetrievalEditorModel(T5PreTrainedModel):
         if encoder_outputs is None:
             assert input_ids is not None
             encoder = self.get_encoder()
-            encoder_outputs = encoder.forward(input_ids, references, ref_query_list)
+            try:
+                encoder_outputs = encoder.forward(input_ids, references, query_ref_list)
+            except torch.cuda.OutOfMemoryError:  # type: ignore
+                total_ref_len = sum(len(x) for x in references) if references else 0
+                n_references = len(references) if references else 0
+                print(f"{input_ids.shape = }")
+                if labels is not None:
+                    print(f"{labels.shape = }")
+                print(f"{n_references = }, {total_ref_len = }")
+                raise
 
         if labels is not None and decoder_input_ids is None:
             # get decoder inputs from shifting lm labels to the right
+            assert_eq(labels.dtype, torch.long)
             decoder_input_ids = cast(LongTensor, self._shift_right(labels))
 
         decoder_outputs = self.decoder.forward(
@@ -198,9 +383,20 @@ class RetrievalEditorModel(T5PreTrainedModel):
         )
 
     @staticmethod
-    def from_code_t5(size: Literal["small", "base", "large"]):
+    def from_code_t5(
+        size: Literal["small", "base", "large"],
+        query_attened_ref: bool = True,
+        reuse_embed: bool = False,
+    ) -> "RetrievalEditorModel":
         model = RetrievalEditorModel.from_pretrained(f"Salesforce/codet5-{size}")
         assert isinstance(model, RetrievalEditorModel)
+        embed_layer = model.resize_token_embeddings(len(_Tokenizer))
+        if reuse_embed:
+            w_map = {Add_id: get_tk_id("+"), Del_id: get_tk_id("-")}
+            for k, v in w_map.items():
+                embed_layer.weight.data[k] = embed_layer.weight[v]
+        model.query_attened_ref = query_attened_ref
+        model.config.vocab_size = len(_Tokenizer)
         return model
 
 
@@ -222,7 +418,7 @@ class RetrivalEncoder:
         self,
         input_ids: LongTensor,
         references: list[TokenSeq] | None = None,
-        ref_query_list: list[list[int]] | None = None,
+        query_ref_list: list[list[int]] | None = None,
         # not used arguments below:
         output_attentions=None,
         output_hidden_states=None,
@@ -239,6 +435,7 @@ class RetrivalEncoder:
             references = []
 
         assert_eq(input_ids.dim(), 2)
+        assert_eq(input_ids.dtype, torch.long)
         device = self.encoder.device
 
         n_queries = input_ids.size(0)
@@ -246,8 +443,8 @@ class RetrivalEncoder:
 
         n_refs = len(references)
 
-        if ref_query_list is None:
-            ref_query_list = [list(range(n_refs)) for _ in range(n_queries)]
+        if query_ref_list is None:
+            query_ref_list = [list(range(n_refs)) for _ in range(n_queries)]
 
         ref_outputs = [
             cast(
@@ -266,14 +463,14 @@ class RetrivalEncoder:
                 query_ids=input_ids,
                 query_attention_mask=query_attention_mask,
                 ref_outputs=ref_outputs,
-                ref_query_list=ref_query_list,
+                query_ref_list=query_ref_list,
             )
         else:
             last_hidden_state, hidden_state_mask = self.encode_query_simple(
                 query_ids=input_ids,
                 query_attention_mask=query_attention_mask,
                 ref_outputs=ref_outputs,
-                ref_query_list=ref_query_list,
+                query_ref_list=query_ref_list,
             )
 
         return RetrivalEncoderOutputs(
@@ -294,6 +491,11 @@ class RetrivalEncoder:
             return_dict=True,
         )
         assert isinstance(out, BaseModelOutputWithPastAndCrossAttentions)
+        check_nan(
+            "last_hidden_state",
+            out.last_hidden_state,
+            {"input_ids": input_ids, "attention_mask": attention_mask},
+        )
         return out
 
     def encode_query_simple(
@@ -301,9 +503,9 @@ class RetrivalEncoder:
         query_ids: LongTensor,
         query_attention_mask: Tensor,
         ref_outputs: Sequence[BaseModelOutputWithPastAndCrossAttentions],
-        ref_query_list: list[list[int]],
+        query_ref_list: list[list[int]],
     ) -> tuple[Tensor, Tensor]:
-        n_queries = len(ref_query_list)
+        n_queries = len(query_ref_list)
 
         ref_state_list = [cast(Tensor, ro.last_hidden_state)[0] for ro in ref_outputs]
 
@@ -317,7 +519,7 @@ class RetrivalEncoder:
 
         qref_rows = []
         for q in range(n_queries):
-            qrefs = [ref_state_list[r] for r in ref_query_list[q]]
+            qrefs = [ref_state_list[r] for r in query_ref_list[q]]
             qrefs.append(query_state_list[q])
             row_tensor = torch.cat(qrefs, dim=0)
             assert row_tensor.ndim == 2  # (sum(ref_lens) + query_len, model_dim)
@@ -333,12 +535,12 @@ class RetrivalEncoder:
         query_ids: LongTensor,
         query_attention_mask: BoolTensor,
         ref_outputs: Sequence[BaseModelOutputWithPastAndCrossAttentions],
-        ref_query_list: list[list[int]],
+        query_ref_list: list[list[int]],
     ) -> tuple[Tensor, Tensor]:
         assert (
             query_ids[:, 0].ne(PAD_id).all()
         ), "queries must be padded only at the end."
-        n_queries = len(ref_query_list)
+        n_queries = len(query_ref_list)
         device = self.encoder.device
         model_d = self.encoder.config.d_model
 
@@ -355,7 +557,7 @@ class RetrivalEncoder:
 
             qref_rows = []
             for q in range(n_queries):
-                qrefs = [ref_state_list[r] for r in ref_query_list[q]]
+                qrefs = [ref_state_list[r] for r in query_ref_list[q]]
                 if not qrefs:
                     qref_rows.append(torch.empty(0, model_d).to(device))
                 else:
@@ -371,7 +573,6 @@ class RetrivalEncoder:
             stack=self.encoder,
             input_ids=query_ids,
             ref_hidden_states=tuple(qref_hidden_states),
-            input_attention_mask=query_attention_mask,
             ref_attention_mask=qref_attention_masks[0],
         )
 
@@ -448,6 +649,15 @@ def encode_query_block(
     )
     hidden_states = hybrid_attention_outputs[0]
 
+    check_nan(
+        "hybrid_attention_outputs[0]",
+        hidden_states,
+        {
+            "query_hidden_states": query_hidden_states,
+            "ref_hidden_states": ref_hidden_states,
+        },
+    )
+
     # clamp inf values to enable fp16 training
     if hidden_states.dtype == torch.float16 and torch.isinf(hidden_states).any():
         clamp_value = torch.finfo(hidden_states.dtype).max - 1000
@@ -470,7 +680,6 @@ def encode_query_stack(
     stack: T5Stack,
     input_ids: LongTensor,  # (n_queries, query_len)
     ref_hidden_states: tuple[Tensor, ...],  # tuples of (n_queries, ref_len, model_dim)
-    input_attention_mask: BoolTensor | None = None,  # (n_queries, query_len)
     ref_attention_mask: BoolTensor | None = None,  # (n_queries, ref_len)
     RefDistance: int = 1000,  # the added distance between the query and references
 ) -> BaseModelOutputWithPastAndCrossAttentions:
@@ -487,10 +696,10 @@ def encode_query_stack(
     batch_size, query_len = input_shape
     _, ref_len, model_dim = ref_hidden_states[0].size()
 
-    if input_attention_mask is None:
-        input_attention_mask = cast(
-            BoolTensor, torch.ones(batch_size, query_len, dtype=torch.bool).to(device)
-        )
+    # Masking query will cause numerical issues. We don't need to mask it anyway.
+    input_attention_mask = cast(
+        BoolTensor, torch.ones(batch_size, query_len, dtype=torch.bool).to(device)
+    )
     if ref_attention_mask is None:
         ref_attention_mask = cast(
             BoolTensor, torch.ones(batch_size, ref_len, dtype=torch.bool).to(device)
@@ -530,7 +739,10 @@ def encode_query_stack(
         key_pos[:, None, :] - query_pos[:, :, None]
     )  # (n_queries, query_len, ref_len + query_len)
     position_bias = compute_bias(attention_layer, relative_pos)
+    check_nan("position_bias", position_bias, {})
+    check_nan("extended_attention_mask", extended_attention_mask, {})
     position_bias = extended_attention_mask + position_bias
+    check_nan("position_bias_after", position_bias, {})
 
     assert stack.embed_tokens is not None
     inputs_embeds = stack.embed_tokens(input_ids)
@@ -552,6 +764,11 @@ def encode_query_stack(
         # hidden-states, key-value-states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
         layer_outputs = layer_outputs[:1] + (None,) + layer_outputs[1:]
 
+        check_nan(
+            "hidden_states",
+            layer_outputs[0],
+            {"i": i, "input_hidden_states": hidden_states, "ref_states": ref_states},
+        )
         hidden_states, present_key_value_state = layer_outputs[:2]
         assert isinstance(hidden_states, Tensor)
 
@@ -586,3 +803,184 @@ def compute_bias(
         [0, 3, 1, 2]
     )  # shape (n_queries, n_heads, query_len, key_len)
     return values
+
+
+def retrieval_cost_model(ref_size: int, query_size: int, dec_size: int) -> float:
+    a = 1 / 100
+    return (
+        a
+        * (
+            query_size**2
+            + dec_size**2
+            + (ref_size + query_size) * (query_size + dec_size)
+        )
+        + ref_size
+        + query_size
+        + 2 * dec_size
+    )
+
+
+@dataclass
+class BatchArgs:
+    max_output_tks: int = 256
+    min_queires: int = 1
+    max_queries: int = 8
+    max_references: int = 50
+    max_ref_dropout: float = 0.3
+    shuffle_extra_ids: bool = True
+    use_only_modified: bool = True
+
+    def cost_limit(self) -> float:
+        return self.min_queires * retrieval_cost_model(
+            self.max_references * 512, 512, self.max_output_tks
+        )
+
+
+def edits_to_batches(
+    edit_groups: Sequence[Sequence[BasicTkQueryEdit]],
+    args: BatchArgs,
+) -> list[dict]:
+    def process_edit(e: BasicTkQueryEdit):
+        labels = e.output_tks
+
+        labels = wrap_bos(labels)
+
+        if len(labels) > args.max_output_tks:
+            labels = labels[: args.max_output_tks]
+
+        input_ids = e.input_tks
+
+        if args.shuffle_extra_ids:
+            id_map = random_extra_id_map()
+            input_ids = [id_map.get(tk, tk) for tk in input_ids]
+            labels = [id_map.get(tk, tk) for tk in labels]
+
+        return input_ids, labels
+
+    cost_limit = args.cost_limit()
+    warned_batch_size = False
+
+    batches = list[dict]()
+    bsizes = list[int]()
+    for edit_group in edit_groups:
+        pedit = edit_group[0].tk_pedit
+
+        processed = [process_edit(x) for x in edit_group]
+        input_tks_list = [x[0] for x in processed]
+        output_tks_list = [x[1] for x in processed]
+
+        queries_left = list(range(len(edit_group)))
+
+        while queries_left:
+            # down-sample references if needed
+            references = pedit.tk_references
+            n_ref = round(
+                len(references) * (1 - args.max_ref_dropout * random.random())
+            )
+            # TODO: use total ref size instead of ref num as the constraint
+            n_ref = min(n_ref, args.max_references)
+            if len(references) > n_ref:
+                references = random_subset(references, n_ref)
+            ref_paths = list(references)
+            ref_size_sum = sum(len(x) for x in references.values())
+
+            max_bsize = min(len(queries_left), args.max_queries)
+            bsize = 0
+            for bsize in range(1, max_bsize + 1):
+                queries = queries_left[:bsize]
+                query_size = max(len(input_tks_list[i]) for i in queries)
+                out_size = max(len(output_tks_list[i]) for i in queries)
+                cost = bsize * retrieval_cost_model(
+                    ref_size_sum,
+                    query_size,
+                    out_size,
+                )
+                if cost > cost_limit:
+                    bsize -= 1
+                    break
+                else:
+                    if bsize == args.max_queries:
+                        print(f"{ref_size_sum=}, {query_size=}, {out_size=}")
+                        print(f"{cost=}, {cost_limit=}")
+            if bsize == 0:
+                if not warned_batch_size:
+                    warned_batch_size = True
+                    warnings.warn(
+                        "Batch query limit is too small. Will use a query size of 1."
+                    )
+                bsize = 1
+
+            queries = queries_left[:bsize]
+            queries_left = queries_left[bsize:]
+            input_ids = [input_tks_list[qid] for qid in queries]
+            query_ref_list = [
+                [i for i, p in enumerate(ref_paths) if p != edit_group[qid].path]
+                for qid in queries
+            ]
+            labels = [output_tks_list[qid] for qid in queries]
+            batch = {
+                "input_ids": input_ids,
+                "references": [references[p] for p in ref_paths],
+                "query_ref_list": query_ref_list,
+                "labels": labels,
+            }
+            batches.append(batch)
+            bsizes.append(bsize)
+
+    batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
+    cprint("blue", f"Batch stats: {batch_stats}")
+
+    return batches
+
+
+@dataclass
+class _BatchSampler:
+    edit_groups: list[list[BasicTkQueryEdit]]
+    data_args: BatchArgs
+    shuffle: bool
+
+    def __len__(self) -> int:
+        max_q = self.data_args.max_queries
+        return sum(len(range(0, len(es), max_q)) for es in self.edit_groups)
+
+    def __iter__(self) -> Iterable[Mapping]:
+        if self.shuffle:
+            for es in self.edit_groups:
+                random.shuffle(es)
+        batches = edits_to_batches(self.edit_groups, self.data_args)
+        if self.shuffle:
+            random.shuffle(batches)
+
+        for b in batches:
+            input_ids = pad_token_seqs(b["input_ids"])
+            labels = pad_token_seqs(b["labels"], pad_id=-100)
+            yield {
+                "input_ids": input_ids,
+                "references": b["references"],
+                "query_ref_list": b["query_ref_list"],
+                "labels": labels,
+            }
+
+
+def edits_to_dataloader(
+    edits: Sequence[BasicTkQueryEdit],
+    args: BatchArgs,
+    shuffle: bool = False,
+):
+    # if args.use_only_modified:
+    #     edits = [e for e in edits if isinstance(e.change_type, Modified)]
+    assert edits
+    edit_groups = list(groupby(edits, lambda e: id(e.tk_pedit)).values())
+    assert edit_groups
+    return _BatchSampler(edit_groups, args, shuffle=shuffle)
+
+
+def pad_token_seqs(seqs: list[TokenSeq], pad_id=None) -> LongTensor:
+    max_len = max(len(ref) for ref in seqs)
+    if pad_id is None:
+        pad_id = PAD_id
+    rows = []
+    for row in seqs:
+        row = row + [pad_id] * (max_len - len(row))
+        rows.append(row)
+    return LongTensor(rows)

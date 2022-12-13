@@ -288,6 +288,7 @@ class CoeditorModel:
         codet5 = CodeT5Model.from_pretrained(path)
         assert isinstance(codet5, CodeT5Model)
         embed_layer = codet5.resize_token_embeddings(len(_Tokenizer))
+        codet5.config.vocab_size = len(_Tokenizer)
         if reuse_embed:
             w_map = {Add_id: get_tk_id("+"), Del_id: get_tk_id("-")}
             for k, v in w_map.items():
@@ -409,6 +410,27 @@ def find_calls(node: cst.CSTNode) -> list[cst.Call]:
     return all_calls
 
 
+def compute_loss_metrics(
+    logits: torch.Tensor, labels: torch.Tensor
+) -> Mapping[str, WeightedSum]:
+    logits = logits.permute(0, 2, 1)  # shape: (batch, vocab, seq_len)
+    logp = torch.nn.functional.cross_entropy(
+        logits,
+        labels,
+        reduction="none",
+        ignore_index=-100,
+    )  # shape: (batch, seq_len)
+    loss = logp.sum().item()
+    ex_prob = torch.exp(-logp.sum(dim=1)).sum().item()
+    bsize = logits.size(0)
+    label_tks = (labels != -100).sum().item()
+    return {
+        "loss_per_tk": WeightedSum(loss, label_tks),
+        "loss_per_ex": WeightedSum(loss, bsize),
+        "prob_per_ex": WeightedSum(ex_prob, bsize),
+    }
+
+
 @torch.no_grad()
 @torch.autocast("cuda")
 def eval_label_likelihood(
@@ -417,35 +439,18 @@ def eval_label_likelihood(
 ):
     core = model.codet5
     core.eval()
-    loss_per_ex = WeightedSum(0.0, 0)
-    loss_per_tk = WeightedSum(0.0, 0)
-    prob_per_ex = WeightedSum(0.0, 0)
+    metrics = dict[str, WeightedSum]()
     for batch in tqdm(eval_loader, desc="evaluate loss", unit="batch"):
         input_ids = batch["input_ids"].to(core.device)
         labels = batch["labels"].to(core.device)
         attention_mask = batch["attention_mask"].to(core.device)
         outputs = core.forward(input_ids, labels=labels, attention_mask=attention_mask)
         assert isinstance(outputs, Seq2SeqLMOutput)
-        logits = outputs.logits.permute(0, 2, 1)  # shape: (batch, vocab, seq_len)
-        logp = torch.nn.functional.cross_entropy(
-            logits,
-            labels,
-            reduction="none",
-            ignore_index=-100,
-        )  # shape: (batch, seq_len)
-        loss = logp.sum().item()
-        ex_prob = torch.exp(-logp.sum(dim=1)).sum().item()
-        bsize = input_ids.shape[0]
-        label_tks = (labels != -100).sum().item()
-        loss_per_ex += WeightedSum(loss, bsize)
-        loss_per_tk += WeightedSum(loss, label_tks)
-        prob_per_ex += WeightedSum(ex_prob, bsize)
+        for k, v in compute_loss_metrics(outputs.logits, labels).items():
+            v = v + metrics.get(k, WeightedSum(0.0, 0))
+            metrics[k] = v
 
-    return {
-        "loss_per_ex": loss_per_ex,
-        "loss_per_tk": loss_per_tk,
-        "prob_per_ex": prob_per_ex,
-    }
+    return metrics
 
 
 def code_tk_loss(logits: torch.FloatTensor, labels: torch.LongTensor):
