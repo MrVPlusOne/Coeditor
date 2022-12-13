@@ -4,6 +4,7 @@ from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import BasicTkQueryEdit
 from coeditor.history import Modified
 from coeditor.model import EvalArgs, TrainingArgs, compute_loss_metrics, wrap_bos
+from spot.static_analysis import ProjectPath
 from spot.utils import cprint, groupby, scalar_stats
 
 from .common import *
@@ -279,44 +280,47 @@ class RetrievalEditorModel(T5PreTrainedModel):
         if labels is not None:
             assert_eq(labels.dim(), 2)
 
-        if encoder_outputs is None:
-            assert input_ids is not None
-            encoder = self.get_encoder()
-            try:
+        try:
+            if encoder_outputs is None:
+                assert input_ids is not None
+                encoder = self.get_encoder()
                 encoder_outputs = encoder.forward(input_ids, references, query_ref_list)
-            except torch.cuda.OutOfMemoryError:  # type: ignore
-                total_ref_len = sum(len(x) for x in references) if references else 0
-                n_references = len(references) if references else 0
+
+            if labels is not None and decoder_input_ids is None:
+                # get decoder inputs from shifting lm labels to the right
+                assert_eq(labels.dtype, torch.long)
+                decoder_input_ids = cast(LongTensor, self._shift_right(labels))
+
+            decoder_outputs = self.decoder.forward(
+                input_ids=decoder_input_ids,
+                inputs_embeds=decoder_inputs_embeds,
+                attention_mask=decoder_attention_mask,
+                encoder_hidden_states=encoder_outputs.last_hidden_state,
+                encoder_attention_mask=encoder_outputs.hidden_state_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                return_dict=True,
+            )
+            assert isinstance(
+                decoder_outputs, BaseModelOutputWithPastAndCrossAttentions
+            )
+
+            sequence_output = decoder_outputs[0]
+            if self.config.tie_word_embeddings:
+                # Rescale output before projecting on vocab
+                # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+                sequence_output = sequence_output * (self.model_dim**-0.5)
+
+            lm_logits = self.lm_head(sequence_output)
+        except torch.cuda.OutOfMemoryError:  # type: ignore
+            total_ref_len = sum(len(x) for x in references) if references else 0
+            n_references = len(references) if references else 0
+            if input_ids is not None:
                 print(f"{input_ids.shape = }")
-                if labels is not None:
-                    print(f"{labels.shape = }")
-                print(f"{n_references = }, {total_ref_len = }")
-                raise
-
-        if labels is not None and decoder_input_ids is None:
-            # get decoder inputs from shifting lm labels to the right
-            assert_eq(labels.dtype, torch.long)
-            decoder_input_ids = cast(LongTensor, self._shift_right(labels))
-
-        decoder_outputs = self.decoder.forward(
-            input_ids=decoder_input_ids,
-            inputs_embeds=decoder_inputs_embeds,
-            attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_outputs.last_hidden_state,
-            encoder_attention_mask=encoder_outputs.hidden_state_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            return_dict=True,
-        )
-        assert isinstance(decoder_outputs, BaseModelOutputWithPastAndCrossAttentions)
-
-        sequence_output = decoder_outputs[0]
-        if self.config.tie_word_embeddings:
-            # Rescale output before projecting on vocab
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
-            sequence_output = sequence_output * (self.model_dim**-0.5)
-
-        lm_logits = self.lm_head(sequence_output)
+            if labels is not None:
+                print(f"{labels.shape = }")
+            print(f"{n_references = }, {total_ref_len = }")
+            raise
 
         loss = None
         if labels is not None:
@@ -806,15 +810,10 @@ def compute_bias(
 
 
 def retrieval_cost_model(ref_size: int, query_size: int, dec_size: int) -> float:
-    a = 1 / 100
+    a = 1 / 128
     return (
-        a
-        * (
-            query_size**2
-            + dec_size**2
-            + (ref_size + query_size) * (query_size + dec_size)
-        )
-        + ref_size
+        a * (ref_size + query_size) * (query_size + dec_size)
+        + 2 * ref_size
         + query_size
         + 2 * dec_size
     )
@@ -823,16 +822,17 @@ def retrieval_cost_model(ref_size: int, query_size: int, dec_size: int) -> float
 @dataclass
 class BatchArgs:
     max_output_tks: int = 256
+    max_query_tks: int = 512
     min_queires: int = 1
     max_queries: int = 8
-    max_references: int = 50
+    max_ref_tks: int = 40 * 500
     max_ref_dropout: float = 0.3
     shuffle_extra_ids: bool = True
     use_only_modified: bool = True
 
     def cost_limit(self) -> float:
         return self.min_queires * retrieval_cost_model(
-            self.max_references * 512, 512, self.max_output_tks
+            self.max_ref_tks, 512, self.max_output_tks
         )
 
 
@@ -877,13 +877,19 @@ def edits_to_batches(
             n_ref = round(
                 len(references) * (1 - args.max_ref_dropout * random.random())
             )
-            # TODO: use total ref size instead of ref num as the constraint
-            n_ref = min(n_ref, args.max_references)
-            if len(references) > n_ref:
-                references = random_subset(references, n_ref)
-            ref_paths = list(references)
-            ref_size_sum = sum(len(x) for x in references.values())
+            ref_left = list(references)
+            random.shuffle(ref_left)
+            ref_size_sum = 0
+            ref_selected = list[ProjectPath]()
+            while ref_left and len(ref_selected) < n_ref:
+                ref = ref_left.pop()
+                if ref_size_sum + len(references[ref]) <= args.max_ref_tks:
+                    ref_selected.append(ref)
+                    ref_size_sum += len(references[ref])
+                else:
+                    break
 
+            # find the maximal batch size
             max_bsize = min(len(queries_left), args.max_queries)
             bsize = 0
             for bsize in range(1, max_bsize + 1):
@@ -898,10 +904,6 @@ def edits_to_batches(
                 if cost > cost_limit:
                     bsize -= 1
                     break
-                else:
-                    if bsize == args.max_queries:
-                        print(f"{ref_size_sum=}, {query_size=}, {out_size=}")
-                        print(f"{cost=}, {cost_limit=}")
             if bsize == 0:
                 if not warned_batch_size:
                     warned_batch_size = True
@@ -914,13 +916,13 @@ def edits_to_batches(
             queries_left = queries_left[bsize:]
             input_ids = [input_tks_list[qid] for qid in queries]
             query_ref_list = [
-                [i for i, p in enumerate(ref_paths) if p != edit_group[qid].path]
+                [i for i, p in enumerate(ref_selected) if p != edit_group[qid].path]
                 for qid in queries
             ]
             labels = [output_tks_list[qid] for qid in queries]
             batch = {
                 "input_ids": input_ids,
-                "references": [references[p] for p in ref_paths],
+                "references": [references[p] for p in ref_selected],
                 "query_ref_list": query_ref_list,
                 "labels": labels,
             }

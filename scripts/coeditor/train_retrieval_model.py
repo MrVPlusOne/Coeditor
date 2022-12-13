@@ -113,5 +113,5 @@ if __name__ == "__main__":
         batch_args=BatchArgs(),
         # encoder=CstBasedEditEncoder(),
         recreate_data=False,
-        quicktest=True,
+        quicktest=False,
     )
