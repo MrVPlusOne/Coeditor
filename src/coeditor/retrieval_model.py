@@ -17,7 +17,7 @@ from transformers.models.t5.modeling_t5 import (
 import torch
 from torch import BoolTensor, FloatTensor, LongTensor, Tensor
 from torch import nn
-from coeditor.encoding import BOS_id, EOS_id, encode_basic
+from coeditor.encoding import BOS_id, EOS_id, decode_tokens, encode_basic
 import transformers
 
 PAD_id = 0
@@ -80,7 +80,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         # encoder args
         input_ids: LongTensor | None = None,  # queries
         references: list[TokenSeq] | None = None,
-        ref_masks: list[list[int]] | None = None,
+        ref_query_list: list[list[int]] | None = None,
         labels: LongTensor | None = None,
         # decoder args
         encoder_outputs: "RetrivalEncoderOutputs | None" = None,
@@ -107,7 +107,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         if encoder_outputs is None:
             assert input_ids is not None
             encoder = self.get_encoder()
-            encoder_outputs = encoder.forward(input_ids, references, ref_masks)
+            encoder_outputs = encoder.forward(input_ids, references, ref_query_list)
 
         if labels is not None and decoder_input_ids is None:
             # get decoder inputs from shifting lm labels to the right
@@ -153,30 +153,19 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def prepare_inputs_for_generation(
         self,
         input_ids,
-        references,
-        past=None,
-        attention_mask=None,
-        head_mask=None,
-        decoder_head_mask=None,
-        cross_attn_head_mask=None,
-        use_cache=None,
         encoder_outputs=None,
+        past=None,
+        use_cache=None,
         **kwargs,
     ):
 
         # cut decoder_input_ids if past is used
         if past is not None:
             input_ids = input_ids[:, -1:]
-
         return {
             "decoder_input_ids": input_ids,
-            "references": references,
             "past_key_values": past,
             "encoder_outputs": encoder_outputs,
-            # "attention_mask": attention_mask,
-            # "head_mask": head_mask,
-            # "decoder_head_mask": decoder_head_mask,
-            # "cross_attn_head_mask": cross_attn_head_mask,
             "use_cache": use_cache,
         }
 
@@ -483,7 +472,7 @@ def encode_query_stack(
     ref_hidden_states: tuple[Tensor, ...],  # tuples of (n_queries, ref_len, model_dim)
     input_attention_mask: BoolTensor | None = None,  # (n_queries, query_len)
     ref_attention_mask: BoolTensor | None = None,  # (n_queries, ref_len)
-    RefDistance: int = 0,  # the added distance between the query and references
+    RefDistance: int = 1000,  # the added distance between the query and references
 ) -> BaseModelOutputWithPastAndCrossAttentions:
     """Run a T5Stack to encode the query. Instead of using self-attention, this uses
     a hybrid attention where the query is allowed to attend to both itself and the references.
