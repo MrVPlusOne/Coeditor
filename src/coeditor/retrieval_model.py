@@ -119,6 +119,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         eval_batch_args = copy.deepcopy(batch_args)
         eval_batch_args.max_queries *= 2
         eval_batch_args.min_queires *= 2
+        eval_batch_args.shuffle_extra_ids = False
         eval_batch_args.max_ref_dropout = 0.0
         eval_loader = edits_to_dataloader(
             eval_edits,
@@ -190,6 +191,20 @@ class RetrievalEditorModel(T5PreTrainedModel):
         save_dir = get_model_dir(trained=True) / training_name
         self.save(save_dir)
         print("Model saved to:", save_dir)
+
+    def eval_loss_on_data(
+        self, data: TokenizedEditDataset, batch_args: "BatchArgs"
+    ) -> dict[str, WeightedSum]:
+        batch_args = copy.deepcopy(batch_args)
+        batch_args.max_ref_dropout = 0.0
+        batch_args.shuffle_extra_ids = False
+        eval_loader = edits_to_dataloader(
+            data.all_edits(),
+            args=batch_args,
+            shuffle=False,
+            desc="Eval Epoch",
+        )
+        return self.eval_loss_on_loader(eval_loader)
 
     @torch.no_grad()
     @torch.autocast("cuda")
@@ -875,7 +890,7 @@ def edits_to_batches(
 
         input_ids = e.input_tks
 
-        if args.shuffle_extra_ids:
+        if args.shuffle_extra_ids and random.random() < 0.5:
             id_map = random_extra_id_map()
             input_ids = [id_map.get(tk, tk) for tk in input_ids]
             labels = [id_map.get(tk, tk) for tk in labels]

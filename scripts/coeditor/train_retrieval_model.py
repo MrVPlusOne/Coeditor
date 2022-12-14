@@ -1,3 +1,4 @@
+import copy
 import os
 import warnings
 from train_model import check_save_dir, TokenizedEditDataset
@@ -73,10 +74,13 @@ def train_model(
             batch_args=batch_args,
         )
 
-    # with timed_action("Loss Evaluating"):
-    #     eval_result = model.eval_loss_on_data(datasets["test"], test_args)
-    #     eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
-    #     wandb.log(eval_dict)
+    with timed_action("Loss Evaluating"):
+        test_batch_args = copy.deepcopy(batch_args)
+        test_batch_args.min_queires *= 2
+        test_batch_args.max_queries *= 2
+        eval_result = model.eval_loss_on_data(datasets["test"], test_batch_args)
+        eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
+        wandb.log(eval_dict)
 
     # max_saved_samples = 200
 
