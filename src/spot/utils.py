@@ -788,6 +788,8 @@ def get_modified_args(instance, flatten: bool = False) -> dict[str, Any] | None:
             if hasattr(cls, attr)
         }
     delta = dict[str, Any]()
+    if (version := getattr(instance, "VERSION", None)) is not None:
+        delta["VERSION"] = version
     for attr in instance.__annotations__:
         v = getattr(instance, attr)
         if attr in default_values and default_values[attr] == v:

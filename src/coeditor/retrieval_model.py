@@ -114,9 +114,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         assert len(train_edits) > 0, "No training edits provided."
 
         train_lodader = edits_to_dataloader(
-            train_edits,
-            args=batch_args,
-            shuffle=True,
+            train_edits, args=batch_args, shuffle=True, desc="Training Epoch"
         )
         eval_batch_args = copy.deepcopy(batch_args)
         eval_batch_args.max_queries *= 2
@@ -126,6 +124,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             eval_edits,
             args=eval_batch_args,
             shuffle=False,
+            desc="Eval Epoch",
         )
 
         model = self
@@ -177,6 +176,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             load_best_model_at_end=True,
             push_to_hub=False,
             report_to=["wandb"],
+            disable_tqdm=True,
         )
 
         def compute_metrics(eval_pred: EvalPrediction):
@@ -825,7 +825,7 @@ class BatchArgs:
     max_query_tks: int = 512
     min_queires: int = 1
     max_queries: int = 8
-    max_ref_tks: int = 40 * 500
+    max_ref_tks: int = 50 * 256
     max_ref_dropout: float = 0.3
     shuffle_extra_ids: bool = True
     use_only_modified: bool = True
@@ -873,19 +873,23 @@ def edits_to_batches(
 
         while queries_left:
             # down-sample references if needed
-            references = pedit.tk_references
+            references = [
+                (path, seg)
+                for path, segs in pedit.tk_references.items()
+                for seg in segs
+            ]
             n_ref = round(
                 len(references) * (1 - args.max_ref_dropout * random.random())
             )
             ref_left = list(references)
             random.shuffle(ref_left)
             ref_size_sum = 0
-            ref_selected = list[ProjectPath]()
+            ref_selected = list[tuple[ProjectPath, TokenSeq]]()
             while ref_left and len(ref_selected) < n_ref:
                 ref = ref_left.pop()
-                if ref_size_sum + len(references[ref]) <= args.max_ref_tks:
+                if ref_size_sum + len(ref[1]) <= args.max_ref_tks:
                     ref_selected.append(ref)
-                    ref_size_sum += len(references[ref])
+                    ref_size_sum += len(ref[1])
                 else:
                     break
 
@@ -916,13 +920,17 @@ def edits_to_batches(
             queries_left = queries_left[bsize:]
             input_ids = [input_tks_list[qid] for qid in queries]
             query_ref_list = [
-                [i for i, p in enumerate(ref_selected) if p != edit_group[qid].path]
+                [
+                    i
+                    for i, (p, _) in enumerate(ref_selected)
+                    if p != edit_group[qid].path
+                ]
                 for qid in queries
             ]
             labels = [output_tks_list[qid] for qid in queries]
             batch = {
                 "input_ids": input_ids,
-                "references": [references[p] for p in ref_selected],
+                "references": [tks for (_, tks) in ref_selected],
                 "query_ref_list": query_ref_list,
                 "labels": labels,
             }
@@ -940,6 +948,8 @@ class _BatchSampler:
     edit_groups: list[list[BasicTkQueryEdit]]
     data_args: BatchArgs
     shuffle: bool
+    desc: str
+    tqdm_args: dict | None = None
 
     def __len__(self) -> int:
         max_q = self.data_args.max_queries
@@ -953,7 +963,8 @@ class _BatchSampler:
         if self.shuffle:
             random.shuffle(batches)
 
-        for b in batches:
+        tqdm_args = self.tqdm_args or {"smoothing": 0.0}
+        for b in tqdm(batches, desc=self.desc, **tqdm_args):
             input_ids = pad_token_seqs(b["input_ids"])
             labels = pad_token_seqs(b["labels"], pad_id=-100)
             yield {
@@ -967,6 +978,7 @@ class _BatchSampler:
 def edits_to_dataloader(
     edits: Sequence[BasicTkQueryEdit],
     args: BatchArgs,
+    desc: str,
     shuffle: bool = False,
 ):
     # if args.use_only_modified:
@@ -974,7 +986,7 @@ def edits_to_dataloader(
     assert edits
     edit_groups = list(groupby(edits, lambda e: id(e.tk_pedit)).values())
     assert edit_groups
-    return _BatchSampler(edit_groups, args, shuffle=shuffle)
+    return _BatchSampler(edit_groups, args, shuffle=shuffle, desc=desc)
 
 
 def pad_token_seqs(seqs: list[TokenSeq], pad_id=None) -> LongTensor:

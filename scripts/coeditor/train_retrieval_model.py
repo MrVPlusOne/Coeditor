@@ -108,10 +108,10 @@ def train_model(
 if __name__ == "__main__":
     os.chdir(proj_root())
     train_model(
-        dataset_name="large",
+        dataset_name="small",
         model_variant="-query-basic",
         batch_args=BatchArgs(),
         # encoder=CstBasedEditEncoder(),
         recreate_data=False,
-        quicktest=False,
+        quicktest=True,
     )

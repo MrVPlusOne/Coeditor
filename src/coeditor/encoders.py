@@ -1,11 +1,15 @@
+import logging
 from coeditor.encoding import (
+    Add_id,
     BOS_id,
     CtxEncoder,
+    Del_id,
     EOS_id,
     EditEncoder,
     Newline_id,
     TokenizedEdit,
     TruncateAt,
+    break_into_chunks,
     change_to_input_output,
     change_to_tokens,
     collapse_code,
@@ -35,14 +39,16 @@ class TkProjectEdit(Generic[TQueryEdit]):
     - `tk_references`:
     """
 
-    tk_references: Mapping[ProjectPath, TokenSeq]
+    tk_references: Mapping[ProjectPath, Sequence[TokenSeq]]
     qedits: Mapping[ProjectPath, TQueryEdit]
 
     @property
     def stats(self) -> Mapping[str, int]:
         return {
             "references": len(self.tk_references),
-            "ref_size_sum": sum(len(tks) for tks in self.tk_references.values()),
+            "ref_size_sum": sum(
+                len(tks) for segs in self.tk_references.values() for tks in segs
+            ),
         }
 
 
@@ -63,13 +69,17 @@ class BasicTkQueryEdit(TokenizedEdit):
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
         return {
-            str(path): tks
-            for path, tks in self.tk_pedit.tk_references.items()
+            str(path) + (f" ({i})" if len(segs) > 1 else ""): seg
+            for path, segs in self.tk_pedit.tk_references.items()
             if path != self.path
+            for i, seg in enumerate(segs)
         }
 
     def meta_data_lines(self) -> list[str]:
-        return [f"n_references: {len(self.tk_pedit.tk_references)}"]
+        return [
+            f"n_references: {len(self.tk_pedit.tk_references)}",
+            f"n_ref_blocks: {sum(len(segs) for segs in self.tk_pedit.tk_references.values())}",
+        ]
 
     def stats(self) -> Mapping[str, int | float]:
         return {
@@ -81,7 +91,9 @@ class BasicTkQueryEdit(TokenizedEdit):
 @dataclass
 class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
     "Only use changed elements in a commit as references."
-    max_ref_tks: int = 512
+    VERSION=1
+    max_ref_tks: int = 256
+    ref_block_overlap: int = 32
     max_query_tks: int = 512
     max_output_tks: int = 256
     add_truncate_bos: bool = False
@@ -145,32 +157,51 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         if query_data:
             yield from query_data.values()
 
-    def encode_elem_change(self, c: Change[PythonElem]) -> TokenSeq:
-        code_change = c.map(lambda e: f"# {e.path}\n" + dedent(e.code))
+    def encode_elem_change(self, c: Change[PythonElem]) -> list[TokenSeq]:
+        code_change = c.map(lambda e: f"# {e.path.pop()}\n" + dedent(e.code))
         change_tks = change_to_tokens(code_change)
         all_tks = self.maybe_wrap_bos(change_tks)
-        all_tks = truncate_section(
-            all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
+        # all_tks = truncate_section(
+        #     all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
+        # )
+        chunks = break_into_chunks(
+            all_tks,
+            self.max_ref_tks,
+            overlap=self.ref_block_overlap,
+            add_bos=self.add_truncate_bos,
         )
-        return all_tks
+        return [c for c in chunks if has_change(c)]
 
     def encode_elem_move(
         self, old_path: ProjectPath, new_path: ProjectPath, code: str
-    ) -> TokenSeq:
+    ) -> list[TokenSeq]:
         code = dedent(code)
         if self.collapse_unchanged:
-            mod = collapse_code(parse_cst_module(code))
-            assert isinstance(mod, cst.Module)
-            code = dedent(mod.code).strip()
+            try:
+                mod = collapse_code(parse_cst_module(code))
+                assert isinstance(mod, cst.Module)
+                code = dedent(mod.code).strip()
+            except cst.ParserSyntaxError:
+                logging.warn("Unable to parse the following code:\n" + code)
         code_tks = encode_basic(code)
-        before_prefix = f"# {old_path}\n"
-        after_prefix = f"# {new_path}\n"
+        before_prefix = f"# old: {old_path}\n"
+        after_prefix = f"# new: {new_path}\n"
         prefix_tks = change_to_tokens(Modified(before_prefix, after_prefix))
         all_tks = self.maybe_wrap_bos(prefix_tks + code_tks + [Newline_id])
-        all_tks = truncate_section(
-            all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
+        # all_tks = truncate_section(
+        #     all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
+        # )
+        chunks = break_into_chunks(
+            all_tks,
+            self.max_ref_tks,
+            overlap=self.ref_block_overlap,
+            add_bos=self.add_truncate_bos,
         )
-        return all_tks
+        return [c for c in chunks if has_change(c)]
+
+
+def has_change(tks: TokenSeq) -> bool:
+    return Add_id in tks or Del_id in tks
 
 
 def find_moved(

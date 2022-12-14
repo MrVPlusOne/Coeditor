@@ -509,6 +509,20 @@ class TruncateAt(enum.Enum):
     Right = 1
 
 
+def break_into_chunks(tks: TokenSeq, chunk_size: int, overlap: int, add_bos: bool) -> list[list[int]]:
+    # break the token sequence into chunks of size chunk_size
+    chunks = list[TokenSeq]()
+    for i in range(0, len(tks), chunk_size - overlap):
+        chunk = tks[i : i + chunk_size]
+        if add_bos:
+            if i > 0:
+                chunk[0] = BOS_id
+            if i + chunk_size < len(tks):
+                chunk[-1] = EOS_id
+        chunks.append(chunk)
+    return chunks
+
+
 def truncate_section(
     sec: TokenSeq, direction: TruncateAt, limit: int, add_bos: bool
 ) -> TokenSeq:
