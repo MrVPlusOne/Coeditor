@@ -14,14 +14,12 @@ def train_model(
     model_variant="-sig-analysis-post_usees",
     encoder: BasicQueryEditEncoder = BasicQueryEditEncoder(),
     batch_args=BatchArgs(),
+    train_args=TrainingArgs(),
     recreate_data: bool = False,
-    quicktest: bool = False,
 ):
     # model_variant = "-file"
     model_name = f"coeditor-{dataset_name}"
     model_name += model_variant
-
-    train_args = TrainingArgs(quicktest=quicktest)
 
     # dec_args = DecodingArgs()
     if train_args.quicktest:
@@ -111,7 +109,7 @@ if __name__ == "__main__":
         dataset_name="large",
         model_variant="-query-basic",
         batch_args=BatchArgs(),
+        train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
         encoder=BasicQueryEditEncoder(),
         recreate_data=False,
-        quicktest=False,
     )

@@ -172,6 +172,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             weight_decay=train_args.weight_decay,
             num_train_epochs=train_args.max_train_epochs,
             metric_for_best_model="loss_per_tk",
+            greater_is_better=False,
             fp16=True,
             load_best_model_at_end=True,
             push_to_hub=False,
@@ -179,26 +180,10 @@ class RetrievalEditorModel(T5PreTrainedModel):
             disable_tqdm=True,
         )
 
-        def compute_metrics(eval_pred: EvalPrediction):
-            metrics = dict()
-            print("eval_pred.label_ids:", eval_pred.label_ids)
-            print(f"{type(eval_pred.label_ids)}")
-            print("eval_pred.predictions:", eval_pred.predictions)
-            print(f"{type(eval_pred.predictions)}")
-            for pred, label in zip(eval_pred.predictions, eval_pred.label_ids):
-                print(f"{pred.shape=}, {label.shape=}")
-                for k, v in compute_loss_metrics(
-                    torch.tensor(pred, dtype=torch.float),
-                    torch.tensor(label, dtype=torch.long),
-                ).items():
-                    metrics[k] = metrics.get(k, WeightedSum(0, 0)) + v
-            return {k: v.average() for k, v in metrics.items()}
-
         trainer = DynamicTrainer(
             self,
             trainer_args,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
-            compute_metrics=compute_metrics,
         )
 
         trainer.train()
@@ -210,6 +195,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     @torch.autocast("cuda")
     def eval_loss_on_loader(self, dataloader):
         core = self
+        previous = core.training
         core.eval()
         metrics = dict[str, WeightedSum]()
         for batch in tqdm(dataloader, desc="evaluate loss", unit="batch"):
@@ -225,6 +211,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             for k, v in compute_loss_metrics(outputs.logits, batch["labels"]).items():
                 v = v + metrics.get(k, WeightedSum(0.0, 0))
                 metrics[k] = v
+        core.train(mode=previous)
 
         return metrics
 
@@ -272,10 +259,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
     ) -> Seq2SeqLMOutput:
         """
         Shapes
-        - input_ids: (n_queries, seq_len,)
-        - references: (num_refs, ref_len)
-        - ref_masks: for each query, a list of reference indices. If none,
-        assume all references are accessible to all queries.
+        - input_ids: (n_queries, query_len)
+        - labels: (n_queries, label_len)
         """
         if labels is not None:
             assert_eq(labels.dim(), 2)
