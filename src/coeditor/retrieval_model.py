@@ -443,43 +443,79 @@ class RetrivalEncoder:
         device = self.encoder.device
 
         n_queries = input_ids.size(0)
-        query_attention_mask = cast(BoolTensor, input_ids.ne(PAD_id))
-
         n_refs = len(references)
 
         if query_ref_list is None:
             query_ref_list = [list(range(n_refs)) for _ in range(n_queries)]
 
-        ref_outputs = [
-            cast(
-                BaseModelOutputWithPastAndCrossAttentions,
+        def split_outputs(
+            lens: Sequence[int], out: BaseModelOutputWithPastAndCrossAttentions
+        ) -> Iterable[BaseModelOutputWithPastAndCrossAttentions]:
+            for i, l in enumerate(lens):
+                hidden_states = tuple(
+                    s[i : i + 1, :l] for s in not_none(out.hidden_states)
+                )
+                yield BaseModelOutputWithPastAndCrossAttentions(
+                    last_hidden_state=hidden_states[-1],  # type: ignore
+                    hidden_states=hidden_states,  # type: ignore
+                )
+
+        ref_outputs = batched_map(
+            references,
+            group_key=lambda ref: self._round_length_group(len(ref)),
+            f=lambda refs: split_outputs(
+                [len(x) for x in refs],
                 self.encoder.forward(
-                    torch.LongTensor([ref]).to(device),
+                    pad_token_seqs(refs).to(device),
                     output_hidden_states=True,
                     return_dict=True,
                 ),
-            )
-            for ref in references
-        ]
+            ),
+        )
 
-        if self.query_attened_ref:
-            last_hidden_state, hidden_state_mask = self.encode_query_complex(
-                query_ids=input_ids,
-                query_attention_mask=query_attention_mask,
-                ref_outputs=ref_outputs,
-                query_ref_list=query_ref_list,
-            )
-        else:
-            last_hidden_state, hidden_state_mask = self.encode_query_simple(
-                query_ids=input_ids,
-                query_attention_mask=query_attention_mask,
-                ref_outputs=ref_outputs,
-                query_ref_list=query_ref_list,
-            )
+        def encode_queries(query_ids: Sequence[int]) -> Iterable[Tensor]:
+            queries = [cast(LongTensor, input_ids[q, : q_lens[q]]) for q in query_ids]
+            assert query_ref_list is not None
+            query_refs = [query_ref_list[q] for q in query_ids]
+            q_tensor, q_mask = stack_pad_tensors(queries)
+            assert_eq(q_tensor.dim(), 2)
+
+            if self.query_attened_ref:
+                enc = self.encode_query_complex(
+                    query_ids=cast(LongTensor, q_tensor),
+                    query_attention_mask=q_mask,
+                    ref_outputs=ref_outputs,
+                    query_ref_list=query_refs,
+                )
+            else:
+                enc = self.encode_query_simple(
+                    query_ids=cast(LongTensor, q_tensor),
+                    query_attention_mask=q_mask,
+                    ref_outputs=ref_outputs,
+                    query_ref_list=query_refs,
+                )
+            last_hidden_state, hidden_state_mask = enc
+            for i, _ in enumerate(queries):
+                yield last_hidden_state[i, hidden_state_mask[i]]
+
+        q_lens = input_ids.ne(PAD_id).sum(dim=1).tolist()
+
+        last_hidden_states = batched_map(
+            range(n_queries),
+            group_key=lambda q: self._round_length_group(q_lens[q]),
+            f=encode_queries,
+        )
+        last_hidden_state, hidden_state_mask = stack_pad_tensors(last_hidden_states)
 
         return RetrivalEncoderOutputs(
             last_hidden_state=last_hidden_state, hidden_state_mask=hidden_state_mask
         )
+
+    @staticmethod
+    def _round_length_group(x: int) -> int:
+        if x <= 64:
+            return 64
+        return 2 ** math.ceil(math.log(x, 2))
 
     def encode_references(
         self,
@@ -545,6 +581,7 @@ class RetrivalEncoder:
             query_ids[:, 0].ne(PAD_id).all()
         ), "queries must be padded only at the end."
         n_queries = len(query_ref_list)
+        assert_eq(n_queries, query_ids.size(0))
         device = self.encoder.device
         model_d = self.encoder.config.d_model
 
@@ -701,17 +738,20 @@ def encode_query_stack(
     _, ref_len, model_dim = ref_hidden_states[0].size()
 
     # Masking query will cause numerical issues. We don't need to mask it anyway.
-    input_attention_mask = cast(
-        BoolTensor, torch.ones(batch_size, query_len, dtype=torch.bool).to(device)
-    )
+    input_attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+    query_mask = input_ids.ne(PAD_id)
     if ref_attention_mask is None:
         ref_attention_mask = cast(
             BoolTensor, torch.ones(batch_size, ref_len, dtype=torch.bool).to(device)
         )
+        assert_eq(input_ids.size(0), ref_attention_mask.size(0))
 
+    assert_eq(ref_attention_mask.ndim, 2)
+    assert_eq(query_mask.ndim, 2)
+    assert_eq(ref_attention_mask.size(0), query_mask.size(0))
     # combine input and ref attention masks
     attention_mask = input_attention_mask.unsqueeze(2) * torch.cat(
-        [ref_attention_mask, input_attention_mask], dim=1
+        [ref_attention_mask, query_mask], dim=1
     ).unsqueeze(1)
 
     assert_eq(tuple(attention_mask.shape), (batch_size, query_len, query_len + ref_len))
@@ -989,7 +1029,7 @@ def edits_to_dataloader(
     return _BatchSampler(edit_groups, args, shuffle=shuffle, desc=desc)
 
 
-def pad_token_seqs(seqs: list[TokenSeq], pad_id=None) -> LongTensor:
+def pad_token_seqs(seqs: Sequence[TokenSeq], pad_id=None) -> LongTensor:
     max_len = max(len(ref) for ref in seqs)
     if pad_id is None:
         pad_id = PAD_id

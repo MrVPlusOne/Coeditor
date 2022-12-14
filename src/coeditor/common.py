@@ -16,6 +16,7 @@ import enum
 from spot.utils import (
     DefaultWorkers,
     assert_eq,
+    groupby,
     show_expr,
     show_string_diff,
     timed_action,
@@ -294,3 +295,22 @@ def random_subset(all, n: int, seed: int = 42):
         return {k: all[k] for k in keys[:n]}
     else:
         raise ArgumentError(all, f"Unsupported arg type: {type(all)}")
+
+
+def batched_map(
+    xs: Sequence[T1],
+    group_key: Callable[[T1], Any],
+    f: Callable[[Sequence[T1]], Iterable[T2]],
+) -> list[T2]:
+    """
+    Group the input elements `xs` into groups using the `group_key` function,
+    run `f` on each group, then flatten the results into a single list while
+    following the original order of `xs`.
+    """
+    groups = groupby(range(len(xs)), lambda i: group_key(xs[i]))
+    outputs = dict[int, T2]()
+    for ids in groups.values():
+        batch = [xs[i] for i in ids]
+        for i, y in zip(ids, f(batch)):
+            outputs[i] = y
+    return [outputs[i] for i in range(len(xs))]
