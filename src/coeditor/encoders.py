@@ -17,7 +17,7 @@ from coeditor.encoding import (
     truncate_output_tks,
     truncate_section,
 )
-from spot.static_analysis import ProjectPath, PythonElem
+from spot.static_analysis import ProjectPath, PythonElem, PythonFunction, PythonVariable
 from .history import (
     Added,
     Change,
@@ -91,12 +91,13 @@ class BasicTkQueryEdit(TokenizedEdit):
 @dataclass
 class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
     "Only use changed elements in a commit as references."
-    VERSION=1
+    VERSION = 2
     max_ref_tks: int = 256
-    ref_block_overlap: int = 32
+    ref_block_overlap: int = 0
+    max_ref_blocks: int = 5
     max_query_tks: int = 512
     max_output_tks: int = 256
-    add_truncate_bos: bool = False
+    add_truncate_bos: bool = True
     collapse_unchanged: bool = True
 
     def encode_pedit(
@@ -104,16 +105,16 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         pedit: ProjectEdit,
         include_additions: bool = False,
     ) -> Iterable[BasicTkQueryEdit]:
-        ctx_enc = CtxEncoder(pedit, self.collapse_unchanged)
+        ctx_enc = CtxEncoder(pedit, self.collapse_unchanged, indent_in_class=False)
         moved = find_moved(pedit.all_elem_changes())
         moved_paths = {a for a, b in moved} | {b for a, b in moved}
         tk_refs = {
-            get_change_path(c): self.encode_elem_change(c)
+            get_change_path(c): self.encode_elem_change(c, ctx_enc)
             for c in pedit.all_elem_changes()
             if get_change_path(c) not in moved_paths
         }
-        for (d, a), code in moved.items():
-            tk_refs[d] = self.encode_elem_move(d, a, code)
+        for (d, a), change in moved.items():
+            tk_refs[d] = self.encode_elem_move(d, a, change)
 
         query_data = dict[ProjectPath, BasicTkQueryEdit]()
         tk_pedit = TkProjectEdit(tk_references=tk_refs, qedits=query_data)
@@ -157,47 +158,65 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         if query_data:
             yield from query_data.values()
 
-    def encode_elem_change(self, c: Change[PythonElem]) -> list[TokenSeq]:
-        code_change = c.map(lambda e: f"# {e.path.pop()}\n" + dedent(e.code))
-        change_tks = change_to_tokens(code_change)
-        all_tks = self.maybe_wrap_bos(change_tks)
+    def encode_elem_change(
+        self, c: Change[PythonElem], ctx_encoder: CtxEncoder
+    ) -> list[TokenSeq]:
+        path_tks = change_to_tokens(c.map(lambda e: f"# {e.path.pop()}"))
+        path_tks = truncate_section(
+            path_tks,
+            TruncateAt.Left,
+            self.max_ref_tks // 4,
+            add_bos=self.add_truncate_bos,
+        )
+        path_tks.append(Newline_id)
+        change_tks = ctx_encoder.encode_ctx_element(get_change_path(c))
+        change_tks = self.maybe_wrap_bos(change_tks)
         # all_tks = truncate_section(
         #     all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
         # )
         chunks = break_into_chunks(
-            all_tks,
-            self.max_ref_tks,
+            change_tks,
+            self.max_ref_tks - len(path_tks),
             overlap=self.ref_block_overlap,
             add_bos=self.add_truncate_bos,
         )
-        return [c for c in chunks if has_change(c)]
+        return [path_tks + c for c in chunks if has_change(c)][: self.max_ref_blocks]
 
     def encode_elem_move(
-        self, old_path: ProjectPath, new_path: ProjectPath, code: str
+        self,
+        old_path: ProjectPath,
+        new_path: ProjectPath,
+        change: Modified[PythonElem],
     ) -> list[TokenSeq]:
-        code = dedent(code)
-        if self.collapse_unchanged:
-            try:
-                mod = collapse_code(parse_cst_module(code))
-                assert isinstance(mod, cst.Module)
-                code = dedent(mod.code).strip()
-            except cst.ParserSyntaxError:
-                logging.warn("Unable to parse the following code:\n" + code)
-        code_tks = encode_basic(code)
+        def elem2code(e: PythonElem) -> str:
+            if self.collapse_unchanged:
+                code = show_expr(collapse_code(e.tree), quoted=False)
+            else:
+                code = e.code
+            return dedent(code)
+
+        code_change = change.map(elem2code)
+        code_tks = change_to_tokens(code_change)
         before_prefix = f"# old: {old_path}\n"
         after_prefix = f"# new: {new_path}\n"
         prefix_tks = change_to_tokens(Modified(before_prefix, after_prefix))
-        all_tks = self.maybe_wrap_bos(prefix_tks + code_tks + [Newline_id])
+        prefix_tks = truncate_section(
+            prefix_tks,
+            TruncateAt.Left,
+            self.max_ref_tks // 2,
+            add_bos=self.add_truncate_bos,
+        )
+        # all_tks = self.maybe_wrap_bos(prefix_tks + code_tks + [Newline_id])
         # all_tks = truncate_section(
         #     all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
         # )
         chunks = break_into_chunks(
-            all_tks,
-            self.max_ref_tks,
+            code_tks,
+            self.max_ref_tks - len(prefix_tks),
             overlap=self.ref_block_overlap,
             add_bos=self.add_truncate_bos,
         )
-        return [c for c in chunks if has_change(c)]
+        return [prefix_tks + c for c in chunks if has_change(c)]
 
 
 def has_change(tks: TokenSeq) -> bool:
@@ -207,17 +226,29 @@ def has_change(tks: TokenSeq) -> bool:
 def find_moved(
     changes: Iterable[Change[PythonElem]],
 ):
+    def get_body_code(e: PythonElem):
+        if isinstance(e, PythonVariable):
+            return dedent(e.code)
+        assert isinstance(e, PythonFunction)
+        return dedent(e.header_body_code[1])
+
+    path2change = {get_change_path(c): c for c in changes}
     added = dict[str, ProjectPath]()
     deleted = dict[str, ProjectPath]()
-    moved = dict[tuple[ProjectPath, ProjectPath], str]()
-    for c in changes:
-        path = get_change_path(c)
+    moved = dict[tuple[ProjectPath, ProjectPath], Modified[PythonElem]]()
+    for path, c in path2change.items():
         if isinstance(c, Added):
-            added[(code := c.after.code)] = path
-            if code in deleted:
-                moved[(deleted[code], path)] = code
+            code = get_body_code(c.after)
+            if (old_path := deleted.pop(code, None)) is not None:
+                e_before = cast(Deleted, path2change[old_path]).before
+                moved[(old_path, path)] = Modified(e_before, c.after)
+            else:
+                added[code] = path
         elif isinstance(c, Deleted):
-            deleted[(code := c.before.code)] = path
-            if code in added:
-                moved[(path, added[code])] = code
+            code = get_body_code(c.before)
+            if (new_path := added.pop(code, None)) is not None:
+                e_after = cast(Added, path2change[new_path]).after
+                moved[(path, new_path)] = Modified(c.before, e_after)
+            else:
+                deleted[code] = path
     return moved

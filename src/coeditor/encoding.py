@@ -509,7 +509,9 @@ class TruncateAt(enum.Enum):
     Right = 1
 
 
-def break_into_chunks(tks: TokenSeq, chunk_size: int, overlap: int, add_bos: bool) -> list[list[int]]:
+def break_into_chunks(
+    tks: TokenSeq, chunk_size: int, overlap: int, add_bos: bool
+) -> list[list[int]]:
     # break the token sequence into chunks of size chunk_size
     chunks = list[TokenSeq]()
     for i in range(0, len(tks), chunk_size - overlap):
@@ -963,6 +965,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
 class CtxEncoder:
     pedit: ProjectEdit
     collapse_unchanged: bool
+    indent_in_class: bool = True
     cache: dict[ProjectPath, TokenSeq] = field(default_factory=dict)
 
     def encode_ctx_element(self, ppath: ProjectPath) -> TokenSeq:
@@ -970,6 +973,8 @@ class CtxEncoder:
         if ppath in self.cache:
             return self.cache[ppath]
         pedit = self.pedit
+        can_indent = self.indent_in_class
+        maybe_dedent = (lambda x: x) if can_indent else dedent
         if (medit := pedit.changes.get(ppath.module)) is None:
             medit = ModuleEdit.from_no_change(pedit.after.modules[ppath.module])
         module_after = medit.after
@@ -984,17 +989,19 @@ class CtxEncoder:
                 and isinstance(mod.before, PythonFunction)
             ):
                 # as a special case, we also collapose the body of deleted functions
-                f_code = show_element(collapse_code(mod.before.tree), elem.in_class)
+                f_code = show_element(
+                    collapse_code(mod.before.tree), can_indent and elem.in_class
+                )
                 elem_tks = change_to_tokens(Deleted(f_code))
             else:
-                elem_tks = change_to_tokens(mod.map(lambda e: e.code))
+                elem_tks = change_to_tokens(mod.map(lambda e: maybe_dedent(e.code)))
         elif path in module_after.elems_dict:
             elem = module_after.elems_dict[path]
             if self.collapse_unchanged and isinstance(elem, PythonFunction):
                 tree = collapse_code(elem.tree)
-                code = show_element(tree, elem.in_class)
+                code = show_element(tree, can_indent and elem.in_class)
             else:
-                code = elem.code
+                code = maybe_dedent(elem.code)
             elem_tks = encode_basic(code)
         else:
             # FIXME: inner classes are pulled out in this implementation

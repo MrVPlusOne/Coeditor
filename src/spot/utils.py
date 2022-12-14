@@ -191,7 +191,7 @@ def pmap(
     desc: str,
     max_workers: int | None = None,
     chunksize: int | None = None,
-    tqdm_args: dict = {"smoothing": 0.0},
+    tqdm_args: dict = {},
 ) -> list[T1]:
     """
     Parallel map with progress displaying.
@@ -203,7 +203,7 @@ def pmap(
         max_workers = DefaultWorkers
     if max_workers <= 1:
         outs = list[T1]()
-        for i in tqdm(range(n), desc=desc, **tqdm_args):
+        for i in tqdm(range(n), desc=desc, smoothing=0.0, **tqdm_args):
             outs.append(f(*(a[i] for a in f_args)))
         return outs
 
