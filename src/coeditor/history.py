@@ -21,6 +21,7 @@ from textwrap import indent
 import sys
 import copy
 import ast
+from multiprocessing import current_process
 
 
 @dataclass
@@ -277,30 +278,22 @@ class ProjectEdit:
             )
 
     @staticmethod
-    def from_code_changes(
+    def from_module_changes(
         before: PythonProject,
-        code_changes: Mapping[ModuleName, str | None],
+        mod_changes: Mapping[ModuleName, PythonModule | None],
         symlinks: Mapping[ModuleName, ModuleName] = {},
-        src2module: Callable[[str], cst.Module | None] = parse_cst_module,
         commit_info: "CommitInfo | None" = None,
     ) -> "ProjectEdit":
         modules = copy.copy(before.modules)
         changes = dict[ModuleName, ModuleEdit]()
-        for mname, new_code in code_changes.items():
-            if new_code is None:
-                # got deleted
+        for mname, mod_after in mod_changes.items():
+            deleting = mod_after is None
+            if mod_after is None:
                 mod_after = empty_module(mname)
-            else:
-                try:
-                    if (m := src2module(new_code)) is None:
-                        continue
-                    mod_after = PythonModule.from_cst(m, mname)
-                except (cst.ParserSyntaxError, cst.CSTValidationError):
-                    continue
 
             mod_before = modules[mname] if mname in modules else empty_module(mname)
             mod_edit = ModuleEdit.from_modules(mod_before, mod_after)
-            if new_code is None:
+            if deleting:
                 modules.pop(mname, None)
             else:
                 modules[mname] = mod_after
@@ -313,6 +306,29 @@ class ProjectEdit:
             PythonProject(before.root_dir, modules, dict(symlinks), dict()),
             changes,
             commit_info,
+        )
+
+    @staticmethod
+    def from_code_changes(
+        before: PythonProject,
+        code_changes: Mapping[ModuleName, str | None],
+        symlinks: Mapping[ModuleName, ModuleName] = {},
+        src2module: Callable[[str], cst.Module | None] = parse_cst_module,
+        commit_info: "CommitInfo | None" = None,
+    ) -> "ProjectEdit":
+        mod_changes = dict[ModuleName, PythonModule | None]()
+        for mname, new_code in code_changes.items():
+            if new_code is None:
+                mod_changes[mname] = None
+            else:
+                try:
+                    if (m := src2module(new_code)) is None:
+                        continue
+                    mod_changes[mname] = PythonModule.from_cst(m, mname)
+                except (cst.ParserSyntaxError, cst.CSTValidationError):
+                    continue
+        return ProjectEdit.from_module_changes(
+            before, mod_changes, symlinks, commit_info
         )
 
 
@@ -334,6 +350,7 @@ def project_from_commit(
     file_filter: Callable[[Path], bool] = lambda p: True,
     ignore_dirs: set[str] = PythonProject.DefaultIgnoreDirs,
     src2module: Callable[[str], cst.Module | None] = parse_cst_module,
+    max_workers: int | None = None,
 ) -> PythonProject:
     """Get the project at a given commit.
 
@@ -362,6 +379,7 @@ def project_from_commit(
         and file_filter(f)
     ]
 
+    cst_modules = dict[str, cst.Module]()
     for src in all_srcs:
         # FIXME
         # if src.is_symlink():
@@ -377,9 +395,28 @@ def project_from_commit(
             raise
 
         mod_name = PythonProject.rel_path_to_module_name(src)
-        modules[mod_name] = PythonModule.from_cst(mod, mod_name)
+        cst_modules[mod_name] = mod
         src_map[mod_name] = src
 
+    if (
+        max_workers is None
+        and len(cst_modules) > 3
+        and current_process().name == "MainProcess"
+    ):
+        max_workers = None
+    else:
+        max_workers = 0
+
+    py_modules = pmap(
+        PythonModule.from_cst,
+        list(cst_modules.values()),
+        desc="Creating Python Modules",
+        max_workers=max_workers,
+        tqdm_args={"disable": max_workers == 0},
+    )
+    modules = dict(zip(cst_modules.keys(), (py_modules)))
+
+    # TODO: handle simlinks?
     # for src in all_srcs:
     #     if not src.is_symlink():
     #         continue

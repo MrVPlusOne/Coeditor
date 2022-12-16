@@ -215,7 +215,7 @@ def pmap(
 
     with (
         multiprocessing.Pool(max_workers) as pool,
-        tqdm(total=n, desc=desc, **tqdm_args) as pbar,
+        tqdm(total=n, desc=desc, smoothing=0.0, **tqdm_args) as pbar,
     ):
         results = dict[int, T1]()
         for i, r in pool.imap_unordered(tag_f, arg_tuples, chunksize=chunksize):

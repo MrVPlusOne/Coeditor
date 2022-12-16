@@ -109,6 +109,8 @@ def change_to_tokens(change: Change[str]) -> TokenSeq:
             diffs = ["+" + l for l in splitlines(after)]
         case Deleted(before):
             diffs = ["-" + l for l in splitlines(before)]
+        case _:
+            raise ValueError(f"Invalid change type: {change}.")
     return encode_diffs(diffs)
 
 
@@ -536,7 +538,7 @@ def truncate_section(
         if add_bos and sec:
             sec[0] = BOS_id
     else:
-        assert direction == TruncateAt.Right
+        assert_eq(direction, TruncateAt.Right)
         sec = sec[:limit]
         if add_bos and sec:
             sec[-1] = EOS_id

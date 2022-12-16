@@ -891,6 +891,7 @@ class BatchArgs:
 def edits_to_batches(
     edit_groups: Sequence[Sequence[BasicTkQueryEdit]],
     args: BatchArgs,
+    silent: bool = False,
 ) -> list[dict]:
     def process_edit(e: BasicTkQueryEdit):
         labels = e.output_tks
@@ -991,8 +992,9 @@ def edits_to_batches(
             bsizes.append(bsize)
 
     batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
-    cprint("blue", f"num batches: {len(batches)}")
-    cprint("blue", f"Batch stats: {batch_stats}")
+    if not silent:
+        cprint("blue", f"num batches: {len(batches)}")
+        cprint("blue", f"Batch stats: {batch_stats}")
 
     return batches
 
