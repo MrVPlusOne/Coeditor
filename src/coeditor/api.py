@@ -4,7 +4,13 @@ import torch
 from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
 from coeditor.encoders import BasicQueryEditEncoder
-from coeditor.encoding import decode_tokens, extract_edit_change
+from coeditor.encoding import (
+    Add_id,
+    Del_id,
+    decode_tokens,
+    extract_edit_change,
+    is_extra_id,
+)
 
 from coeditor.history import (
     Modified,
@@ -15,7 +21,7 @@ from coeditor.history import (
     parse_cst_module,
     show_change,
 )
-from coeditor.model import DecodingArgs
+from coeditor.model import CoeditorModel, DecodingArgs
 from coeditor.retrieval_model import BatchArgs, RetrievalEditorModel, edits_to_batches
 from spot.static_analysis import (
     ModuleName,
@@ -23,6 +29,7 @@ from spot.static_analysis import (
     PythonFunction,
     PythonModule,
     PythonProject,
+    remove_comments,
 )
 
 
@@ -51,7 +58,7 @@ class ChangeDetectionConfig:
         default_factory=lambda: PythonProject.DefaultIgnoreDirs
     )
     prev_commit: str = "HEAD"
-    src2module: Callable[[str], cst.Module] = parse_cst_module
+    module_preprocess: Callable[[cst.Module], cst.Module] = remove_comments
 
     def get_pedit(
         self, project_root: Path, prev_cache: TimedCache, now_cache: TimedCache
@@ -135,6 +142,9 @@ class ChangeDetectionConfig:
 
         return ProjectEdit.from_module_changes(prev_project, now_modules)
 
+    def src2module(self, src: str) -> cst.Module:
+        return self.module_preprocess(cst.parse_module(src))
+
 
 @dataclass
 class EditPredictionService:
@@ -157,6 +167,7 @@ class EditPredictionService:
 
         self.prev_cache = TimedCache()
         self.now_cache = TimedCache()
+        self.parse_cache = TimedCache()
         self.tlogger = TimeLogger()
 
     def suggest_edit(
@@ -174,20 +185,26 @@ class EditPredictionService:
 
         with timed("get target element"):
             mname = PythonProject.rel_path_to_module_name(file.relative_to(project))
-            if (mod := self.now_cache.get(mname, str(os.stat(file).st_mtime))) is None:
+            if (
+                mod := self.parse_cache.get(mname, str(os.stat(file).st_mtime))
+            ) is None:
                 mod = PythonModule.from_cst(cst.parse_module(file.read_text()), mname)
             elem = get_elem_by_line(mod, line)
-        if elem is None:
-            raise ValueError(f"No code element found at line {line} in file {file}.")
-        if not isinstance(elem, PythonFunction):
-            raise ValueError(f"Only functions can be edited by the model.")
+            if elem is None:
+                raise ValueError(
+                    f"No code element found at line {line} in file {file}."
+                )
+            if not isinstance(elem, PythonFunction):
+                raise ValueError(f"Only functions can be edited by the model.")
+        cursor_offset = line - mod.location_map[elem.tree.body].start.line
 
         with timed("construct project edit"):
             pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
-        old_elems = [
-            c for c in pedit.all_elem_changes() if get_change_path(c) == elem.path
-        ]
-        match old_elems:
+            if mname not in pedit.after.modules:
+                pedit.after.modules[mname] = PythonModule.from_cst(
+                    self.config.module_preprocess(mod.tree), mname
+                )
+        match [c for c in pedit.all_elem_changes() if get_change_path(c) == elem.path]:
             case [Modified(PythonFunction(), PythonFunction()) as mf]:
                 elem_change = cast(Modified[PythonFunction], mf)
             case _:
@@ -209,12 +226,18 @@ class EditPredictionService:
             }
             input_tks = batch["input_ids"][0]
             references = batch["references"]
-            print(f"{len(input_tks) = }")
-            print(f"{len(references) = }")
+            output_prefix, _ = split_label_by_post_edit_line(
+                batch["labels"][0], cursor_offset
+            )
             out_tks = self.model.generate(
                 self.model.encode_token_seqs([input_tks]),
                 references=references,
                 query_ref_list=batch["query_ref_list"],
+                prefix_allowed_tokens_fn=(
+                    CoeditorModel._prefix_constraint([output_prefix])
+                    if output_prefix
+                    else None
+                ),
                 **dec_args,
             )[0].tolist()
             out_tks = cast(TokenSeq, out_tks)
@@ -224,6 +247,9 @@ class EditPredictionService:
 
         if log_file is not None:
             with log_file.open("w") as f:
+                print(f"{len(input_tks) = }")
+                print(f"{len(references) = }")
+                print("User prefix:", decode_tokens(output_prefix), file=f)
                 assert (
                     not self.batch_args.shuffle_extra_ids
                 ), "Ids cannot be shuffled for this to work for now"
@@ -243,3 +269,23 @@ def get_elem_by_line(module: PythonModule, line: int) -> PythonElem | None:
 
 def show_location(loc: CodePosition):
     return f"{loc.line}:{loc.column}"
+
+
+def split_label_by_post_edit_line(
+    label_tks: TokenSeq, post_line: int
+) -> tuple[TokenSeq, TokenSeq]:
+    """Split the label into two parts: before and after the given
+    post-edit line."""
+    assert label_tks, "label should not be empty."
+    line_counter = -1
+    split_pos = 0 if post_line < 0 else len(label_tks)
+    for pos, tk in enumerate(label_tks):
+        if is_extra_id(tk):
+            line_counter += 1
+        elif tk == Add_id:
+            line_counter += 1
+        elif tk == Del_id:
+            line_counter += 1
+        if line_counter == post_line + 1:
+            split_pos = pos
+    return label_tks[:split_pos], label_tks[split_pos:]
