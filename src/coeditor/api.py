@@ -226,11 +226,8 @@ class EditPredictionService:
             with log_file.open("w") as f:
                 assert (
                     not self.batch_args.shuffle_extra_ids
-                ), "Ids must not be shuffled for this to work for now"
+                ), "Ids cannot be shuffled for this to work for now"
                 print(qedits[0].show_prediction(out_tks), file=f)
-                for i, ref in enumerate(references):
-                    print(f"References {i}:", file=f)
-                    print(decode_tokens(ref), file=f)
 
 
 def get_elem_by_line(module: PythonModule, line: int) -> PythonElem | None:
@@ -240,7 +237,6 @@ def get_elem_by_line(module: PythonModule, line: int) -> PythonElem | None:
     for e in module.all_elements():
         span = module.location_map[e.tree]
         if in_span(line, span):
-            print("Element span:", span)
             return e
     return None
 

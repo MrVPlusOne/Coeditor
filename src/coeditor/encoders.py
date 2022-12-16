@@ -26,6 +26,7 @@ from .history import (
     ProjectEdit,
     get_change_path,
     parse_cst_module,
+    to_modified_function,
 )
 from .common import *
 
@@ -115,6 +116,11 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         ctx_enc = CtxEncoder(pedit, self.collapse_unchanged, indent_in_class=False)
         moved = find_moved(pedit.all_elem_changes())
         moved_paths = {a for a, b in moved} | {b for a, b in moved}
+        after_to_mf = {
+            b: mf
+            for (a, b), change in moved.items()
+            if (mf := to_modified_function(change))
+        }
         tk_refs = {
             get_change_path(c): self.encode_elem_change(c, ctx_enc)
             for c in pedit.all_elem_changes()
@@ -131,6 +137,8 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 ast_must_change=True, body_must_change=True
             )
         for mf in queries:
+            if mf.after.path in moved_paths:
+                mf = after_to_mf[mf.after.path]
             body_change = mf.map(lambda x: x.header_body_code[1])
             if count_lines(body_change.before) > 99:
                 if for_training:
@@ -255,14 +263,14 @@ def find_moved(
     moved = dict[tuple[ProjectPath, ProjectPath], Modified[PythonElem]]()
     for path, c in path2change.items():
         if isinstance(c, Added):
-            code = get_body_code(c.after)
+            code = normalize_code_by_ast(get_body_code(c.after))
             if (old_path := deleted.pop(code, None)) is not None:
                 e_before = cast(Deleted, path2change[old_path]).before
                 moved[(old_path, path)] = Modified(e_before, c.after)
             else:
                 added[code] = path
         elif isinstance(c, Deleted):
-            code = get_body_code(c.before)
+            code = normalize_code_by_ast(get_body_code(c.before))
             if (new_path := added.pop(code, None)) is not None:
                 e_after = cast(Added, path2change[new_path]).after
                 moved[(path, new_path)] = Modified(c.before, e_after)

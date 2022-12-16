@@ -141,6 +141,17 @@ def parse_cst_module(code: str) -> cst.Module:
     return remove_comments(cst.parse_module(code))
 
 
+def to_modified_function(c: Change):
+    if (
+        isinstance(c, Modified)
+        and isinstance(c.before, PythonFunction)
+        and isinstance(c.after, PythonFunction)
+    ):
+        return cast(Modified[PythonFunction], c)
+    else:
+        return None
+
+
 @dataclass
 class ModuleEdit:
     before: PythonModule
