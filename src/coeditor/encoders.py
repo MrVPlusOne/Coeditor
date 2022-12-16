@@ -104,7 +104,14 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         self,
         pedit: ProjectEdit,
         include_additions: bool = False,
+        queries: Iterable[Modified[PythonFunction]] | None = None,
     ) -> Iterable[BasicTkQueryEdit]:
+        """
+        Args:
+            - query_changes: The changes to be encoded as queries. If None, all
+            modified functions in the pedit will be used as queries.
+
+        """
         ctx_enc = CtxEncoder(pedit, self.collapse_unchanged, indent_in_class=False)
         moved = find_moved(pedit.all_elem_changes())
         moved_paths = {a for a, b in moved} | {b for a, b in moved}
@@ -118,10 +125,20 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
 
         query_data = dict[ProjectPath, BasicTkQueryEdit]()
         tk_pedit = TkProjectEdit(tk_references=tk_refs, qedits=query_data)
-        for mf in pedit.modified_functions(ast_must_change=True, body_must_change=True):
+        for_training = queries is None
+        if queries is None:
+            queries = pedit.modified_functions(
+                ast_must_change=True, body_must_change=True
+            )
+        for mf in queries:
             body_change = mf.map(lambda x: x.header_body_code[1])
             if count_lines(body_change.before) > 99:
-                continue  # skip large functions
+                if for_training:
+                    continue  # skip large functions during training
+                else:
+                    warnings.warn(
+                        "Function has more than 99 lines, only the first 100 lines will be edited."
+                    )
             input_tks, output_tks = change_to_input_output(body_change)
             path = get_change_path(cast(Change, mf))
             path_tks = encode_basic(f"# path: {path}")
@@ -145,7 +162,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 self.max_output_tks,
                 add_bos=self.add_truncate_bos,
             )
-            if not output_tks:
+            if for_training and not output_tks:
                 # can happen if input too long
                 continue
             query_data[path] = BasicTkQueryEdit(

@@ -33,6 +33,10 @@ class Added(Generic[T1]):
     def to_modified(self, empty: T1) -> "Modified[T1]":
         return Modified(empty, self.after)
 
+    @staticmethod
+    def as_char():
+        return "A"
+
 
 @dataclass
 class Deleted(Generic[T1]):
@@ -43,6 +47,10 @@ class Deleted(Generic[T1]):
 
     def to_modified(self, empty: T1) -> "Modified[T1]":
         return Modified(self.before, empty)
+
+    @staticmethod
+    def as_char():
+        return "D"
 
 
 @dataclass
@@ -55,6 +63,10 @@ class Modified(Generic[T1]):
 
     def to_modified(self, empty: T1) -> "Modified[T1]":
         return self
+
+    @staticmethod
+    def as_char():
+        return "M"
 
 
 Change = Added[T1] | Deleted[T1] | Modified[T1]

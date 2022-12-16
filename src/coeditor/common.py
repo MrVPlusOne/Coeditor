@@ -1,6 +1,6 @@
 from argparse import ArgumentError
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 import random

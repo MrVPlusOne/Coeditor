@@ -249,9 +249,11 @@ class ModelWrapper:
 
 
 def input_cost_model(enc_size: int, dec_size: int) -> float:
-    a = 1 / 500
+    a = 1 / 128
     return (
-        a * (enc_size**2 + dec_size**2 + enc_size * dec_size) + enc_size + dec_size
+        a * (enc_size**2 + dec_size**2 + enc_size * dec_size)
+        + enc_size
+        + 2 * dec_size
     )
 
 

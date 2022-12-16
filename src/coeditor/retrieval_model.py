@@ -3,7 +3,13 @@ import copy
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import BasicTkQueryEdit
 from coeditor.history import Modified
-from coeditor.model import EvalArgs, TrainingArgs, compute_loss_metrics, wrap_bos
+from coeditor.model import (
+    DecodingArgs,
+    EvalArgs,
+    TrainingArgs,
+    compute_loss_metrics,
+    wrap_bos,
+)
 from spot.static_analysis import ProjectPath
 from spot.utils import cprint, groupby, scalar_stats
 
@@ -157,8 +163,9 @@ class RetrievalEditorModel(T5PreTrainedModel):
                     num_samples=n_samples,
                 )
 
-        print("Number of training batches:", len(train_lodader))
-        eval_interval = max(10, len(train_lodader) // 4)
+        epoch_steps = len(train_lodader)
+        print("Number of training batches (estimate):")
+        eval_interval = max(10, epoch_steps // 4)
         trainer_args = Seq2SeqTrainingArguments(
             output_dir=str(train_dir),
             overwrite_output_dir=True,
@@ -167,11 +174,11 @@ class RetrievalEditorModel(T5PreTrainedModel):
             eval_steps=eval_interval,
             logging_steps=eval_interval,
             save_steps=eval_interval,
+            num_train_epochs=train_args.max_train_epochs,
             save_total_limit=3,
             # prediction_loss_only=True,
             learning_rate=train_args.learning_rate,
             weight_decay=train_args.weight_decay,
-            num_train_epochs=train_args.max_train_epochs,
             metric_for_best_model="loss_per_tk",
             greater_is_better=False,
             fp16=True,
@@ -238,17 +245,22 @@ class RetrievalEditorModel(T5PreTrainedModel):
         pickle_dump(save_dir / "extra_args.pkl", extra_args)
 
     @staticmethod
-    def load(save_dir) -> "RetrievalEditorModel":
-        extra_args = pickle_load(save_dir / "extra_args.pkl")
+    def load(save_dir: Path) -> "RetrievalEditorModel":
         model = RetrievalEditorModel.from_pretrained(save_dir)
         assert isinstance(model, RetrievalEditorModel)
-        model.query_attened_ref = extra_args["query_attend_ref"]
+        if (save_dir / "extra_args.pkl").exists():
+            extra_args = pickle_load(save_dir / "extra_args.pkl")
+            model.query_attened_ref = extra_args["query_attend_ref"]
+        else:
+            warnings.warn("No extra args found, using default model setting.")
         return model
 
     def encode_token_seqs(
-        self, references: list[TokenSeq] | list[str], pad_id=None
+        self, references: Sequence[TokenSeq] | Sequence[str], pad_id=None
     ) -> LongTensor:
-        references = [encode_basic(ref) for ref in references if isinstance(ref, str)]
+        references = [
+            encode_basic(ref) if isinstance(ref, str) else ref for ref in references
+        ]
         out = pad_token_seqs(references, pad_id=pad_id)
         out = out.to(self.device)
         return cast(LongTensor, out)
@@ -257,8 +269,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
         self,
         # encoder args
         input_ids: LongTensor | None = None,  # queries
-        references: list[TokenSeq] | None = None,
-        query_ref_list: list[list[int]] | None = None,
+        references: Sequence[TokenSeq] | None = None,
+        query_ref_list: Sequence[Sequence[int]] | None = None,
         labels: LongTensor | None = None,
         # decoder args
         encoder_outputs: "RetrivalEncoderOutputs | None" = None,
@@ -421,8 +433,8 @@ class RetrivalEncoder:
     def forward(
         self,
         input_ids: LongTensor,
-        references: list[TokenSeq] | None = None,
-        query_ref_list: list[list[int]] | None = None,
+        references: Sequence[TokenSeq] | None = None,
+        query_ref_list: Sequence[Sequence[int]] | None = None,
         # not used arguments below:
         output_attentions=None,
         output_hidden_states=None,
@@ -543,7 +555,7 @@ class RetrivalEncoder:
         query_ids: LongTensor,
         query_attention_mask: Tensor,
         ref_outputs: Sequence[BaseModelOutputWithPastAndCrossAttentions],
-        query_ref_list: list[list[int]],
+        query_ref_list: Sequence[Sequence[int]],
     ) -> tuple[Tensor, Tensor]:
         n_queries = len(query_ref_list)
 
@@ -575,7 +587,7 @@ class RetrivalEncoder:
         query_ids: LongTensor,
         query_attention_mask: BoolTensor,
         ref_outputs: Sequence[BaseModelOutputWithPastAndCrossAttentions],
-        query_ref_list: list[list[int]],
+        query_ref_list: Sequence[Sequence[int]],
     ) -> tuple[Tensor, Tensor]:
         assert (
             query_ids[:, 0].ne(PAD_id).all()
@@ -957,6 +969,7 @@ def edits_to_batches(
                 bsize = 1
 
             queries = queries_left[:bsize]
+            assert queries, "No queries in batch!"
             queries_left = queries_left[bsize:]
             input_ids = [input_tks_list[qid] for qid in queries]
             query_ref_list = [
@@ -978,6 +991,7 @@ def edits_to_batches(
             bsizes.append(bsize)
 
     batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
+    cprint("blue", f"num batches: {len(batches)}")
     cprint("blue", f"Batch stats: {batch_stats}")
 
     return batches
@@ -991,9 +1005,18 @@ class _BatchSampler:
     desc: str
     tqdm_args: dict | None = None
 
+    def __post_init__(self):
+        if self.shuffle:
+            random.shuffle(self.edit_groups)
+        self._len_est = self.estimate_n_batches()
+        self.epochs = 0
+
     def __len__(self) -> int:
-        max_q = self.data_args.max_queries
-        return sum(len(range(0, len(es), max_q)) for es in self.edit_groups)
+        return self._len_est
+
+    def estimate_n_batches(self) -> int:
+        batches = edits_to_batches(self.edit_groups, self.data_args)
+        return len(batches)
 
     def __iter__(self) -> Iterable[Mapping]:
         if self.shuffle:
@@ -1004,7 +1027,7 @@ class _BatchSampler:
             random.shuffle(batches)
 
         tqdm_args = self.tqdm_args or {"smoothing": 0.0}
-        for b in tqdm(batches, desc=self.desc, **tqdm_args):
+        for b in tqdm(batches, desc=self.desc + f" {self.epochs}", **tqdm_args):
             input_ids = pad_token_seqs(b["input_ids"])
             labels = pad_token_seqs(b["labels"], pad_id=-100)
             yield {
@@ -1013,6 +1036,7 @@ class _BatchSampler:
                 "query_ref_list": b["query_ref_list"],
                 "labels": labels,
             }
+        self.epochs += 1
 
 
 def edits_to_dataloader(

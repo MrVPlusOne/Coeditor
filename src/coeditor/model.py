@@ -44,8 +44,6 @@ CodeT5Model = T5ForConditionalGeneration
 
 @dataclass
 class DecodingArgs:
-    base_tokens: int = 128
-    tokens_per_line: int = 16
     max_output_tks: int = 512
     do_sample: bool = False
     top_p: float = 0.9
@@ -84,8 +82,7 @@ class CoeditorModel:
             decode_args = DecodingArgs()
         x = torch.tensor([input_tks]).to(self.codet5.device)
         n_lines = sum(is_extra_id(tk) for tk in input_tks)
-        max_length = decode_args.base_tokens + decode_args.tokens_per_line * n_lines
-        max_length = min(max_length, decode_args.max_output_tks)
+        max_length = decode_args.max_output_tks
         output = self.codet5.generate(
             x,
             max_length,
