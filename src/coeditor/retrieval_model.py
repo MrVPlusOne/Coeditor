@@ -877,15 +877,35 @@ class BatchArgs:
     max_query_tks: int = 512
     min_queires: int = 1
     max_queries: int = 8
-    max_ref_tks: int = 50 * 256
+    max_ref_tks: int = 512
+    max_total_ref_tks: int = 50 * 256
     max_ref_dropout: float = 0.3
     shuffle_extra_ids: bool = True
     use_only_modified: bool = True
 
     def cost_limit(self) -> float:
         return self.min_queires * retrieval_cost_model(
-            self.max_ref_tks, 512, self.max_output_tks
+            self.max_total_ref_tks, self.max_query_tks, self.max_output_tks
         )
+
+    @staticmethod
+    def train_default() -> "BatchArgs":
+        return BatchArgs()
+
+    @staticmethod
+    def eval_default() -> "BatchArgs":
+        return BatchArgs(
+            max_total_ref_tks=50 * 512,
+            max_ref_dropout=0.0,
+            shuffle_extra_ids=False,
+        )
+
+    @staticmethod
+    def service_default() -> "BatchArgs":
+        args = BatchArgs.eval_default()
+        args.max_query_tks *= 2
+        args.max_output_tks *= 2
+        return args
 
 
 def edits_to_batches(
@@ -940,7 +960,7 @@ def edits_to_batches(
             ref_selected = list[tuple[ProjectPath, TokenSeq]]()
             while ref_left and len(ref_selected) < n_ref:
                 ref = ref_left.pop()
-                if ref_size_sum + len(ref[1]) <= args.max_ref_tks:
+                if ref_size_sum + len(ref[1]) <= args.max_total_ref_tks:
                     ref_selected.append(ref)
                     ref_size_sum += len(ref[1])
                 else:
