@@ -24,6 +24,7 @@ from coeditor.history import (
 from coeditor.model import CoeditorModel, DecodingArgs
 from coeditor.retrieval_model import BatchArgs, RetrievalEditorModel, edits_to_batches
 from spot.static_analysis import (
+    CommentRemover,
     ModuleName,
     PythonElem,
     PythonFunction,
@@ -58,7 +59,7 @@ class ChangeDetectionConfig:
         default_factory=lambda: PythonProject.DefaultIgnoreDirs
     )
     prev_commit: str = "HEAD"
-    module_preprocess: Callable[[cst.Module], cst.Module] = remove_comments
+    drop_comments: bool = True
 
     def get_pedit(
         self, project_root: Path, prev_cache: TimedCache, now_cache: TimedCache
@@ -116,8 +117,8 @@ class ChangeDetectionConfig:
         prev_modules = dict[ModuleName, PythonModule]()
         for mname, path in prev_module2file.items():
             if (m := prev_cache.get(mname, commit_stamp)) is None:
-                cst_m = self.src2module(get_prev_content(path))
-                m = PythonModule.from_cst(cst_m, mname)
+                cst_m = cst.parse_module(get_prev_content(path))
+                m = PythonModule.from_cst(cst_m, mname, self.drop_comments)
             prev_cache.set(mname, m, commit_stamp)
             prev_modules[mname] = m
 
@@ -129,8 +130,8 @@ class ChangeDetectionConfig:
             mtime = str(os.stat(path).st_mtime)
             (project_root / path).read_text()
             if (m := now_cache.get(mname, mtime)) is None:
-                cst_m = self.src2module(path.read_text())
-                m = PythonModule.from_cst(cst_m, mname)
+                cst_m = cst.parse_module(path.read_text())
+                m = PythonModule.from_cst(cst_m, mname, self.drop_comments)
             now_cache.set(mname, m, mtime)
             now_modules[mname] = m
 
@@ -141,9 +142,6 @@ class ChangeDetectionConfig:
         )
 
         return ProjectEdit.from_module_changes(prev_project, now_modules)
-
-    def src2module(self, src: str) -> cst.Module:
-        return self.module_preprocess(cst.parse_module(src))
 
 
 @dataclass
@@ -185,10 +183,12 @@ class EditPredictionService:
 
         with timed("get target element"):
             mname = PythonProject.rel_path_to_module_name(file.relative_to(project))
-            if (
-                mod := self.parse_cache.get(mname, str(os.stat(file).st_mtime))
-            ) is None:
-                mod = PythonModule.from_cst(cst.parse_module(file.read_text()), mname)
+            stamp = str(os.stat(file).st_mtime)
+            if (mod := self.parse_cache.get(mname, stamp)) is None:
+                mod = PythonModule.from_cst(
+                    cst.parse_module(file.read_text()), mname, drop_comments=False
+                )
+                self.parse_cache.set(mname, mod, stamp)
             elem = get_elem_by_line(mod, line)
             if elem is None:
                 raise ValueError(
@@ -196,13 +196,13 @@ class EditPredictionService:
                 )
             if not isinstance(elem, PythonFunction):
                 raise ValueError(f"Only functions can be edited by the model.")
-        cursor_offset = line - mod.location_map[elem.tree.body].start.line
+        cursor_offset = self.compute_offset(mod, elem, line)
 
         with timed("construct project edit"):
             pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
             if mname not in pedit.after.modules:
                 pedit.after.modules[mname] = PythonModule.from_cst(
-                    self.config.module_preprocess(mod.tree), mname
+                    mod.tree, mname, self.config.drop_comments
                 )
         match [c for c in pedit.all_elem_changes() if get_change_path(c) == elem.path]:
             case [Modified(PythonFunction(), PythonFunction()) as mf]:
@@ -247,13 +247,29 @@ class EditPredictionService:
 
         if log_file is not None:
             with log_file.open("w") as f:
-                print(f"{len(input_tks) = }")
-                print(f"{len(references) = }")
+                print(f"{cursor_offset = }", file=f)
+                print(f"{len(input_tks) = }", file=f)
+                print(f"{len(references) = }", file=f)
                 print("User prefix:", decode_tokens(output_prefix), file=f)
                 assert (
                     not self.batch_args.shuffle_extra_ids
                 ), "Ids cannot be shuffled for this to work for now"
                 print(qedits[0].show_prediction(out_tks), file=f)
+
+    def compute_offset(self, mod: PythonModule, elem: PythonFunction, line: int):
+        "Compute the relative offset of a given line in the body of a function."
+        origin_offset = line - mod.location_map[elem.tree.body].start.line
+        if not self.config.drop_comments:
+            return origin_offset
+        else:
+            removed_lines = 0
+            remover = CommentRemover(mod.location_map)
+            elem.tree.visit(remover)
+            for c in remover.removed:
+                span = remover.src_map[c]
+                if span.end.line < line:
+                    removed_lines += span.end.line - span.start.line + 1
+            return origin_offset - removed_lines
 
 
 def get_elem_by_line(module: PythonModule, line: int) -> PythonElem | None:
@@ -278,14 +294,14 @@ def split_label_by_post_edit_line(
     post-edit line."""
     assert label_tks, "label should not be empty."
     line_counter = -1
-    split_pos = 0 if post_line < 0 else len(label_tks)
+    split_pos = 0
     for pos, tk in enumerate(label_tks):
         if is_extra_id(tk):
             line_counter += 1
         elif tk == Add_id:
             line_counter += 1
         elif tk == Del_id:
-            line_counter += 1
-        if line_counter == post_line + 1:
+            line_counter -= 1
+        if line_counter <= post_line + 1:
             split_pos = pos
     return label_tks[:split_pos], label_tks[split_pos:]

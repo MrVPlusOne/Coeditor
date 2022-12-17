@@ -465,8 +465,16 @@ class PythonModule:
         return self.tree.code
 
     @staticmethod
-    def from_cst(module: cst.Module, name: str) -> "PythonModule":
-        return build_python_module(module, name)
+    def from_cst(module: cst.Module, name: str, drop_comments: bool) -> "PythonModule":
+        wrapper = MetadataWrapper(module)
+        src_map = dict(wrapper.resolve(PositionProvider))
+        module = wrapper.module
+        if drop_comments:
+            remover = CommentRemover(src_map=src_map)
+            module = module.visit(remover)
+            src_map = remover.src_map
+        _fix_function_location_(src_map)
+        return _build_python_module(module, src_map, name)
 
     def __repr__(self):
         return f"PythonModule(n_functions={len(self.functions)}, n_classes={len(self.classes)})"
@@ -502,7 +510,9 @@ class PythonModule:
             yield from rec(c)
 
     def mask_types(self) -> "PythonModule":
-        return PythonModule.from_cst(mask_types(self.tree), self.name)
+        return PythonModule.from_cst(
+            mask_types(self.tree), self.name, drop_comments=False
+        )
 
 
 @dataclass
@@ -551,9 +561,7 @@ class PythonProject:
         discard_bad_files: bool = False,
         file_filter: Callable[[Path], bool] = lambda p: True,
         ignore_dirs: set[str] = DefaultIgnoreDirs,
-        src2module: Callable[[str], cst.Module | None] = lambda s: remove_comments(
-            cst.parse_module(s)
-        ),
+        drop_comments: bool = True,
     ) -> "PythonProject":
         """
         - `root` is typically the `src/` directory or just the root of the project.
@@ -581,16 +589,14 @@ class PythonProject:
             with src.open() as f:
                 src_text = f.read()
             try:
-                mod = src2module(src_text)
-                if mod is None:
-                    continue
+                mod = cst.parse_module(src_text)
             except cst.ParserSyntaxError as e:
                 if discard_bad_files:
                     continue
                 raise
 
             mod_name = PythonProject.rel_path_to_module_name(src.relative_to(root))
-            modules[mod_name] = PythonModule.from_cst(mod, mod_name)
+            modules[mod_name] = PythonModule.from_cst(mod, mod_name, drop_comments)
             src_map[mod_name] = src.relative_to(root)
 
         for src in all_srcs:
@@ -1379,14 +1385,13 @@ def _fix_function_location_(node2range: dict[cst.CSTNode, CodeRange]):
             )
 
 
-def build_python_module(module: cst.Module, module_name: ModuleName):
+def _build_python_module(
+    module: cst.Module,
+    node2location: Mapping[cst.CSTNode, CodeRange],
+    module_name: ModuleName,
+):
     """Construct a `PythonModule` from a `cst.Module`.
     If multiple definitions of the same name are found, only the last one is kept."""
-
-    wrapper = cst.MetadataWrapper(module)
-    node2location = dict(wrapper.resolve(PositionProvider))
-    _fix_function_location_(node2location)
-
     imported_modules = set[str]()
     defined_symbols = dict[str, ProjectPath]()
     elem2pos = dict[ElemPath, CodeRange]()
@@ -1573,8 +1578,10 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
             return False
 
     builder = ModuleBuilder()
-    wrapper.visit(builder)
-
+    module.visit(builder)
+    src_map = node2location
+    if not isinstance(src_map, dict):
+        src_map = dict(node2location)
     return PythonModule(
         global_vars=list(builder.global_vars.values()),
         functions=list(builder.functions.values()),
@@ -1582,9 +1589,9 @@ def build_python_module(module: cst.Module, module_name: ModuleName):
         name=module_name,
         imported_modules=imported_modules,
         defined_symbols=defined_symbols,
-        tree=wrapper.module,
+        tree=module,
         elem2pos=elem2pos,
-        location_map=node2location,
+        location_map=src_map,
     )
 
 
@@ -1895,16 +1902,28 @@ class EmptyLineRemove(cst.CSTTransformer):
 
 
 class CommentRemover(cst.CSTTransformer):
-    """Removes comments and docstrings."""
+    def __init__(self, src_map: Mapping[cst.CSTNode, CodeRange] | None = None):
+        super().__init__()
+        self.removed = list[cst.CSTNode]()
+        self.src_map = dict(src_map) if src_map else dict()
+
+    def on_leave(self, original: cst.CSTNodeT, updated: cst.CSTNodeT):
+        if (old_span := self.src_map.pop(original, None)) is not None:
+            self.src_map[updated] = old_span
+        return super().on_leave(original, updated)
 
     def leave_IndentedBlock(
         self, node: cst.IndentedBlock, updated: cst.IndentedBlock
     ) -> cst.IndentedBlock:
-        new_body = type(updated.body)(  # type: ignore
-            filter(lambda n: not CommentRemover.is_doc_string(n), updated.body)
-        )
-        if len(new_body) != len(updated.body):
-            return updated.with_changes(body=new_body)
+        to_keep = []
+        for n in updated.body:
+            if self.is_doc_string(n):
+                self.removed.append(n)
+            else:
+                to_keep.append(n)
+        if len(to_keep) != len(updated.body):
+            body = type(updated.body)(to_keep)  # type: ignore
+            return updated.with_changes(body=body)
         else:
             return updated
 
@@ -1913,12 +1932,14 @@ class CommentRemover(cst.CSTTransformer):
 
     def leave_EmptyLine(self, node: cst.EmptyLine, updated: cst.EmptyLine):
         if updated.comment is not None:
+            self.removed.append(updated)
             return cst.RemoveFromParent()
         else:
             return updated
 
     def leave_TrailingWhitespace(self, node, updated: cst.TrailingWhitespace):
         if updated.comment is not None:
+            self.removed.append(updated)
             return updated.with_changes(
                 comment=None, whitespace=cst.SimpleWhitespace("")
             )
