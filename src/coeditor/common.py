@@ -276,23 +276,29 @@ def code_equal(code1: str | cst.CSTNode, code2: str | cst.CSTNode) -> bool:
 
 
 @overload
-def random_subset(all: Sequence[T1], n: int, seed: int = 42) -> list[T1]:
+def random_subset(
+    all: Sequence[T1], n: int, rng: random.Random | None = None
+) -> list[T1]:
     ...
 
 
 @overload
-def random_subset(all: Mapping[T1, T2], n: int, seed: int = 42) -> dict[T1, T2]:
+def random_subset(
+    all: Mapping[T1, T2], n: int, rng: random.Random | None = None
+) -> dict[T1, T2]:
     ...
 
 
-def random_subset(all, n: int, seed: int = 42):
+def random_subset(all, n: int, rng: random.Random | None = None):
+    if rng is None:
+        rng = random.Random(42)
     if isinstance(all, Sequence):
         xs = [x for x in all]
-        random.Random(seed).shuffle(xs)
+        rng.shuffle(xs)
         return xs[:n]
     elif isinstance(all, Mapping):
         keys = [k for k in all]
-        random.Random(seed).shuffle(keys)
+        rng.shuffle(keys)
         return {k: all[k] for k in keys[:n]}
     else:
         raise ArgumentError(all, f"Unsupported arg type: {type(all)}")

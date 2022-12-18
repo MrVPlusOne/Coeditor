@@ -861,13 +861,13 @@ def compute_bias(
     return values
 
 
-def retrieval_cost_model(ref_size: int, query_size: int, dec_size: int) -> float:
+def retrieval_cost_model(ref_size: int, query_size: int, output_size: int) -> float:
     a = 1 / 128
     return (
-        a * (ref_size + query_size) * (query_size + dec_size)
+        a * (ref_size + query_size) * (query_size + output_size)
         + 2 * ref_size
         + query_size
-        + 2 * dec_size
+        + 2 * output_size
     )
 
 
@@ -908,7 +908,7 @@ class BatchArgs:
         return args
 
 
-def edits_to_batches(
+def edit_groups_to_batches(
     edit_groups: Sequence[Sequence[BasicTkQueryEdit]],
     args: BatchArgs,
     silent: bool = False,
@@ -933,92 +933,101 @@ def edits_to_batches(
     cost_limit = args.cost_limit()
     warned_batch_size = False
 
-    batches = list[dict]()
-    bsizes = list[int]()
-    for edit_group in edit_groups:
+    def group_to_batches(
+        group: Sequence[BasicTkQueryEdit],
+    ) -> Iterable[dict]:
         pedit = edit_group[0].tk_pedit
-
-        processed = [process_edit(x) for x in edit_group]
+        processed = [process_edit(x) for x in group]
         input_tks_list = [x[0] for x in processed]
         output_tks_list = [x[1] for x in processed]
 
-        stubs = list[tuple[ModuleName, TokenSeq]]()
-        if pedit.module_stubs:
-            stubs = [
-                (mname, seg)
-                for mname, segs in pedit.module_stubs.items()
-                for seg in segs
-            ]
-        queries_left = list(range(len(edit_group)))
+        def down_sample(xs: list[TokenSeq]) -> list[TokenSeq]:
+            n = round(len(xs) * (1 - args.max_ref_dropout * random.random()))
+            return random_subset(xs, n, random._inst)
 
-        while queries_left:
-            # down-sample references if needed
-            references = [
-                (path, seg)
-                for path, segs in pedit.tk_references.items()
-                for seg in segs
-            ]
-            n_ref = round(
-                len(references) * (1 - args.max_ref_dropout * random.random())
-            )
-            all_refs = references
-            random.shuffle(all_refs)
-            all_refs = stubs + all_refs[:n_ref]
-            ref_size_sum = 0
-            ref_selected = list[tuple[ProjectPath | ModuleName, TokenSeq]]()
-            for ref in all_refs:
-                if ref_size_sum + len(ref[1]) <= args.max_total_ref_tks:
-                    ref_selected.append(ref)
-                    ref_size_sum += len(ref[1])
-                else:
-                    break
-            # sort by path for eaxy visualization
-            ref_selected.sort(key=lambda x: str(x[0]))
-
-            # find the maximal batch size
-            max_bsize = min(len(queries_left), args.max_queries)
-            bsize = 0
-            for bsize in range(1, max_bsize + 1):
-                queries = queries_left[:bsize]
-                query_size = max(len(input_tks_list[i]) for i in queries)
-                out_size = max(len(output_tks_list[i]) for i in queries)
-                cost = bsize * retrieval_cost_model(
-                    ref_size_sum,
-                    query_size,
-                    out_size,
-                )
-                if cost > cost_limit:
-                    bsize -= 1
-                    break
-            if bsize == 0:
-                if not warned_batch_size:
-                    warned_batch_size = True
-                    warnings.warn(
-                        "Batch query limit is too small. Will use a query size of 1."
-                    )
-                bsize = 1
-
-            queries = queries_left[:bsize]
-            assert queries, "No queries in batch!"
-            queries_left = queries_left[bsize:]
-            input_ids = [input_tks_list[qid] for qid in queries]
-            query_ref_list = [
-                [
-                    i
-                    for i, (p, _) in enumerate(ref_selected)
-                    if p != edit_group[qid].path
-                ]
-                for qid in queries
-            ]
-            labels = [output_tks_list[qid] for qid in queries]
-            batch = {
+        def pack_batch(rows: list[dict]):
+            input_ids = [x["input_tks"] for x in rows]
+            labels = [x["output_tks"] for x in rows]
+            refs = [x["ref_selected"] for x in rows]
+            id2ref = {id(ref): ref for row in refs for ref in row}
+            references = [id2ref[x] for x in id2ref]
+            id2order = {x: i for i, x in enumerate(id2ref)}
+            query_ref_list = [[id2order[id(ref)] for ref in row] for row in refs]
+            return {
                 "input_ids": input_ids,
-                "references": [tks for (_, tks) in ref_selected],
+                "references": references,
                 "query_ref_list": query_ref_list,
                 "labels": labels,
             }
+
+        # sample references for each query
+        current_batch = []
+        current_cost = 0
+        for i, edit in enumerate(group):
+            key_stubs = list[TokenSeq]()
+            rest_stubs = list[TokenSeq]()
+            id2ref_name = dict[int, str]()
+            if mstubs := pedit.module_stubs:
+                for m, segs in mstubs.items():
+                    for i, seg in enumerate(segs):
+                        id2ref_name[id(seg)] = f"{m}/{i}"
+                    if m == edit.path.module:
+                        key_stubs.extend(segs)
+                    else:
+                        rest_stubs.extend(segs)
+            key_refs = list[TokenSeq]()
+            rest_refs = list[TokenSeq]()
+            for path, segs in pedit.tk_references.items():
+                for i, seg in enumerate(segs):
+                    id2ref_name[id(seg)] = f"{path}/{i}"
+                if path.module == edit.path.module:
+                    if path != edit.path:
+                        key_refs.extend(segs)
+                else:
+                    rest_refs.extend(segs)
+            key_refs = down_sample(key_refs)
+            rest_refs = down_sample(rest_refs)
+            all_rest = rest_stubs + rest_refs
+            random.shuffle(key_stubs)
+            random.shuffle(key_refs)
+            random.shuffle(all_rest)
+            all_refs = key_stubs + key_refs + all_rest
+            ref_size_sum = 0
+            ref_selected = list[TokenSeq]()
+            for ref in all_refs:
+                if ref_size_sum + len(ref) <= args.max_total_ref_tks:
+                    ref_selected.append(ref)
+                    ref_size_sum += len(ref)
+            cost = retrieval_cost_model(
+                ref_size=sum(len(x) for x in ref_selected),
+                query_size=len(input_tks_list[i]),
+                output_size=len(output_tks_list[i]),
+            )
+            ref_selected.sort(key=lambda x: id2ref_name[id(x)])
+            row = {
+                "input_tks": input_tks_list[i],
+                "output_tks": output_tks_list[i],
+                "ref_selected": ref_selected,
+            }
+            nonlocal warned_batch_size
+            if cost > cost_limit and not warned_batch_size:
+                warned_batch_size = True
+                warnings.warn("Batch cost limit is too small.")
+            if cost + current_cost <= cost_limit:
+                current_batch.append(row)
+            else:
+                yield pack_batch(current_batch)
+                current_batch = [row]
+                current_cost = cost
+        if current_batch:
+            yield pack_batch(current_batch)
+
+    batches = list[dict]()
+    bsizes = list[int]()
+    for edit_group in edit_groups:
+        for batch in group_to_batches(edit_group):
             batches.append(batch)
-            bsizes.append(bsize)
+            bsizes.append(len(batch["input_ids"]))
 
     batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
     if not silent:
@@ -1046,14 +1055,14 @@ class _BatchSampler:
         return self._len_est
 
     def estimate_n_batches(self) -> int:
-        batches = edits_to_batches(self.edit_groups, self.data_args)
+        batches = edit_groups_to_batches(self.edit_groups, self.data_args)
         return len(batches)
 
     def __iter__(self) -> Iterable[Mapping]:
         if self.shuffle:
             for es in self.edit_groups:
                 random.shuffle(es)
-        batches = edits_to_batches(self.edit_groups, self.data_args)
+        batches = edit_groups_to_batches(self.edit_groups, self.data_args)
         if self.shuffle:
             random.shuffle(batches)
 

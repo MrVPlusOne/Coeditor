@@ -24,7 +24,11 @@ from coeditor.history import (
     show_change,
 )
 from coeditor.model import CoeditorModel, DecodingArgs
-from coeditor.retrieval_model import BatchArgs, RetrievalEditorModel, edits_to_batches
+from coeditor.retrieval_model import (
+    BatchArgs,
+    RetrievalEditorModel,
+    edit_groups_to_batches,
+)
 from spot.static_analysis import (
     CommentRemover,
     ModuleName,
@@ -234,7 +238,7 @@ class EditPredictionService:
             if qedits[0].tk_pedit.module_stubs:
                 print("stub files:", qedits[0].tk_pedit.module_stubs.keys())
             assert len(qedits) == 1
-            batches = edits_to_batches([qedits], self.batch_args)
+            batches = edit_groups_to_batches([qedits], self.batch_args)
             assert len(batches) == 1
             batch = batches[0]
 
