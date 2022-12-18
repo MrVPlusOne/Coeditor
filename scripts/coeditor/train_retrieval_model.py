@@ -1,6 +1,8 @@
 import copy
 import os
 import warnings
+from coeditor.model import DecodingArgs
+from spot.utils import run_long_task
 from train_model import check_save_dir, TokenizedEditDataset
 
 import wandb
@@ -74,7 +76,7 @@ def train_model(
             batch_args=batch_args,
         )
 
-    with timed_action("Loss Evaluating"):
+    with timed_action("Loss Evaluation"):
         test_batch_args = copy.deepcopy(batch_args)
         test_batch_args.min_queires *= 2
         test_batch_args.max_queries *= 2
@@ -82,38 +84,40 @@ def train_model(
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
 
-    # max_saved_samples = 200
+    max_saved_samples = 200
 
-    # with timed_action("Accuracy Evaluating"):
-    #     dec_result = model.predict_on_data(datasets["test"], test_args, dec_args)
-    #     pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
-    #     exact_acc, exact_correct_map = dec_result.exact_match_accuracy()
-    #     wandb.log({"test/exact-acc": exact_acc.average()})
+    with timed_action("Accuracy Evaluating"):
+        dec_args = DecodingArgs()
+        dec_result = model.predict_on_data(datasets["test"], test_batch_args, dec_args)
+        pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
+        exact_acc, exact_correct_map = dec_result.exact_match_accuracy()
+        wandb.log({"test/exact-acc": exact_acc.average()})
 
-    #     out_dir = get_model_dir() / model_name / "exact_match_samples"
-    #     dec_result.save_examples_to_dir(
-    #         out_dir, random_subset(exact_correct_map, max_saved_samples)
-    #     )
-    #     print("Exact-match samples saved to:", out_dir)
+        out_dir = get_model_dir() / model_name / "exact_match_samples"
+        dec_result.save_examples_to_dir(
+            out_dir, random_subset(exact_correct_map, max_saved_samples)
+        )
+        print("Exact-match samples saved to:", out_dir)
 
-    #     if isinstance(encoder, AnalysisBasedEditEncoder):
-    #         call_acc, call_correct_map = dec_result.call_update_accuracy()
-    #         wandb.log({"test/call-update-acc": call_acc.average()})
-    #         out_dir = get_model_dir() / model_name / "call_update_samples"
-    #         dec_result.save_examples_to_dir(
-    #             out_dir, random_subset(call_correct_map, max_saved_samples)
-    #         )
-    #         print("Call-update samples saved to:", out_dir)
+        # if isinstance(encoder, AnalysisBasedEditEncoder):
+        #     call_acc, call_correct_map = dec_result.call_update_accuracy()
+        #     wandb.log({"test/call-update-acc": call_acc.average()})
+        #     out_dir = get_model_dir() / model_name / "call_update_samples"
+        #     dec_result.save_examples_to_dir(
+        #         out_dir, random_subset(call_correct_map, max_saved_samples)
+        #     )
+        #     print("Call-update samples saved to:", out_dir)
     return model
 
 
 if __name__ == "__main__":
     os.chdir(proj_root())
-    train_model(
-        dataset_name="large",
-        model_variant="-query-basic",
-        batch_args=BatchArgs(),
-        train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
-        encoder=BasicQueryEditEncoder(),
-        recreate_data=False,
-    )
+    with run_long_task("train_retrieval_model.py"):
+        train_model(
+            dataset_name="large",
+            model_variant="-query-stub",
+            batch_args=BatchArgs.train_default(),
+            train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
+            encoder=BasicQueryEditEncoder(),
+            recreate_data=False,
+        )

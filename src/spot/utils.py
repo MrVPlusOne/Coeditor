@@ -483,29 +483,40 @@ import http.client
 import json
 import urllib
 
+_pushover_warned = [False]
+
+
+def get_pushover_config() -> tuple[str, str] | None:
+    config_file = proj_root() / "config/pushover.json"
+    if config_file.exists():
+        match json.loads(config_file.read_text()):
+            case {"user": user, "token": token}:
+                return user, token
+    if not _pushover_warned[0]:
+        logging.warning(
+            f"No pushover config file found at {config_file}. Not able to push message."
+        )
+        _pushover_warned[0] = True
+    return None
+
 
 def pushover_alert(
     title: str, message: str, print_to_console: bool = True, notify: bool = True
 ) -> None:
     "If notify=False, will only print to console."
-
-    conn = http.client.HTTPSConnection("api.pushover.net:443")
-    config_file = proj_root() / "config/pushover.json"
-    if not config_file.exists():
-        logging.warning(
-            f"No pushover config file found at {config_file}. Not able to push message."
-        )
-    if print_to_console or not config_file.exists():
+    config = get_pushover_config()
+    if print_to_console or (notify and config is None):
         print(f"Pushover: ({title}) {message}")
-    elif notify:
-        config = json.loads(config_file.read_text())
+    elif notify and config is not None:
+        user, token = config
+        conn = http.client.HTTPSConnection("api.pushover.net:443")
         conn.request(
             "POST",
             "/1/messages.json",
             urllib.parse.urlencode(  # type: ignore
                 {
-                    "token": config["token"],
-                    "user": config["user"],
+                    "token": token,
+                    "user": user,
                     "title": title,
                     "message": message,
                 }
@@ -513,7 +524,7 @@ def pushover_alert(
             {"Content-type": "application/x-www-form-urlencoded"},
         )
         # check if the request was successful
-        conn.getresponse()
+        # conn.getresponse()
 
 
 @contextmanager

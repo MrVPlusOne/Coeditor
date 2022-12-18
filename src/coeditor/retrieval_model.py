@@ -4,6 +4,7 @@ from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import BasicTkQueryEdit
 from coeditor.history import Modified
 from coeditor.model import (
+    DatasetDecodingResult,
     DecodingArgs,
     EvalArgs,
     TrainingArgs,
@@ -236,6 +237,48 @@ class RetrievalEditorModel(T5PreTrainedModel):
         core.train(mode=previous)
 
         return metrics
+
+    @torch.no_grad()
+    @torch.autocast("cuda")
+    def predict_on_data(
+        self,
+        eval_data: TokenizedEditDataset,
+        batch_args: "BatchArgs",
+        dec_args: DecodingArgs,
+    ):
+        def remove_pad_ids(ids: TokenSeq) -> TokenSeq:
+            return [tk for tk in ids if tk != PAD_id and tk >= 0]
+
+        if batch_args.shuffle_extra_ids:
+            warnings.warn(
+                "Shuffling extra ids during eval can lead to incorrect results."
+            )
+        eval_edits = eval_data.all_edits()
+        edit_groups = list(groupby(eval_edits, lambda e: id(e.tk_pedit)).values())
+        eval_edits = join_list(edit_groups)
+        eval_loader = _BatchSampler(edit_groups, batch_args, shuffle=False, desc="Decoding Epoch")
+        
+        gen_args = dec_args.to_model_args()
+        input_ids = []
+        labels = []
+        predictions = []
+        for batch in eval_loader:  # type: ignore
+            out_tks = self.generate(
+                batch["input_ids"].to(self.device),
+                references=batch["references"],
+                query_ref_list=batch["query_ref_list"],
+                **gen_args,
+            ).tolist()  # type: ignore
+            input_ids.extend(batch["input_ids"].tolist())
+            labels.extend(batch["labels"].tolist())
+            predictions.extend(out_tks)
+        return DatasetDecodingResult(
+            eval_args={"batch_args": batch_args, "dec_args": dec_args},
+            edits=eval_edits,
+            input_ids=[remove_pad_ids(d) for d in input_ids],
+            labels=[remove_pad_ids(d) for d in labels],
+            predictions=[remove_pad_ids(d) for d in predictions],
+        )
 
     def save(self, save_dir: Path, *args, **kwargs):
         super().save_pretrained(save_dir, *args, **kwargs)
@@ -921,7 +964,7 @@ class BatchArgs:
     max_queries: int = 8
     max_ref_tks: int = 512
     max_total_ref_tks: int = 50 * 256
-    max_ref_dropout: float = 0.3
+    max_ref_dropout: float = 1.0
     shuffle_extra_ids: bool = True
     use_only_modified: bool = True
 
@@ -979,9 +1022,6 @@ def edit_groups_to_batches(
         group: Sequence[BasicTkQueryEdit],
     ) -> Iterable[dict]:
         pedit = edit_group[0].tk_pedit
-        processed = [process_edit(x) for x in group]
-        input_tks_list = [x[0] for x in processed]
-        output_tks_list = [x[1] for x in processed]
 
         def down_sample(xs: list[TokenSeq]) -> list[TokenSeq]:
             n = round(len(xs) * (1 - args.max_ref_dropout * random.random()))
@@ -1011,8 +1051,8 @@ def edit_groups_to_batches(
             id2ref_name = dict[int, str]()
             if mstubs := pedit.module_stubs:
                 for m, segs in mstubs.items():
-                    for i, seg in enumerate(segs):
-                        id2ref_name[id(seg)] = f"{m}/{i}"
+                    for j, seg in enumerate(segs):
+                        id2ref_name[id(seg)] = f"{m}/{j}"
                     if m == edit.path.module:
                         key_stubs.extend(segs)
                     else:
@@ -1020,8 +1060,8 @@ def edit_groups_to_batches(
             key_refs = list[TokenSeq]()
             rest_refs = list[TokenSeq]()
             for path, segs in pedit.tk_references.items():
-                for i, seg in enumerate(segs):
-                    id2ref_name[id(seg)] = f"{path}/{i}"
+                for j, seg in enumerate(segs):
+                    id2ref_name[id(seg)] = f"{path}/{j}"
                 if path.module == edit.path.module:
                     if path != edit.path:
                         key_refs.extend(segs)
@@ -1040,15 +1080,16 @@ def edit_groups_to_batches(
                 if ref_size_sum + len(ref) <= args.max_total_ref_tks:
                     ref_selected.append(ref)
                     ref_size_sum += len(ref)
+            input_tks, output_tks = process_edit(edit)
             cost = retrieval_cost_model(
                 ref_size=sum(len(x) for x in ref_selected),
-                query_size=len(input_tks_list[i]),
-                output_size=len(output_tks_list[i]),
+                query_size=len(input_tks),
+                output_size=len(output_tks),
             )
             ref_selected.sort(key=lambda x: id2ref_name[id(x)])
             row = {
-                "input_tks": input_tks_list[i],
-                "output_tks": output_tks_list[i],
+                "input_tks": input_tks,
+                "output_tks": output_tks,
                 "ref_selected": ref_selected,
             }
             nonlocal warned_batch_size

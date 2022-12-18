@@ -50,6 +50,15 @@ class DecodingArgs:
     num_beams: Optional[int] = 1
     length_penalty: float = 1.0
 
+    def to_model_args(self) -> dict:
+        return {
+            "max_length": self.max_output_tks,
+            "do_sample": self.do_sample,
+            "top_p": self.top_p,
+            "num_beams": self.num_beams,
+            "length_penalty": self.length_penalty,
+        }
+
 
 @dataclass
 class TrainingArgs:
@@ -169,8 +178,7 @@ class CoeditorModel:
         pred_seq = [pred_dict[i] for i in range(len(eval_edits))]
 
         return DatasetDecodingResult(
-            eval_args,
-            dec_args,
+            eval_args={"eval_args": eval_args, "dec_arsg": dec_args},
             edits=eval_edits,
             input_ids=dataset["input_ids"],
             labels=dataset["labels"],
@@ -295,8 +303,7 @@ class CoeditorModel:
 
 @dataclass
 class DatasetDecodingResult(Generic[TEdit]):
-    eval_args: "EvalArgs"
-    dec_args: DecodingArgs
+    eval_args: dict
     edits: list[TEdit]
     input_ids: list[TokenSeq]
     labels: list[TokenSeq]
@@ -308,7 +315,6 @@ class DatasetDecodingResult(Generic[TEdit]):
     def subset(self, ids: Sequence[int]):
         return DatasetDecodingResult(
             self.eval_args,
-            self.dec_args,
             [self.edits[i] for i in ids],
             [self.input_ids[i] for i in ids],
             [self.labels[i] for i in ids],
@@ -411,14 +417,14 @@ def compute_loss_metrics(
     logits: torch.Tensor, labels: torch.Tensor
 ) -> Mapping[str, WeightedSum]:
     logits = logits.permute(0, 2, 1)  # shape: (batch, vocab, seq_len)
-    logp = torch.nn.functional.cross_entropy(
+    nlogp = torch.nn.functional.cross_entropy(
         logits,
         labels,
         reduction="none",
         ignore_index=-100,
     )  # shape: (batch, seq_len)
-    loss = logp.sum().item()
-    ex_prob = torch.exp(-logp.sum(dim=1)).sum().item()
+    loss = nlogp.sum().item()
+    ex_prob = torch.exp(-nlogp.sum(dim=1)).sum().item()
     bsize = logits.size(0)
     label_tks = (labels != -100).sum().item()
     return {

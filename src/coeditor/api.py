@@ -226,13 +226,7 @@ class EditPredictionService:
             batch = batches[0]
 
         with timed("run model"), torch.autocast("cuda"):
-            dec_args = {
-                "max_length": self.dec_args.max_output_tks,
-                "do_sample": self.dec_args.do_sample,
-                "top_p": self.dec_args.top_p,
-                "num_beams": self.dec_args.num_beams,
-                "length_penalty": self.dec_args.length_penalty,
-            }
+            dec_args = self.dec_args.to_model_args()
             input_tks = batch["input_ids"][0]
             references = batch["references"]
             output_prefix, output_truth = split_label_by_post_edit_line(

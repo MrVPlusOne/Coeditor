@@ -9,6 +9,7 @@ from coeditor.encoding import AnalysisBasedEditEncoder, CstBasedEditEncoder, Edi
 from coeditor.model import *
 from prepare_data import make_or_load_datasets
 from spot.model import input_cost_model
+from spot.utils import run_long_task
 
 
 def check_save_dir(model_name: str) -> None:
@@ -102,7 +103,7 @@ def train_model(
             model_name, datasets["train"], datasets["valid"], train_args, valid_args
         )
 
-    with timed_action("Loss Evaluating"):
+    with timed_action("Loss Evaluation"):
         eval_result = model.eval_loss_on_data(datasets["test"], test_args)
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
@@ -134,13 +135,14 @@ def train_model(
 
 if __name__ == "__main__":
     os.chdir(proj_root())
-    train_model(
-        dataset_name="large",
-        model_variant="-analysis-post_usees-reuse",
-        # encoder=CstBasedEditEncoder(),
-        encoder=AnalysisBasedEditEncoder(
-            extra_ctx_names=("usees", "post-usees"), add_truncate_bos=False
-        ),
-        recreate_data=False,
-        quicktest=False,
-    )
+    with run_long_task("train_model.py"):
+        train_model(
+            dataset_name="large",
+            model_variant="-analysis-post_usees-reuse",
+            # encoder=CstBasedEditEncoder(),
+            encoder=AnalysisBasedEditEncoder(
+                extra_ctx_names=("usees", "post-usees"), add_truncate_bos=False
+            ),
+            recreate_data=False,
+            quicktest=False,
+        )
