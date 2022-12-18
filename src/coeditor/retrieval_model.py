@@ -292,6 +292,33 @@ class RetrievalEditorModel(T5PreTrainedModel):
         if labels is not None:
             assert_eq(labels.dim(), 2)
 
+        def decode_then_split(enc_results: Sequence[dict]):
+            decoder_input_ids, decoder_attention_mask = stack_pad_tensors(
+                [x["decoder_input_ids"] for x in enc_results]
+            )
+            encoder_hidden_states, encoder_attention_mask = stack_pad_tensors(
+                [x["encoder_hidden_states"] for x in enc_results]
+            )
+
+            decoder_outputs = self.decoder.forward(
+                input_ids=decoder_input_ids,
+                attention_mask=decoder_attention_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                return_dict=True,
+            )
+            assert isinstance(
+                decoder_outputs, BaseModelOutputWithPastAndCrossAttentions
+            )
+            n = len(enc_results)
+            return [decoder_outputs.last_hidden_state[i] for i in range(n)]
+
+        def decode_group(enc_r: dict):
+            assert isinstance(enc_r, dict)
+            s1 = _round_length_group(enc_r["decoder_input_ids"].size(0))
+            s2 = _round_length_group(enc_r["encoder_hidden_states"].size(0))
+            return (s1, s2)
+
         try:
             if encoder_outputs is None:
                 assert input_ids is not None
@@ -301,18 +328,39 @@ class RetrievalEditorModel(T5PreTrainedModel):
             if labels is not None and decoder_input_ids is None:
                 # get decoder inputs from shifting lm labels to the right
                 assert_eq(labels.dtype, torch.long)
-                decoder_input_ids = cast(LongTensor, self._shift_right(labels))
 
-            decoder_outputs = self.decoder.forward(
-                input_ids=decoder_input_ids,
-                inputs_embeds=decoder_inputs_embeds,
-                attention_mask=decoder_attention_mask,
-                encoder_hidden_states=encoder_outputs.last_hidden_state,
-                encoder_attention_mask=encoder_outputs.hidden_state_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                return_dict=True,
-            )
+                last_hidden = encoder_outputs.last_hidden_state
+                last_mask = not_none(encoder_outputs.hidden_state_mask)
+                last_states = [
+                    {
+                        "encoder_hidden_states": last_hidden[i][last_mask[i]],
+                        "decoder_input_ids": self._shift_right(
+                            labels[i : i + 1]
+                        ).squeeze(0),
+                    }
+                    for i in range(last_hidden.size(0))
+                ]
+                dec_hidden_states = batched_map(
+                    last_states,
+                    group_key=decode_group,
+                    f=decode_then_split,
+                )
+                decoder_outputs = BaseModelOutputWithPastAndCrossAttentions(
+                    cast(FloatTensor, stack_pad_tensors(dec_hidden_states)[0])
+                )
+            else:
+                # use simple batching for decoding
+                decoder_outputs = self.decoder.forward(
+                    input_ids=decoder_input_ids,
+                    inputs_embeds=decoder_inputs_embeds,
+                    attention_mask=decoder_attention_mask,
+                    encoder_hidden_states=encoder_outputs.last_hidden_state,
+                    encoder_attention_mask=encoder_outputs.hidden_state_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    return_dict=True,
+                )
+
             assert isinstance(
                 decoder_outputs, BaseModelOutputWithPastAndCrossAttentions
             )
@@ -474,7 +522,7 @@ class RetrivalEncoder:
 
         ref_outputs = batched_map(
             references,
-            group_key=lambda ref: self._round_length_group(len(ref)),
+            group_key=lambda ref: _round_length_group(len(ref)),
             f=lambda refs: split_outputs(
                 [len(x) for x in refs],
                 self.encoder.forward(
@@ -514,7 +562,7 @@ class RetrivalEncoder:
 
         last_hidden_states = batched_map(
             range(n_queries),
-            group_key=lambda q: self._round_length_group(q_lens[q]),
+            group_key=lambda q: _round_length_group(q_lens[q]),
             f=encode_queries,
         )
         last_hidden_state, hidden_state_mask = stack_pad_tensors(last_hidden_states)
@@ -522,12 +570,6 @@ class RetrivalEncoder:
         return RetrivalEncoderOutputs(
             last_hidden_state=last_hidden_state, hidden_state_mask=hidden_state_mask
         )
-
-    @staticmethod
-    def _round_length_group(x: int) -> int:
-        if x <= 64:
-            return 64
-        return 2 ** math.ceil(math.log(x, 2))
 
     def encode_references(
         self,
@@ -1102,3 +1144,9 @@ def pad_token_seqs(seqs: Sequence[TokenSeq], pad_id=None) -> LongTensor:
         row = row + [pad_id] * (max_len - len(row))
         rows.append(row)
     return LongTensor(rows)
+
+
+def _round_length_group(x: int) -> int:
+    if x <= 64:
+        return 64
+    return 2 ** math.ceil(math.log(x, 2))
