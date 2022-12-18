@@ -102,18 +102,30 @@ class BasicTkQueryEdit(TokenizedEdit):
 class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
     "Only use changed elements in a commit as references."
     VERSION = 3
-    max_ref_tks: int = 256
+    max_ref_tks: int = 512
     ref_chunk_overlap: int = 16
-    max_chunks_per_ref: int = 5
+    max_chunks_per_ref: int = 4
     max_query_tks: int = 512
     max_output_tks: int = 256
     add_stubs: bool = True
     add_truncate_bos: bool = True
     collapse_unchanged: bool = True
 
+    def encode_pedits(
+        self,
+        pedits: Sequence[ProjectEdit],
+        include_additions: bool = False,
+    ) -> Iterable[BasicTkQueryEdit]:
+        stub_cache = TimedCache()
+        for pedit in pedits:
+            yield from self.encode_pedit(
+                pedit, stub_cache, include_additions=include_additions
+            )
+
     def encode_pedit(
         self,
         pedit: ProjectEdit,
+        stub_cache: TimedCache[ModuleName, list[TokenSeq], int],
         include_additions: bool = False,
         queries: Iterable[Change[PythonFunction]] | None = None,
     ) -> Iterable[BasicTkQueryEdit]:
@@ -134,10 +146,11 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         module_stubs = None
         if self.add_stubs:
             module_stubs = {
-                name: list(self.encode_module_stub(pedit.after.modules[name]))[
-                    : self.max_chunks_per_ref
-                ]
+                name: stub_cache.cached(
+                    name, id(pymod), lambda: self.encode_module_stub(not_none(pymod))
+                )[: self.max_chunks_per_ref]
                 for name in pedit.changes
+                if (pymod := pedit.after.modules.get(name)) is not None
             }
         tk_refs = {
             get_change_path(c): list(self.encode_elem_change(c, ctx_enc))[
@@ -177,7 +190,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                     )
             input_tks, output_tks = change_to_input_output(body_change)
             path = get_change_path(cast(Change, mf))
-            path_tks = encode_basic(f"# path: {path}")
+            path_tks = encode_basic(f"# edit: {path}")
             header_tks = change_to_tokens(mf.map(lambda x: x.header_body_code[0]))
             cls_tks = tuple()
             if (cls_p := mf.after.parent_class) is not None:
@@ -273,7 +286,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             if has_change(to_check):
                 yield prefix_tks + tks
 
-    def encode_module_stub(self, module: PythonModule) -> Iterable[TokenSeq]:
+    def encode_module_stub(self, module: PythonModule) -> list[TokenSeq]:
         name_tks = encode_basic(f"# stub: {module.name}\n")
 
         stub_tks = encode_basic(
@@ -285,8 +298,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             overlap=self.ref_chunk_overlap,
             add_bos=self.add_truncate_bos,
         )
-        for tks in chunks:
-            yield name_tks + tks
+        return [name_tks + tks for tks in chunks]
 
 
 def has_change(tks: TokenSeq) -> bool:

@@ -513,7 +513,7 @@ class TruncateAt(enum.Enum):
 
 def break_into_chunks(
     tks: TokenSeq, chunk_size: int, overlap: int, add_bos: bool
-) -> list[list[int]]:
+) -> list[TokenSeq]:
     # break the token sequence into chunks of size chunk_size
     chunks = list[TokenSeq]()
     for i in range(0, len(tks), chunk_size - overlap):

@@ -321,3 +321,26 @@ def batched_map(
         for i, y in zip(ids, f(batch)):
             outputs[i] = y
     return [outputs[i] for i in range(len(xs))]
+
+
+TStamp = TypeVar("TStamp")
+
+
+class TimedCache(Generic[T1, T2, TStamp]):
+    """Store the time-stamped results to avoid recomputation."""
+
+    def __init__(self) -> None:
+        self.cache = dict[T1, tuple[TStamp, T2]]()
+
+    def cached(self, key: T1, stamp: TStamp, f: Callable[[], T2]) -> T2:
+        match self.cache.get(key):
+            case (s, value) if stamp == s:
+                return value
+            case _:
+                value = f()
+                self.set(key, value, stamp)
+                return value
+
+    def set(self, key: T1, value: T2, stamp: TStamp) -> None:
+        self.cache.pop(key, None)
+        self.cache[key] = (stamp, value)

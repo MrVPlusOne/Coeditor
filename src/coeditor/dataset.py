@@ -1,4 +1,5 @@
 import numpy as np
+from coeditor.encoders import BasicQueryEditEncoder
 from coeditor.encoding import (
     AnalysisBasedEditEncoder,
     Del_id,
@@ -94,7 +95,7 @@ def _process_commits(
         warnings.warn(f"Unable to process project: {root}\nError: {e}")
         return []
     tk_edits = list()
-    if isinstance(encoder, AnalysisBasedEditEncoder):
+    if isinstance(encoder, AnalysisBasedEditEncoder) or isinstance(encoder, BasicQueryEditEncoder):
         tk_edits.extend(encoder.encode_pedits(edits, include_additions))
     else:
         for pe in edits:

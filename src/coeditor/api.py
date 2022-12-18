@@ -41,26 +41,6 @@ from spot.static_analysis import (
 import textwrap
 
 
-class TimedCache(Generic[T1, T2]):
-    """Store the time-stamped results to avoid recomputation."""
-
-    def __init__(self) -> None:
-        self.cache = dict[T1, tuple[str, T2]]()
-
-    def cached(self, key: T1, stamp: str, f: Callable[[], T2]) -> T2:
-        match self.cache.get(key):
-            case (s, value) if stamp == s:
-                return value
-            case _:
-                value = f()
-                self.set(key, value, stamp)
-                return value
-
-    def set(self, key: T1, value: T2, stamp: str) -> None:
-        self.cache.pop(key, None)
-        self.cache[key] = (stamp, value)
-
-
 @dataclass
 class ChangeDetectionConfig:
     untracked_as_additions: bool = True
@@ -181,6 +161,7 @@ class EditPredictionService:
         self.prev_cache = TimedCache()
         self.now_cache = TimedCache()
         self.parse_cache = TimedCache()
+        self.stub_cache = TimedCache()
         self.tlogger = TimeLogger()
 
     def suggest_edit(
@@ -234,7 +215,9 @@ class EditPredictionService:
             case _:
                 elem_change = Added(elem) if this_file_changed else Modified(elem, elem)
         with timed("encode edits"):
-            qedits = list(self.encoder.encode_pedit(pedit, queries=[elem_change]))
+            qedits = list(
+                self.encoder.encode_pedit(pedit, self.stub_cache, queries=[elem_change])
+            )
             if qedits[0].tk_pedit.module_stubs:
                 print("stub files:", qedits[0].tk_pedit.module_stubs.keys())
             assert len(qedits) == 1
