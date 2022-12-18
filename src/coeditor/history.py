@@ -134,7 +134,7 @@ def show_change(
 
 
 def empty_module(mname: ModuleName) -> PythonModule:
-    return PythonModule.from_cst(cst.Module([]), mname)
+    return PythonModule.from_cst(cst.Module([]), mname, False)
 
 
 def parse_cst_module(code: str) -> cst.Module:
@@ -324,7 +324,7 @@ class ProjectEdit:
         before: PythonProject,
         code_changes: Mapping[ModuleName, str | None],
         symlinks: Mapping[ModuleName, ModuleName] = {},
-        src2module: Callable[[str], cst.Module | None] = parse_cst_module,
+        remove_comments: bool = True,
         commit_info: "CommitInfo | None" = None,
     ) -> "ProjectEdit":
         mod_changes = dict[ModuleName, PythonModule | None]()
@@ -333,9 +333,10 @@ class ProjectEdit:
                 mod_changes[mname] = None
             else:
                 try:
-                    if (m := src2module(new_code)) is None:
-                        continue
-                    mod_changes[mname] = PythonModule.from_cst(m, mname)
+                    m = cst.parse_module(new_code)
+                    mod_changes[mname] = PythonModule.from_cst(
+                        m, mname, remove_comments
+                    )
                 except (cst.ParserSyntaxError, cst.CSTValidationError):
                     continue
         return ProjectEdit.from_module_changes(
@@ -360,7 +361,7 @@ def project_from_commit(
     discard_bad_files: bool = True,
     file_filter: Callable[[Path], bool] = lambda p: True,
     ignore_dirs: set[str] = PythonProject.DefaultIgnoreDirs,
-    src2module: Callable[[str], cst.Module | None] = parse_cst_module,
+    drop_comments: bool = True,
     max_workers: int | None = None,
 ) -> PythonProject:
     """Get the project at a given commit.
@@ -397,9 +398,7 @@ def project_from_commit(
         #     continue
         src_text = file_content_from_commit(project_dir, commit, str(src))
         try:
-            mod = src2module(src_text)
-            if mod is None:
-                continue
+            mod = cst.parse_module(src_text)
         except (cst.ParserSyntaxError, cst.CSTValidationError):
             if discard_bad_files:
                 continue
@@ -421,6 +420,8 @@ def project_from_commit(
     py_modules = pmap(
         PythonModule.from_cst,
         list(cst_modules.values()),
+        list(cst_modules.keys()),
+        [drop_comments] * len(cst_modules),
         desc="Creating Python Modules",
         max_workers=max_workers,
         tqdm_args={"disable": max_workers == 0},
@@ -493,7 +494,7 @@ def get_commit_history(
 def edits_from_commit_history(
     project_dir: Path,
     history: Sequence[CommitInfo],
-    src2module: Callable[[str], cst.Module | None] = parse_cst_module,
+    drop_comments: bool = True,
     ignore_dirs=PythonProject.DefaultIgnoreDirs,
 ) -> Iterator[ProjectEdit]:
     """Incrementally compute the edits to a project from the git history.
@@ -507,7 +508,9 @@ def edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     commit_now = history[-1]
-    project = project_from_commit(project_dir, commit_now.hash, src2module=src2module)
+    project = project_from_commit(
+        project_dir, commit_now.hash, drop_comments=drop_comments
+    )
 
     for commit_next in reversed(history[:-1]):
         # get changed files
@@ -538,6 +541,7 @@ def edits_from_commit_history(
             project,
             code_changes,
             commit_info=commit_next,
+            remove_comments=drop_comments,
         )
         project = edit.after
         commit_now = commit_next

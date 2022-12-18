@@ -13,7 +13,9 @@ from coeditor.encoding import (
 )
 
 from coeditor.history import (
+    Added,
     Modified,
+    ModuleEdit,
     ProjectEdit,
     file_content_from_commit,
     get_change_path,
@@ -32,6 +34,7 @@ from spot.static_analysis import (
     PythonProject,
     remove_comments,
 )
+import textwrap
 
 
 class TimedCache(Generic[T1, T2]):
@@ -40,11 +43,13 @@ class TimedCache(Generic[T1, T2]):
     def __init__(self) -> None:
         self.cache = dict[T1, tuple[str, T2]]()
 
-    def get(self, key: T1, stamp: str) -> T2 | None:
+    def cached(self, key: T1, stamp: str, f: Callable[[], T2]) -> T2:
         match self.cache.get(key):
-            case None:
-                return None
             case (s, value) if stamp == s:
+                return value
+            case _:
+                value = f()
+                self.set(key, value, stamp)
                 return value
 
     def set(self, key: T1, value: T2, stamp: str) -> None:
@@ -115,25 +120,31 @@ class ChangeDetectionConfig:
                     prev_module2file[get_module_path(path1)] = path1
 
         prev_modules = dict[ModuleName, PythonModule]()
-        for mname, path in prev_module2file.items():
-            if (m := prev_cache.get(mname, commit_stamp)) is None:
-                cst_m = cst.parse_module(get_prev_content(path))
-                m = PythonModule.from_cst(cst_m, mname, self.drop_comments)
-            prev_cache.set(mname, m, commit_stamp)
-            prev_modules[mname] = m
+        for mname, file_prev in prev_module2file.items():
+            prev_modules[mname] = prev_cache.cached(
+                mname,
+                commit_stamp,
+                lambda: PythonModule.from_cst(
+                    cst.parse_module(get_prev_content(file_prev)),
+                    mname,
+                    self.drop_comments,
+                ),
+            )
 
         now_modules = dict[ModuleName, PythonModule]()
-        for mname, path in current_module2file.items():
-            if path is None:
+        for mname, file_now in current_module2file.items():
+            if file_now is None:
                 continue
-            path = project_root / path
-            mtime = str(os.stat(path).st_mtime)
-            (project_root / path).read_text()
-            if (m := now_cache.get(mname, mtime)) is None:
-                cst_m = cst.parse_module(path.read_text())
-                m = PythonModule.from_cst(cst_m, mname, self.drop_comments)
-            now_cache.set(mname, m, mtime)
-            now_modules[mname] = m
+            path_now = project_root / file_now
+            mtime = str(os.stat(path_now).st_mtime)
+            (project_root / path_now).read_text()
+            now_modules[mname] = now_cache.cached(
+                mname,
+                mtime,
+                lambda: PythonModule.from_cst(
+                    cst.parse_module(path_now.read_text()), mname, self.drop_comments
+                ),
+            )
 
         prev_project = PythonProject.from_modules(
             project_root.resolve(),
@@ -184,11 +195,13 @@ class EditPredictionService:
         with timed("get target element"):
             mname = PythonProject.rel_path_to_module_name(file.relative_to(project))
             stamp = str(os.stat(file).st_mtime)
-            if (mod := self.parse_cache.get(mname, stamp)) is None:
-                mod = PythonModule.from_cst(
+            mod = self.parse_cache.cached(
+                mname,
+                stamp,
+                lambda: PythonModule.from_cst(
                     cst.parse_module(file.read_text()), mname, drop_comments=False
-                )
-                self.parse_cache.set(mname, mod, stamp)
+                ),
+            )
             elem = get_elem_by_line(mod, line)
             if elem is None:
                 raise ValueError(
@@ -200,17 +213,26 @@ class EditPredictionService:
 
         with timed("construct project edit"):
             pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
+            this_file_changed = mname in pedit.changes
             if mname not in pedit.after.modules:
-                pedit.after.modules[mname] = PythonModule.from_cst(
-                    mod.tree, mname, self.config.drop_comments
+                this_module = self.now_cache.cached(
+                    mname,
+                    stamp,
+                    lambda: PythonModule.from_cst(
+                        mod.tree, mname, self.config.drop_comments
+                    ),
                 )
+                pedit.after.modules[mname] = this_module
+                pedit.changes[mname] = ModuleEdit.from_no_change(this_module)
         match [c for c in pedit.all_elem_changes() if get_change_path(c) == elem.path]:
             case [Modified(PythonFunction(), PythonFunction()) as mf]:
                 elem_change = cast(Modified[PythonFunction], mf)
             case _:
-                elem_change = Modified(elem, elem)
+                elem_change = Added(elem) if this_file_changed else Modified(elem, elem)
         with timed("encode edits"):
             qedits = list(self.encoder.encode_pedit(pedit, queries=[elem_change]))
+            if qedits[0].tk_pedit.module_stubs:
+                print("stub files:", qedits[0].tk_pedit.module_stubs.keys())
             assert len(qedits) == 1
             batches = edits_to_batches([qedits], self.batch_args)
             assert len(batches) == 1
@@ -226,7 +248,7 @@ class EditPredictionService:
             }
             input_tks = batch["input_ids"][0]
             references = batch["references"]
-            output_prefix, _ = split_label_by_post_edit_line(
+            output_prefix, output_truth = split_label_by_post_edit_line(
                 batch["labels"][0], cursor_offset
             )
             out_tks = self.model.generate(
@@ -245,16 +267,26 @@ class EditPredictionService:
             print("=" * 10, "Predicted code change", "=" * 10)
             print(show_change(pred_change))
 
-        if log_file is not None:
-            with log_file.open("w") as f:
-                print(f"{cursor_offset = }", file=f)
-                print(f"{len(input_tks) = }", file=f)
-                print(f"{len(references) = }", file=f)
-                print("User prefix:", decode_tokens(output_prefix), file=f)
-                assert (
-                    not self.batch_args.shuffle_extra_ids
-                ), "Ids cannot be shuffled for this to work for now"
-                print(qedits[0].show_prediction(out_tks), file=f)
+        if log_file is None:
+            return
+        header = lambda s: "=" * 10 + s + "=" * 10
+        indent = lambda s: textwrap.indent(s, "    ")
+        with log_file.open("w") as f:
+            print(f"{cursor_offset = }", file=f)
+            print(f"{len(input_tks) = }", file=f)
+            print(f"{len(references) = }", file=f)
+            print(header("User prefix"), file=f)
+            print(indent(decode_tokens(output_prefix)), file=f)
+            print(header("Ground truth"), file=f)
+            print(indent(decode_tokens(output_truth)), file=f)
+            print(header("Predicted"), file=f)
+            print(indent(decode_tokens(out_tks[len(output_prefix) + 1 :])), file=f)
+            print(header("Input"), file=f)
+            print(indent(decode_tokens(input_tks)), file=f)
+            print(header("References"), file=f)
+            for i, ref in enumerate(references):
+                print("-" * 6 + f"Reference {i}" + "-" * 6, file=f)
+                print(indent(decode_tokens(ref)), file=f)
 
     def compute_offset(self, mod: PythonModule, elem: PythonFunction, line: int):
         "Compute the relative offset of a given line in the body of a function."
@@ -302,6 +334,6 @@ def split_label_by_post_edit_line(
             line_counter += 1
         elif tk == Del_id:
             line_counter -= 1
-        if line_counter <= post_line + 1:
+        if line_counter <= post_line:
             split_pos = pos
     return label_tks[:split_pos], label_tks[split_pos:]

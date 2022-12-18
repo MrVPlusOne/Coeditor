@@ -39,6 +39,7 @@ import numbers
 import ast
 import warnings
 import math
+import itertools
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")

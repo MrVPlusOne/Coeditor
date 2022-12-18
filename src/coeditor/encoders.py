@@ -17,7 +17,15 @@ from coeditor.encoding import (
     truncate_output_tks,
     truncate_section,
 )
-from spot.static_analysis import ProjectPath, PythonElem, PythonFunction, PythonVariable
+from spot.static_analysis import (
+    ModuleName,
+    ProjectPath,
+    PythonElem,
+    PythonFunction,
+    PythonModule,
+    PythonVariable,
+    stub_from_module,
+)
 from .history import (
     Added,
     Change,
@@ -42,6 +50,7 @@ class TkProjectEdit(Generic[TQueryEdit]):
 
     tk_references: Mapping[ProjectPath, Sequence[TokenSeq]]
     qedits: Mapping[ProjectPath, TQueryEdit]
+    module_stubs: Mapping[ModuleName, Sequence[TokenSeq]] | None = None
 
     @property
     def stats(self) -> Mapping[str, int]:
@@ -92,12 +101,13 @@ class BasicTkQueryEdit(TokenizedEdit):
 @dataclass
 class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
     "Only use changed elements in a commit as references."
-    VERSION = 2
+    VERSION = 3
     max_ref_tks: int = 256
-    ref_block_overlap: int = 0
-    max_ref_blocks: int = 5
+    ref_chunk_overlap: int = 16
+    max_chunks_per_ref: int = 5
     max_query_tks: int = 512
     max_output_tks: int = 256
+    add_stubs: bool = True
     add_truncate_bos: bool = True
     collapse_unchanged: bool = True
 
@@ -105,7 +115,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         self,
         pedit: ProjectEdit,
         include_additions: bool = False,
-        queries: Iterable[Modified[PythonFunction]] | None = None,
+        queries: Iterable[Change[PythonFunction]] | None = None,
     ) -> Iterable[BasicTkQueryEdit]:
         """
         Args:
@@ -113,7 +123,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             modified functions in the pedit will be used as queries.
 
         """
-        ctx_enc = CtxEncoder(pedit, self.collapse_unchanged, indent_in_class=False)
+        ctx_enc = CtxEncoder(pedit, self.collapse_unchanged)
         moved = find_moved(pedit.all_elem_changes())
         moved_paths = {a for a, b in moved} | {b for a, b in moved}
         after_to_mf = {
@@ -121,26 +131,44 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             for (a, b), change in moved.items()
             if (mf := to_modified_function(change))
         }
+        module_stubs = None
+        if self.add_stubs:
+            module_stubs = {
+                name: list(self.encode_module_stub(pedit.after.modules[name]))[
+                    : self.max_chunks_per_ref
+                ]
+                for name in pedit.changes
+            }
         tk_refs = {
-            get_change_path(c): self.encode_elem_change(c, ctx_enc)
+            get_change_path(c): list(self.encode_elem_change(c, ctx_enc))[
+                : self.max_chunks_per_ref
+            ]
             for c in pedit.all_elem_changes()
             if get_change_path(c) not in moved_paths
         }
         for (d, a), change in moved.items():
-            tk_refs[d] = self.encode_elem_move(d, a, change)
+            tk_refs[d] = list(self.encode_elem_move(d, a, change))[
+                : self.max_chunks_per_ref
+            ]
 
         query_data = dict[ProjectPath, BasicTkQueryEdit]()
-        tk_pedit = TkProjectEdit(tk_references=tk_refs, qedits=query_data)
+        tk_pedit = TkProjectEdit(
+            tk_references=tk_refs, qedits=query_data, module_stubs=module_stubs
+        )
         for_training = queries is None
         if queries is None:
             queries = pedit.modified_functions(
                 ast_must_change=True, body_must_change=True
             )
         for mf in queries:
+            assert not isinstance(mf, Deleted)
             if mf.after.path in moved_paths:
                 mf = after_to_mf[mf.after.path]
             body_change = mf.map(lambda x: x.header_body_code[1])
-            if count_lines(body_change.before) > 99:
+            if (
+                isinstance(body_change, Modified)
+                and count_lines(body_change.before) > 99
+            ):
                 if for_training:
                     continue  # skip large functions during training
                 else:
@@ -185,8 +213,8 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
 
     def encode_elem_change(
         self, c: Change[PythonElem], ctx_encoder: CtxEncoder
-    ) -> list[TokenSeq]:
-        path_tks = change_to_tokens(c.map(lambda e: f"# {e.path.pop()}"))
+    ) -> Iterable[TokenSeq]:
+        path_tks = change_to_tokens(c.map(lambda e: f"# {e.path}"))
         path_tks = truncate_section(
             path_tks,
             TruncateAt.Left,
@@ -202,23 +230,26 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         chunks = break_into_chunks(
             change_tks,
             self.max_ref_tks - len(path_tks),
-            overlap=self.ref_block_overlap,
+            overlap=self.ref_chunk_overlap,
             add_bos=self.add_truncate_bos,
         )
-        return [path_tks + c for c in chunks if has_change(c)][: self.max_ref_blocks]
+        for i, tks in enumerate(chunks):
+            to_check = tks if i == 0 else tks[self.ref_chunk_overlap :]
+            if has_change(to_check):
+                yield path_tks + tks
 
     def encode_elem_move(
         self,
         old_path: ProjectPath,
         new_path: ProjectPath,
         change: Modified[PythonElem],
-    ) -> list[TokenSeq]:
+    ) -> Iterable[TokenSeq]:
         def elem2code(e: PythonElem) -> str:
             if self.collapse_unchanged:
                 code = show_expr(collapse_code(e.tree), quoted=False)
             else:
                 code = e.code
-            return dedent(code)
+            return code
 
         code_change = change.map(elem2code)
         code_tks = change_to_tokens(code_change)
@@ -231,17 +262,31 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             self.max_ref_tks // 2,
             add_bos=self.add_truncate_bos,
         )
-        # all_tks = self.maybe_wrap_bos(prefix_tks + code_tks + [Newline_id])
-        # all_tks = truncate_section(
-        #     all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
-        # )
         chunks = break_into_chunks(
             code_tks,
             self.max_ref_tks - len(prefix_tks),
-            overlap=self.ref_block_overlap,
+            overlap=self.ref_chunk_overlap,
             add_bos=self.add_truncate_bos,
         )
-        return [prefix_tks + c for c in chunks if has_change(c)]
+        for i, tks in enumerate(chunks):
+            to_check = tks if i == 0 else tks[self.ref_chunk_overlap :]
+            if has_change(to_check):
+                yield prefix_tks + tks
+
+    def encode_module_stub(self, module: PythonModule) -> Iterable[TokenSeq]:
+        name_tks = encode_basic(f"# stub: {module.name}\n")
+
+        stub_tks = encode_basic(
+            stub_from_module(module.tree, lightweight=False, keep_types=True).code
+        )
+        chunks = break_into_chunks(
+            stub_tks,
+            self.max_ref_tks - len(name_tks),
+            overlap=self.ref_chunk_overlap,
+            add_bos=self.add_truncate_bos,
+        )
+        for tks in chunks:
+            yield name_tks + tks
 
 
 def has_change(tks: TokenSeq) -> bool:

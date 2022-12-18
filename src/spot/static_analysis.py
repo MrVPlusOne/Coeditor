@@ -1714,7 +1714,11 @@ def as_access_chain(node: cst.CSTNode) -> list[str] | None:
 
 
 def stub_from_module(
-    m: cst.Module, lightweight=True, rm_comments=True, rm_imports=True
+    m: cst.Module,
+    lightweight=True,
+    rm_comments=True,
+    rm_imports=True,
+    keep_types=False,
 ) -> cst.Module:
     """Generate a stub module from normal python code."""
     if rm_comments:
@@ -1722,9 +1726,9 @@ def stub_from_module(
     if rm_imports:
         m, _ = remove_imports(m)
     if lightweight:
-        m = m.visit(LightStubGenerator())
+        m = m.visit(LightStubGenerator(keep_types=keep_types))
     else:
-        m = m.visit(StubGenerator())
+        m = m.visit(StubGenerator(keep_types=keep_types))
     m = remove_empty_lines(m)
     return m
 
@@ -1742,8 +1746,9 @@ class LightStubGenerator(cst.CSTTransformer):
 
     OMIT = cst.SimpleStatementLine([cst.Expr(cst.Ellipsis())])
 
-    def __init__(self):
+    def __init__(self, keep_types: bool):
         self.nest_level = 0
+        self.keep_types = keep_types
 
     def visit_ClassDef(self, node: cst.ClassDef):
         self.nest_level += 1
@@ -1760,6 +1765,8 @@ class LightStubGenerator(cst.CSTTransformer):
         return cst.RemoveFromParent()
 
     def leave_Annotation(self, node, updated: cst.Annotation):
+        if self.keep_types:
+            return updated
         return updated.with_changes(annotation=cst.Ellipsis())
 
     def leave_AnnAssign(self, node, updated: cst.AnnAssign):
@@ -1819,7 +1826,8 @@ class StubGenerator(cst.CSTTransformer):
 
     OMIT = cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
 
-    def __init__(self):
+    def __init__(self, keep_types: bool):
+        self.keep_types = keep_types
         self.ns_stack = list[ClassNamespace]()
         self.nest_level = 0
 
@@ -1855,23 +1863,27 @@ class StubGenerator(cst.CSTTransformer):
         return updated.with_changes(body=StubGenerator.OMIT, returns=None)
 
     def leave_Annotation(self, node, updated: cst.Annotation):
+        if self.keep_types:
+            return updated
         return updated.with_changes(annotation=cst.Ellipsis())
 
     def leave_Param(self, node, updated: cst.Param):
         # remove parameter type annotation and default value
+        if self.keep_types:
+            return updated
         if updated.default is not None:
             updated = updated.with_changes(default=cst.Ellipsis())
         return updated.with_changes(annotation=None)
 
     def leave_AnnAssign(self, node, updated: cst.AnnAssign):
         # omit rhs of annotated assignments (if any)
-        if self.nest_level > 0 and updated.value is not None:
+        if updated.value is not None:
             updated = updated.with_changes(value=cst.Ellipsis())
+        if self.keep_types:
+            return updated
         return mask_assign_type(updated)
 
     def leave_Assign(self, node, updated: cst.AnnAssign):
-        if self.nest_level == 0:
-            return updated
         return updated.with_changes(value=cst.Ellipsis())
 
     def leave_Attribute(self, node, updated: cst.Assign):

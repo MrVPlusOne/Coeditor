@@ -10,7 +10,7 @@ from coeditor.model import (
     compute_loss_metrics,
     wrap_bos,
 )
-from spot.static_analysis import ProjectPath
+from spot.static_analysis import ModuleName, ProjectPath
 from spot.utils import cprint, groupby, scalar_stats
 
 from .common import *
@@ -942,6 +942,13 @@ def edits_to_batches(
         input_tks_list = [x[0] for x in processed]
         output_tks_list = [x[1] for x in processed]
 
+        stubs = list[tuple[ModuleName, TokenSeq]]()
+        if pedit.module_stubs:
+            stubs = [
+                (mname, seg)
+                for mname, segs in pedit.module_stubs.items()
+                for seg in segs
+            ]
         queries_left = list(range(len(edit_group)))
 
         while queries_left:
@@ -954,17 +961,19 @@ def edits_to_batches(
             n_ref = round(
                 len(references) * (1 - args.max_ref_dropout * random.random())
             )
-            ref_left = list(references)
-            random.shuffle(ref_left)
+            all_refs = references
+            random.shuffle(all_refs)
+            all_refs = stubs + all_refs[:n_ref]
             ref_size_sum = 0
-            ref_selected = list[tuple[ProjectPath, TokenSeq]]()
-            while ref_left and len(ref_selected) < n_ref:
-                ref = ref_left.pop()
+            ref_selected = list[tuple[ProjectPath | ModuleName, TokenSeq]]()
+            for ref in all_refs:
                 if ref_size_sum + len(ref[1]) <= args.max_total_ref_tks:
                     ref_selected.append(ref)
                     ref_size_sum += len(ref[1])
                 else:
                     break
+            # sort by path for eaxy visualization
+            ref_selected.sort(key=lambda x: str(x[0]))
 
             # find the maximal batch size
             max_bsize = min(len(queries_left), args.max_queries)
