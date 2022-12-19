@@ -133,6 +133,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             args=eval_batch_args,
             shuffle=False,
             desc="Eval Epoch",
+            tqdm_args={"disable": True},
         )
 
         model = self
@@ -221,7 +222,9 @@ class RetrievalEditorModel(T5PreTrainedModel):
         previous = core.training
         core.eval()
         metrics = dict[str, WeightedSum]()
-        for batch in tqdm(dataloader, desc="evaluate loss", unit="batch"):
+        for batch in tqdm(
+            dataloader, desc="evaluate loss", unit="batch", smoothing=0.0
+        ):
             batch["input_ids"] = batch["input_ids"].to(core.device)
             batch["labels"] = batch["labels"].to(core.device)
             outputs = core.forward(**batch)
@@ -1174,13 +1177,16 @@ def edits_to_dataloader(
     args: BatchArgs,
     desc: str,
     shuffle: bool = False,
+    tqdm_args: dict | None = None,
 ):
     # if args.use_only_modified:
     #     edits = [e for e in edits if isinstance(e.change_type, Modified)]
     assert edits
     edit_groups = list(groupby(edits, lambda e: id(e.tk_pedit)).values())
     assert edit_groups
-    return _BatchSampler(edit_groups, args, shuffle=shuffle, desc=desc)
+    return _BatchSampler(
+        edit_groups, args, shuffle=shuffle, desc=desc, tqdm_args=tqdm_args
+    )
 
 
 def pad_token_seqs(seqs: Sequence[TokenSeq], pad_id=None) -> LongTensor:
