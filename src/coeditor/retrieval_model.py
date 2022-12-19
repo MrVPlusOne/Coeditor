@@ -256,8 +256,10 @@ class RetrievalEditorModel(T5PreTrainedModel):
         eval_edits = eval_data.all_edits()
         edit_groups = list(groupby(eval_edits, lambda e: id(e.tk_pedit)).values())
         eval_edits = join_list(edit_groups)
-        eval_loader = _BatchSampler(edit_groups, batch_args, shuffle=False, desc="Decoding Epoch")
-        
+        eval_loader = _BatchSampler(
+            edit_groups, batch_args, shuffle=False, desc="Decoding Epoch"
+        )
+
         gen_args = dec_args.to_model_args()
         input_ids = []
         labels = []
@@ -947,10 +949,10 @@ def compute_bias(
 
 
 def retrieval_cost_model(ref_size: int, query_size: int, output_size: int) -> float:
-    a = 1 / 128
+    a = 1 / 256
     return (
         a * (ref_size + query_size) * (query_size + output_size)
-        + 2 * ref_size
+        + ref_size
         + query_size
         + 2 * output_size
     )
@@ -963,7 +965,7 @@ class BatchArgs:
     min_queires: int = 1
     max_queries: int = 8
     max_ref_tks: int = 512
-    max_total_ref_tks: int = 50 * 256
+    max_total_ref_tks: int = 8000
     max_ref_dropout: float = 1.0
     shuffle_extra_ids: bool = True
     use_only_modified: bool = True
@@ -980,7 +982,8 @@ class BatchArgs:
     @staticmethod
     def eval_default() -> "BatchArgs":
         return BatchArgs(
-            max_total_ref_tks=50 * 512,
+            max_total_ref_tks=8000 * 2,
+            max_queries=32,
             max_ref_dropout=0.0,
             shuffle_extra_ids=False,
         )
@@ -1096,8 +1099,12 @@ def edit_groups_to_batches(
             if cost > cost_limit and not warned_batch_size:
                 warned_batch_size = True
                 warnings.warn("Batch cost limit is too small.")
-            if cost + current_cost <= cost_limit:
+            if (
+                cost + current_cost <= cost_limit
+                and len(current_batch) < args.max_queries
+            ):
                 current_batch.append(row)
+                current_cost += cost
             else:
                 yield pack_batch(current_batch)
                 current_batch = [row]
