@@ -271,7 +271,7 @@ class EditPredictionService:
 
     def compute_offset(self, mod: PythonModule, elem: PythonFunction, line: int):
         "Compute the relative offset of a given line in the body of a function."
-        origin_offset = line - mod.location_map[elem.tree.body].start.line
+        origin_offset = line - mod.location_map[elem.tree.body].start.line + 1
         if not self.config.drop_comments:
             return origin_offset
         else:

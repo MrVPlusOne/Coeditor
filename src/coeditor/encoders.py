@@ -34,6 +34,7 @@ from .history import (
     ProjectEdit,
     get_change_path,
     parse_cst_module,
+    show_change,
     to_modified_function,
 )
 from .common import *
@@ -69,6 +70,7 @@ class BasicTkQueryEdit(TokenizedEdit):
     path: ProjectPath
     change_type: Change[None]
     tk_pedit: TkProjectEdit["BasicTkQueryEdit"]
+    is_rename_update: bool | None = None
 
     @property
     def main_tks(self):
@@ -92,9 +94,14 @@ class BasicTkQueryEdit(TokenizedEdit):
         ]
 
     def stats(self) -> Mapping[str, int | float]:
+        if self.is_rename_update is None:
+            is_rename_update = float("nan")
+        else:
+            is_rename_update = int(self.is_rename_update)
         return {
             "input_tks": len(self.input_tks),
             "output_tks": len(self.output_tks),
+            "is_rename_update": is_rename_update,
         } | self.tk_pedit.stats
 
 
@@ -127,7 +134,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         pedit: ProjectEdit,
         stub_cache: TimedCache[ModuleName, list[TokenSeq], int],
         include_additions: bool = False,
-        queries: Iterable[Change[PythonFunction]] | None = None,
+        queries: Sequence[Change[PythonFunction]] | None = None,
     ) -> Iterable[BasicTkQueryEdit]:
         """
         Args:
@@ -136,11 +143,11 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
 
         """
         ctx_enc = CtxEncoder(pedit, self.collapse_unchanged)
-        moved = find_moved(pedit.all_elem_changes())
-        moved_paths = {a for a, b in moved} | {b for a, b in moved}
+        renamed = find_renamed(pedit.all_elem_changes())
+        renamed_paths = {a for a, b in renamed} | {b for a, b in renamed}
         after_to_mf = {
             b: mf
-            for (a, b), change in moved.items()
+            for (a, b), change in renamed.items()
             if (mf := to_modified_function(change))
         }
         module_stubs = None
@@ -157,9 +164,9 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 : self.max_chunks_per_ref
             ]
             for c in pedit.all_elem_changes()
-            if get_change_path(c) not in moved_paths
+            if get_change_path(c) not in renamed_paths
         }
-        for (d, a), change in moved.items():
+        for (d, a), change in renamed.items():
             tk_refs[d] = list(self.encode_elem_move(d, a, change))[
                 : self.max_chunks_per_ref
             ]
@@ -170,12 +177,23 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         )
         for_training = queries is None
         if queries is None:
-            queries = pedit.modified_functions(
-                ast_must_change=True, body_must_change=True
+            queries = list(
+                pedit.modified_functions(ast_must_change=True, body_must_change=True)
             )
+        renamed_updates = {
+            get_change_path(c)
+            for c in find_rename_updates(
+                renamed, [q for q in queries if isinstance(q, Modified)]
+            )
+        }
+        # for r in renamed.values():
+        #     if isinstance(r.after, PythonVariable) and r.before.name != r.after.name:
+        #         print("Renamed var:", r.after.path)
+        #         print(show_change(r))
+        #         print("Rename updates:", renamed_updates)
         for mf in queries:
             assert not isinstance(mf, Deleted)
-            if mf.after.path in moved_paths:
+            if mf.after.path in renamed_paths:
                 mf = after_to_mf[mf.after.path]
             body_change = mf.map(lambda x: x.header_body_code[1])
             if (
@@ -220,6 +238,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 path=path,
                 change_type=mf.map(lambda _: None),
                 tk_pedit=tk_pedit,
+                is_rename_update=path in renamed_updates,
             )
         if query_data:
             yield from query_data.values()
@@ -259,7 +278,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
     ) -> Iterable[TokenSeq]:
         def elem2code(e: PythonElem) -> str:
             if self.collapse_unchanged:
-                code = show_expr(collapse_code(e.tree), quoted=False)
+                code = show_expr(collapse_code(e.tree))
             else:
                 code = e.code
             return code
@@ -305,12 +324,23 @@ def has_change(tks: TokenSeq) -> bool:
     return Add_id in tks or Del_id in tks
 
 
-def find_moved(
+def find_renamed(
     changes: Iterable[Change[PythonElem]],
 ):
+    """Use a simple heuristic to guess renamed elements."""
+
     def get_body_code(e: PythonElem):
         if isinstance(e, PythonVariable):
-            return dedent(e.code)
+            rhs_list = list(e.iter_rhs())
+            if rhs_list:
+                # requires in the same parent and have the same rhs exprs
+                path_str = cst.SimpleString(repr(str(e.path.pop())))
+                lines = [cst.SimpleStatementLine([cst.Expr(path_str)])]
+                rhs_lines = [cst.SimpleStatementLine([cst.Expr(x)]) for x in rhs_list]
+                return cst.Module(lines + rhs_lines).code
+            else:
+                # won't match anything else
+                return repr(str(e.path))
         assert isinstance(e, PythonFunction)
         return dedent(e.header_body_code[1])
 
@@ -334,3 +364,31 @@ def find_moved(
             else:
                 deleted[code] = path
     return moved
+
+
+def find_rename_updates(
+    rename_map: Mapping[tuple[ProjectPath, ProjectPath], Modified[PythonElem]],
+    changes: Iterable[Modified[PythonElem]],
+) -> Iterable[Modified[PythonElem]]:
+    """Given a map of renamed elements, guess which modifications are caused
+    only by these renamings using a simple heuristic."""
+
+    name_maps = {
+        m.before.name: m.after.name
+        for m in rename_map.values()
+        if m.before.name != m.after.name
+    }
+
+    class RenameSymbols(cst.CSTTransformer):
+        def leave_Name(self, node: "cst.Name", updated: "cst.Name"):
+            if (new_name := name_maps.get(updated.value)) is not None:
+                return cst.Name(new_name)
+            return updated
+
+    for m in changes:
+        tree1 = cast(cst.CSTNode, m.before.tree.visit(RenameSymbols()))
+        tree2 = cast(cst.CSTNode, m.after.tree.visit(RenameSymbols()))
+        code1 = normalize_code_by_ast(show_expr(tree1))
+        code2 = normalize_code_by_ast(show_expr(tree2))
+        if code1 == code2:
+            yield m

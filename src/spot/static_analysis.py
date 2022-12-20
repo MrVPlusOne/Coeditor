@@ -221,6 +221,9 @@ class PythonVariable:
     assignments: list[
         cst.Assign | cst.AnnAssign
     ]  # only record assignments outside of functions
+    wrapped_assignments: list[
+        cst.Assign | cst.AnnAssign
+    ]  # assignments inside functions
 
     def __repr__(self):
         if self.in_class:
@@ -248,11 +251,18 @@ class PythonVariable:
                 break  # the first annotation wins
         return VariableSignature(annot, self.parent_class is not None)
 
-    def get_labels(self) -> Generator[LabelInfo, None, None]:
+    def get_labels(self) -> Iterable[LabelInfo]:
         sig = self.get_signature()
         if sig.annot is not None:
             cat = AnnotCat.ClassAtribute if self.in_class else AnnotCat.GlobalVar
             yield LabelInfo(sig.annot, cat, self.tree)
+
+    def iter_rhs(self) -> Iterable[cst.BaseExpression]:
+        for a in self.assignments + self.wrapped_assignments:
+            if isinstance(a, cst.AnnAssign) and a.value:
+                yield a.value
+            elif isinstance(a, cst.Assign) and a.value:
+                yield a.value
 
 
 PythonElem = PythonFunction | PythonVariable
@@ -1432,11 +1442,14 @@ def _build_python_module(
                     vars.pop(n, None)
                     funcs[n] = e
                     is_new_def = True
-                case PythonVariable(n, assignments=assignments):
+                case PythonVariable(
+                    n, assignments=assignments, wrapped_assignments=wrapped_assignments
+                ):
                     funcs.pop(n, None)
                     if n in vars:
                         assert_eq(vars[n].path, e.path)
                         vars[n].assignments.extend(assignments)
+                        vars[n].wrapped_assignments.extend(wrapped_assignments)
                     else:
                         vars[n] = e
                         is_new_def = True
@@ -1505,11 +1518,13 @@ def _build_python_module(
                 case (_VisitKind.Root, cst.Name(value=n) as tree):
                     # global var assignment
                     var = PythonVariable(
-                        n, ProjectPath(module_name, n), None, tree, [node]
+                        n, ProjectPath(module_name, n), None, tree, [node], []
                     )
                 case (_VisitKind.Class, cst.Name(value=n) as tree) if cls:
                     # initialized outside of methods
-                    var = PythonVariable(n, cls.path.append(n), cls_path, tree, [node])
+                    var = PythonVariable(
+                        n, cls.path.append(n), cls_path, tree, [node], []
+                    )
                 case (
                     _VisitKind.Function,
                     cst.Attribute(
@@ -1517,8 +1532,9 @@ def _build_python_module(
                     ) as tree,
                 ) if cls:
                     # initialized/accessed inside methods
-                    # TODO: figure out how to move the annotation to class scope
-                    var = PythonVariable(n, cls.path.append(n), cls_path, tree, [])
+                    var = PythonVariable(
+                        n, cls.path.append(n), cls_path, tree, [], [node]
+                    )
             if var is not None:
                 self._record_elem(var, node)
             return False
@@ -1535,12 +1551,12 @@ def _build_python_module(
                     case (_VisitKind.Root, cst.Name(value=n) as tree):
                         # global var assignment
                         var = PythonVariable(
-                            n, ProjectPath(module_name, n), None, tree, [node]
+                            n, ProjectPath(module_name, n), None, tree, [node], []
                         )
                     case (_VisitKind.Class, cst.Name(value=n) as tree) if cls:
                         # initialized outside of methods
                         var = PythonVariable(
-                            n, cls.path.append(n), cls_path, tree, [node]
+                            n, cls.path.append(n), cls_path, tree, [node], []
                         )
                     case (
                         _VisitKind.Function,
@@ -1549,7 +1565,9 @@ def _build_python_module(
                         ) as tree,
                     ) if cls:
                         # initialized/accessed inside methods
-                        var = PythonVariable(n, cls.path.append(n), cls_path, tree, [])
+                        var = PythonVariable(
+                            n, cls.path.append(n), cls_path, tree, [], [node]
+                        )
                 if var is not None:
                     self._record_elem(var, node)
             return False
