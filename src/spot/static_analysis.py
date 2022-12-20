@@ -157,7 +157,7 @@ class PythonFunction:
     @cached_property
     def header_lines(self) -> int:
         headerless = self.tree.with_changes(body=cst.IndentedBlock([]))
-        return len(show_expr(headerless, quoted=False).split("\n")) - 1
+        return len(show_expr(headerless).split("\n")) - 1
 
     @cached_property
     def header_body_code(self) -> tuple[str, str]:
@@ -259,7 +259,7 @@ PythonElem = PythonFunction | PythonVariable
 
 
 def show_element(tree: cst.CSTNode, indent: bool) -> str:
-    code = show_expr(tree, quoted=False).strip("\n")
+    code = show_expr(tree).strip("\n")
     if indent:
         code = textwrap.indent(code, "    ")
     return code

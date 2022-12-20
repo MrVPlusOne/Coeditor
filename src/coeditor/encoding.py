@@ -406,7 +406,7 @@ class TokenizedEdit(ABC):
         match mod.body:
             case [cst.FunctionDef() as f]:
                 f = f.with_changes(body=cst.IndentedBlock([]))
-                f_code = show_expr(f, quoted=False)
+                f_code = show_expr(f)
                 header_lines = len(f_code.split("\n")) - 1
                 return self.inline_changes(lines=header_lines)
         return None
@@ -425,7 +425,7 @@ class TokenizedEdit(ABC):
         match mod.body:
             case [cst.FunctionDef() as f]:
                 f = f.with_changes(body=cst.IndentedBlock([]))
-                f_code = show_expr(f, quoted=False)
+                f_code = show_expr(f)
                 header_lines = len(f_code.split("\n")) - 1
                 out_dict = output_ids_as_seqs(self.output_tks)
                 prefix_tks = TokenSeq()

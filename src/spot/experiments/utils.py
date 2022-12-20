@@ -235,7 +235,7 @@ def quote_annotations(m: cst.Module, normalize_types: bool = True) -> cst.Module
                 assert ty is not None
                 text = repr(str(ty.normalized()))
             else:
-                text = repr(show_expr(updated.annotation, quoted=False))
+                text = repr(show_expr(updated.annotation))
             return updated.with_changes(annotation=cst.SimpleString(text))
 
     return m.visit(Rewriter())

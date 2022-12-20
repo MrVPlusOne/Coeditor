@@ -87,22 +87,18 @@ def default_show_diff(before: Any | None, after: Any | None) -> str:
     match before, after:
         case PythonFunction(tree=tree1) as before, PythonFunction(tree=tree2) as after:
             header1 = drop_last_line(
-                show_expr(
-                    tree1.with_changes(body=cst.IndentedBlock([])), quoted=False
-                ).strip()
+                show_expr(tree1.with_changes(body=cst.IndentedBlock([]))).strip()
             )
             header2 = drop_last_line(
-                show_expr(
-                    tree2.with_changes(body=cst.IndentedBlock([])), quoted=False
-                ).strip()
+                show_expr(tree2.with_changes(body=cst.IndentedBlock([]))).strip()
             )
             header_part = (
                 header1
                 if header1 == header2
                 else show_string_diff(header1, header2, max_ctx=None)
             )
-            body1 = show_expr(tree1.body, quoted=False)
-            body2 = show_expr(tree2.body, quoted=False)
+            body1 = show_expr(tree1.body)
+            body2 = show_expr(tree2.body)
             if body1 == body2:
                 body_lines = body1.splitlines()
                 kept_lines = body_lines[:6]
@@ -749,8 +745,8 @@ def find_refactored_calls(
         }
         call_changes = list[tuple[ProjectPath, Modified[cst.Call]]]()
         for k in changed_apis & pre_usages.keys() & pos_usages.keys():
-            call_before = normalize_code_by_ast(show_expr(pre_usages[k], quoted=False))
-            call_after = normalize_code_by_ast(show_expr(pos_usages[k], quoted=False))
+            call_before = normalize_code_by_ast(show_expr(pre_usages[k]))
+            call_after = normalize_code_by_ast(show_expr(pos_usages[k]))
             if call_before != call_after:
                 call_changes.append((k, Modified(pre_usages[k], pos_usages[k])))
         refactorings[path] = call_changes

@@ -360,14 +360,17 @@ class DatasetDecodingResult(Generic[TEdit]):
                 ex_correct = False
             else:
                 expect_calls = {
-                    show_expr(c.after.func, quoted=False): c for _, c in calls
+                    show_expr(
+                        c.after.func,
+                    ): c
+                    for _, c in calls
                 }
                 failed_to_parse += CountedSum(0, len(calls))
 
                 ex_correct = True
                 correct_calls = 0
                 for c in find_calls(mod):
-                    f_str = show_expr(c.func, quoted=False)
+                    f_str = show_expr(c.func)
                     if (expect := expect_calls.pop(f_str, None)) is None:
                         continue
                     correct = code_equal(c, expect.after)

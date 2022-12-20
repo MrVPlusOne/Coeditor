@@ -915,7 +915,7 @@ _EmptyModule = cst.Module([])
 
 
 def show_expr(
-    expr: cst.CSTNode, quoted: bool = True, strip_empty_lines: bool = True
+    expr: cst.CSTNode, quoted: bool = False, strip_empty_lines: bool = True
 ) -> str:
     s = _EmptyModule.code_for_node(expr)
     if strip_empty_lines:

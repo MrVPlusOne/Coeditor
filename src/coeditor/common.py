@@ -267,9 +267,9 @@ def normalize_code_by_ast(code: str) -> str:
 
 def code_equal(code1: str | cst.CSTNode, code2: str | cst.CSTNode) -> bool:
     if isinstance(code1, cst.CSTNode):
-        code1 = show_expr(code1, quoted=False)
+        code1 = show_expr(code1)
     if isinstance(code2, cst.CSTNode):
-        code2 = show_expr(code2, quoted=False)
+        code2 = show_expr(code2)
     code1 = normalize_code_by_ast(code1)
     code2 = normalize_code_by_ast(code2)
     return code1 == code2

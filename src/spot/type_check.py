@@ -174,7 +174,7 @@ def parse_type_str(typ_str: str) -> PythonType:
 
 
 def parse_type_expr(annot: cst.BaseExpression, silent=True) -> PythonType | None:
-    code = show_expr(annot, quoted=False)
+    code = show_expr(annot)
     code = re.sub(r"#.*\n", "", code).replace("\n", "")
     try:
         return parse_type_str(code)
