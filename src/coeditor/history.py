@@ -23,16 +23,15 @@ import copy
 import ast
 from multiprocessing import current_process
 
+E1 = TypeVar("E1", covariant=True)
+
 
 @dataclass
-class Added(Generic[T1]):
-    after: T1
+class Added(Generic[E1]):
+    after: E1
 
-    def map(self, f: Callable[[T1], T2]) -> "Added[T2]":
+    def map(self, f: Callable[[E1], T2]) -> "Added[T2]":
         return Added(f(self.after))
-
-    def to_modified(self, empty: T1) -> "Modified[T1]":
-        return Modified(empty, self.after)
 
     @staticmethod
     def as_char():
@@ -40,14 +39,11 @@ class Added(Generic[T1]):
 
 
 @dataclass
-class Deleted(Generic[T1]):
-    before: T1
+class Deleted(Generic[E1]):
+    before: E1
 
-    def map(self, f: Callable[[T1], T2]) -> "Deleted[T2]":
+    def map(self, f: Callable[[E1], T2]) -> "Deleted[T2]":
         return Deleted(f(self.before))
-
-    def to_modified(self, empty: T1) -> "Modified[T1]":
-        return Modified(self.before, empty)
 
     @staticmethod
     def as_char():
@@ -55,22 +51,19 @@ class Deleted(Generic[T1]):
 
 
 @dataclass
-class Modified(Generic[T1]):
-    before: T1
-    after: T1
+class Modified(Generic[E1]):
+    before: E1
+    after: E1
 
-    def map(self, f: Callable[[T1], T2]) -> "Modified[T2]":
+    def map(self, f: Callable[[E1], T2]) -> "Modified[T2]":
         return Modified(f(self.before), f(self.after))
-
-    def to_modified(self, empty: T1) -> "Modified[T1]":
-        return self
 
     @staticmethod
     def as_char():
         return "M"
 
 
-Change = Added[T1] | Deleted[T1] | Modified[T1]
+Change = Added[E1] | Deleted[E1] | Modified[E1]
 
 
 def default_show_diff(before: Any | None, after: Any | None) -> str:
