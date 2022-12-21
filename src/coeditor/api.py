@@ -38,6 +38,11 @@ from spot.static_analysis import (
     PythonProject,
     remove_comments,
 )
+from transformers.generation_utils import (
+    GreedySearchOutput,
+    BeamSearchOutput,
+    BeamSearchEncoderDecoderOutput,
+)
 import textwrap
 
 
@@ -157,6 +162,7 @@ class EditPredictionService:
         self.encoder = encoder
         self.dec_args = dec_args
         self.config = config
+        self.show_max_solutions = 3
 
         self.prev_cache = TimedCache()
         self.now_cache = TimedCache()
@@ -212,8 +218,10 @@ class EditPredictionService:
         match [c for c in pedit.all_elem_changes() if get_change_path(c) == elem.path]:
             case [Modified(PythonFunction(), PythonFunction()) as mf]:
                 elem_change = cast(Modified[PythonFunction], mf)
+            case [Added(PythonFunction()) as mf]:
+                elem_change = cast(Added[PythonFunction], mf)
             case _:
-                elem_change = Added(elem) if this_file_changed else Modified(elem, elem)
+                elem_change = Modified(elem, elem)
         with timed("encode edits"):
             qedits = list(
                 self.encoder.encode_pedit(pedit, self.stub_cache, queries=[elem_change])
@@ -232,7 +240,7 @@ class EditPredictionService:
             output_prefix, output_truth = split_label_by_post_edit_line(
                 batch["labels"][0], cursor_offset
             )
-            out_tks = self.model.generate(
+            gen_out = self.model.generate(
                 self.model.encode_token_seqs([input_tks]),
                 references=references,
                 query_ref_list=batch["query_ref_list"],
@@ -241,12 +249,19 @@ class EditPredictionService:
                     if output_prefix
                     else None
                 ),
+                output_scores=True,
+                return_dict_in_generate=True,
+                num_return_sequences=self.dec_args.num_beams,
                 **dec_args,
-            )[0].tolist()
-            out_tks = cast(TokenSeq, out_tks)
-            pred_change = extract_edit_change(input_tks, out_tks)
-            print("=" * 10, "Predicted code change", "=" * 10)
-            print(show_change(pred_change))
+            )
+            assert not isinstance(gen_out, torch.LongTensor)
+            for i in range(gen_out.sequences.size(0))[: self.show_max_solutions]:
+                out_tks = gen_out.sequences[i].tolist()
+                pred_change = extract_edit_change(input_tks, out_tks)
+                print("=" * 10, f"Sugeestion {i}", "=" * 10)
+                if (scores := getattr(gen_out, "sequences_scores", None)) is not None:
+                    print(f"score: {scores[i].item():.4g}")
+                print(show_change(pred_change))
 
         if log_file is None:
             return
@@ -261,6 +276,7 @@ class EditPredictionService:
             print(header("Ground truth"), file=f)
             print(indent(decode_tokens(output_truth)), file=f)
             print(header("Predicted"), file=f)
+            out_tks = gen_out.sequences[0].tolist()
             print(indent(decode_tokens(out_tks[len(output_prefix) + 1 :])), file=f)
             print(header("Input"), file=f)
             print(indent(decode_tokens(input_tks)), file=f)

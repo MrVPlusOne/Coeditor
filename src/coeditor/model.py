@@ -48,7 +48,7 @@ class DecodingArgs:
     do_sample: bool = False
     top_p: float = 0.9
     num_beams: Optional[int] = 1
-    length_penalty: float = 1.0
+    length_penalty: float = 0.0
 
     def to_model_args(self) -> dict:
         return {
