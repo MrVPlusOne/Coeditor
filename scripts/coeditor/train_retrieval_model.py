@@ -16,9 +16,11 @@ def train_model(
     dataset_name="medium",
     model_variant="-sig-analysis-post_usees",
     encoder: BasicQueryEditEncoder = BasicQueryEditEncoder(),
-    batch_args=BatchArgs(),
+    batch_args=BatchArgs.train_default(),
+    test_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
     recreate_data: bool = False,
+    eval_only: bool = False,
 ):
     # model_variant = "-file"
     model_name = f"coeditor-{dataset_name}"
@@ -28,7 +30,8 @@ def train_model(
     if train_args.quicktest:
         model_name = "quicktest-" + model_name
 
-    check_save_dir(model_name)
+    if not eval_only:
+        check_save_dir(model_name)
 
     datasets = make_or_load_datasets(
         dataset_name,
@@ -57,8 +60,11 @@ def train_model(
                 dataset.all_edits()[:n_quick_exs]
             )
 
-    model = RetrievalEditorModel.from_code_t5("base", reuse_embed=True)
-    model.query_attened_ref = True
+    if not eval_only:
+        model = RetrievalEditorModel.from_code_t5("base", reuse_embed=True)
+        model.query_attened_ref = True
+    else:
+        model = RetrievalEditorModel.load(get_model_dir() / model_name)
 
     if os.getenv("CUDA_VISIBLE_DEVICES") is None:
         warnings.warn(
@@ -67,19 +73,18 @@ def train_model(
         )
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    with timed_action("Training"):
-        model.train_on_data(
-            model_name,
-            datasets["train"],
-            datasets["valid"],
-            train_args,
-            batch_args=batch_args,
-        )
+    if not eval_only:
+        with timed_action("Training"):
+            model.train_on_data(
+                model_name,
+                datasets["train"],
+                datasets["valid"],
+                train_args,
+                batch_args=batch_args,
+            )
 
+    model.to("cuda:" + os.environ["CUDA_VISIBLE_DEVICES"])
     with timed_action("Loss Evaluation"):
-        test_batch_args = copy.deepcopy(batch_args)
-        test_batch_args.min_queires *= 2
-        test_batch_args.max_queries *= 2
         eval_result = model.eval_loss_on_data(datasets["test"], test_batch_args)
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
@@ -116,8 +121,8 @@ if __name__ == "__main__":
         train_model(
             dataset_name="large",
             model_variant="-query-stub",
-            batch_args=BatchArgs.train_default(),
             train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
             encoder=BasicQueryEditEncoder(),
             recreate_data=False,
+            eval_only=True,
         )
