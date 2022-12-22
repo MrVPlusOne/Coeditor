@@ -410,7 +410,7 @@ def project_from_commit(
         PythonModule.from_cst,
         list(cst_modules.values()),
         list(cst_modules.keys()),
-        [drop_comments] * len(cst_modules),
+        key_args={"drop_comments": drop_comments},
         desc="Creating Python Modules",
         max_workers=max_workers,
         tqdm_args={"disable": max_workers == 0},

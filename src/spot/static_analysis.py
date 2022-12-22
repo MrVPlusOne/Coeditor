@@ -573,6 +573,7 @@ class PythonProject:
         file_filter: Callable[[Path], bool] = lambda p: True,
         ignore_dirs: set[str] = DefaultIgnoreDirs,
         drop_comments: bool = True,
+        text_transform: Callable[[str], str | None] = lambda s: s,
     ) -> "PythonProject":
         """
         - `root` is typically the `src/` directory or just the root of the project.
@@ -599,6 +600,9 @@ class PythonProject:
                 continue
             with src.open() as f:
                 src_text = f.read()
+            src_text = text_transform(src_text)
+            if src_text is None:
+                continue
             try:
                 mod = cst.parse_module(src_text)
             except cst.ParserSyntaxError as e:

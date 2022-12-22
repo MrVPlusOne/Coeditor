@@ -117,7 +117,7 @@ def remove_newer_syntax_for_repo(root: Path, rules: SupportedSyntax) -> None:
     changed = pmap(
         remove_newer_syntax_for_file,
         all_files,
-        [rules] * len(all_files),
+        key_args={"rules": rules},
         desc="Removing newer syntax",
     )
     print(f"{sum(changed)} / {len(all_files)} files have been rewritten.")

@@ -24,7 +24,7 @@ def eval_typilus_on_repos(
         run_typilus,
         repo_roots,
         out_dirs,
-        [typilus_path] * len(repo_roots),
+        key_args={"typilus_path": typilus_path},
         desc="Running Typilus",
         max_workers=max_workers,
     )

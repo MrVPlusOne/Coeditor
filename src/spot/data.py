@@ -72,7 +72,9 @@ class GitRepo:
         if not (repos_dir / "downloading" / self.authorname()).is_dir():
             # git clone failed. Possibly caused by invalid url?
             return False
-        shutil.move(repos_dir / "downloading" / self.authorname(), (repos_dir / "downloaded"))
+        shutil.move(
+            repos_dir / "downloading" / self.authorname(), (repos_dir / "downloaded")
+        )
         return True
 
     def read_last_update(self, repos_dir):
@@ -341,7 +343,7 @@ def chunk_srcs_per_file(
         src_to_chunks,
         srcs,
         label_ranges,
-        [ctx_args] * len(srcs),
+        key_args={"ctx_args": ctx_args},
         desc="map src_to_chunks",
         tqdm_args=tqdm_args,
     )
@@ -392,7 +394,7 @@ class TokenizedSrcSet:
         new_srcs = pmap(
             TokenizedSrc.inline_predictions,
             self.all_srcs,
-            [as_comment] * len(self.all_srcs),
+            key_args={"as_comment": as_comment},
             desc="inline_predictions",
             tqdm_args=tqdm_args,
         )

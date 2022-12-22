@@ -31,7 +31,7 @@ def eval_hityper_on_repos(
         run_hityper,
         repo_roots,
         out_dirs,
-        [hityper_python] * len(repo_roots),
+        key_args={"python_path": hityper_python},
         desc="Running HiTyper",
         max_workers=max_workers,
     )

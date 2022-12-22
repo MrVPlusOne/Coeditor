@@ -88,21 +88,18 @@ def data_project_from_dir(
     drop_comments: bool = True,
     file_filter: Callable[[Path], bool] = lambda p: True,
 ) -> PythonProject:
-    def src2module(text: str):
+    def text_transform(text: str):
         width = max(len(l) for l in text.split("\n"))
         if width > max_line_width:
             return None
-        text = text.replace(SpecialNames.TypeMask, "MaskReplaced")
-        mod = cst.parse_module(text)
-        if drop_comments:
-            mod = remove_comments(mod)
-        return mod
+        return text.replace(SpecialNames.TypeMask, "MaskReplaced")
 
     return PythonProject.from_root(
         root,
-        True,
-        src2module=src2module,
+        discard_bad_files=True,
+        drop_comments=drop_comments,
         file_filter=file_filter,
+        text_transform=text_transform,
     )
 
 

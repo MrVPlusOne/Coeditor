@@ -26,6 +26,7 @@ from typing import (
     Mapping,
     Collection,
     cast,
+    overload,
 )
 
 import ipywidgets as widgets
@@ -50,6 +51,9 @@ ModelSPOT = T5ForConditionalGeneration
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
+T3 = TypeVar("T3")
+T4 = TypeVar("T4")
+T5 = TypeVar("T5")
 
 
 def proj_root() -> Path:
@@ -180,18 +184,20 @@ class TaggedFunc(Generic[T1]):
     with unordered map."""
 
     f: Callable[..., T1]
+    key_args: dict
 
     def __call__(self, args: tuple) -> tuple[Any, T1]:
-        return args[0], self.f(*args[1:])
+        return args[0], self.f(*args[1:], **self.key_args)
 
 
 def pmap(
     f: Callable[..., T1],
     *f_args: Any,
-    desc: str,
+    desc: str = "parallel map",
+    key_args: dict | None = None,
     max_workers: int | None = None,
     chunksize: int | None = None,
-    tqdm_args: dict = {},
+    tqdm_args: dict | None = None,
 ) -> list[T1]:
     """
     Parallel map with progress displaying.
@@ -199,23 +205,26 @@ def pmap(
     n = len(f_args[0])
     assert_eq(n, *(len(xs) for xs in f_args))
 
+    if tqdm_args is None:
+        tqdm_args = {"smoothing": 0.0}
+
     if max_workers is None:
         max_workers = DefaultWorkers
     if max_workers <= 1:
         outs = list[T1]()
-        for i in tqdm(range(n), desc=desc, smoothing=0.0, **tqdm_args):
+        for i in tqdm(range(n), desc=desc, **tqdm_args):
             outs.append(f(*(a[i] for a in f_args)))
         return outs
 
     if chunksize is None:
         chunksize = max(1, n // (50 * max_workers))
 
-    tag_f = TaggedFunc(f)
+    tag_f = TaggedFunc(f, key_args or {})
     arg_tuples = zip(range(n), *f_args)
 
     with (
         multiprocessing.Pool(max_workers) as pool,
-        tqdm(total=n, desc=desc, smoothing=0.0, **tqdm_args) as pbar,
+        tqdm(total=n, desc=desc, **tqdm_args) as pbar,
     ):
         results = dict[int, T1]()
         for i, r in pool.imap_unordered(tag_f, arg_tuples, chunksize=chunksize):
@@ -229,7 +238,7 @@ def pfilter(
     xs: Iterable[T1],
     desc: str = "filtering",
     max_workers: int | None = None,
-    tqdm_args: dict = {},
+    tqdm_args: dict | None = None,
 ) -> list[T1]:
     xs = list(xs)
     to_keep = pmap(f, xs, desc=desc, max_workers=max_workers, tqdm_args=tqdm_args)
