@@ -3,7 +3,7 @@ from coeditor.encoding import _BaseTokenizer
 
 
 def module_from_code(code: str, mname: ModuleName = "ex_module"):
-    return PythonModule.from_cst(parse_cst_module(code), mname)
+    return PythonModule.from_cst(parse_cst_module(code), mname, True)
 
 
 def test_module_edit_creation():
@@ -39,7 +39,7 @@ def test_module_edit_creation():
 
 def project_from_code(srcs: dict[ModuleName, str]) -> PythonProject:
     modules = [
-        PythonModule.from_cst(parse_cst_module(code), mname)
+        PythonModule.from_cst(parse_cst_module(code), mname, True)
         for mname, code in srcs.items()
     ]
     return PythonProject.from_modules(

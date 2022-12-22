@@ -19,6 +19,7 @@ from libcst.metadata import (
     QualifiedNameSource,
     PositionProvider,
 )
+from libcst._metadata_dependent import LazyValue
 from pyrsistent import pmap as persist_map, PMap
 
 ModuleName = str
@@ -1177,10 +1178,17 @@ class ModuleAnalysis:
     record_type_usages: bool
 
     def __init__(self, mod: PythonModule, record_type_usages: bool = False):
+        def get_value(v):
+            if isinstance(v, LazyValue):
+                return v()
+            return v
+
         self.module = mod
         wrapper = cst.MetadataWrapper(mod.tree, unsafe_skip_copy=True)
         # below need to be dict to be pickleable
-        self.node2qnames = dict(wrapper.resolve(QualifiedNameProvider))
+        self.node2qnames = {
+            k: get_value(v) for k, v in wrapper.resolve(QualifiedNameProvider).items()
+        }
         self.node2pos = dict(wrapper.resolve(PositionProvider))
         self.record_type_usages = record_type_usages
 

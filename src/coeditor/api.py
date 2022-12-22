@@ -38,11 +38,7 @@ from spot.static_analysis import (
     PythonProject,
     remove_comments,
 )
-from transformers.generation_utils import (
-    GreedySearchOutput,
-    BeamSearchOutput,
-    BeamSearchEncoderDecoderOutput,
-)
+
 import textwrap
 
 

@@ -5,11 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import *
 
-import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import WandbLogger
+
 from torch.optim import AdamW
 from transformers import DataCollatorForSeq2Seq
 from transformers.modeling_outputs import Seq2SeqLMOutput
@@ -98,6 +96,101 @@ def train_spot_model(
     use_early_stop=False,
     use_small_model=False,
 ) -> ModelWrapper:
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+    from pytorch_lightning.loggers import WandbLogger
+
+    class TrainModelWrapper(pl.LightningModule):
+        "A pytorch lightening module that handles training and evaluation of the SPOT model."
+
+        def __init__(
+            self, model_checkpoint: str | Path, *, model_saving_path: Path
+        ) -> None:
+            super().__init__()
+            self.save_hyperparameters()
+            self.model: ModelSPOT = load_model_spot(model_checkpoint)
+            self.tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(
+                model_checkpoint
+            )
+            self.model_saving_path = model_saving_path
+            self.model_saving_interval: Optional[int] = None
+            self.avg_loss = MovingAvg(alpha=0.01)
+            self.labels_trained = 0
+
+        def on_fit_start(self):
+            # maps chunk id to the initial predictions made for that chunk immediately
+            # before the model was trained on it
+            if self.model_saving_interval is not None:
+                self.batch_ids: list[list[int]] = []
+                self.saving_counter = 0
+                self.model.save_pretrained(self.model_saving_path / f"n_batches=0")
+
+        def configure_optimizers(self):
+            return _configure_optimizers(self.model)
+
+        def training_step(self, batch, batch_idx):
+            if self.model_saving_interval is not None and self.current_epoch == 0:
+                self.batch_ids.append(batch["chunk_id"].tolist())
+                self.saving_counter += 1
+                if self.saving_counter >= self.model_saving_interval:
+                    self.saving_counter = 0
+                    # model can be used for `n_batches` and onward.
+                    self.model.save_pretrained(
+                        self.model_saving_path / f"n_batches={len(self.batch_ids)}"
+                    )
+
+            outputs = self.model.forward(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+            )
+            assert isinstance(outputs, Seq2SeqLMOutput)
+            loss = not_none(outputs.loss)
+            n_labels = batch["n_labels"].sum().item()
+            self.labels_trained += n_labels
+            self.avg_loss.update(loss.item())
+            self.log("train/loss", self.avg_loss.value)
+            self.log("train/lr", self.lr_schedulers().get_last_lr()[0])  # type: ignore
+            self.log("train/labels", float(self.labels_trained))
+            return loss
+
+        def validation_step(self, batch, batch_idx):
+            outputs = self.model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+            )
+            loss = outputs.loss
+            self.log("valid/loss", loss.item())
+            self.log("train/labels", float(self.labels_trained))
+
+    def concat_batches(batches: list[dict], keys: list[str]) -> dict:
+        return {k: torch.concat([b[k] for b in batches]) for k in keys}
+
+    def _configure_optimizers(model: nn.Module, base_lr: float = 2e-5):
+        no_decay = ["bias", "LayerNorm.weight"]
+        grouped_params = [
+            {
+                "params": [
+                    p
+                    for pn, p in model.named_parameters()
+                    if not any(n in pn for n in no_decay)
+                ],
+                "weight_decay": 0.01,
+            },
+            {
+                "params": [
+                    p
+                    for pn, p in model.named_parameters()
+                    if any(n in pn for n in no_decay)
+                ],
+                "weight_decay": 0.0,
+            },
+        ]
+        optimizer = AdamW(grouped_params, lr=base_lr)
+        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.2)
+        return [optimizer], [lr_scheduler]
+
     os.chdir(proj_root())
     train_ctx_args = train_args.train_ctx_args
     dec_args = train_args.dec_args
@@ -211,95 +304,3 @@ def train_spot_model(
         )
 
     return wrapper
-
-
-class TrainModelWrapper(pl.LightningModule):
-    "A pytorch lightening module that handles training and evaluation of the SPOT model."
-
-    def __init__(
-        self, model_checkpoint: str | Path, *, model_saving_path: Path
-    ) -> None:
-        super().__init__()
-        self.save_hyperparameters()
-        self.model: ModelSPOT = load_model_spot(model_checkpoint)
-        self.tokenizer: TokenizerSPOT = TokenizerSPOT.from_pretrained(model_checkpoint)
-        self.model_saving_path = model_saving_path
-        self.model_saving_interval: Optional[int] = None
-        self.avg_loss = MovingAvg(alpha=0.01)
-        self.labels_trained = 0
-
-    def on_fit_start(self):
-        # maps chunk id to the initial predictions made for that chunk immediately
-        # before the model was trained on it
-        if self.model_saving_interval is not None:
-            self.batch_ids: list[list[int]] = []
-            self.saving_counter = 0
-            self.model.save_pretrained(self.model_saving_path / f"n_batches=0")
-
-    def configure_optimizers(self):
-        return _configure_optimizers(self.model)
-
-    def training_step(self, batch, batch_idx):
-        if self.model_saving_interval is not None and self.current_epoch == 0:
-            self.batch_ids.append(batch["chunk_id"].tolist())
-            self.saving_counter += 1
-            if self.saving_counter >= self.model_saving_interval:
-                self.saving_counter = 0
-                # model can be used for `n_batches` and onward.
-                self.model.save_pretrained(
-                    self.model_saving_path / f"n_batches={len(self.batch_ids)}"
-                )
-
-        outputs = self.model.forward(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            labels=batch["labels"],
-        )
-        assert isinstance(outputs, Seq2SeqLMOutput)
-        loss = not_none(outputs.loss)
-        n_labels = batch["n_labels"].sum().item()
-        self.labels_trained += n_labels
-        self.avg_loss.update(loss.item())
-        self.log("train/loss", self.avg_loss.value)
-        self.log("train/lr", self.lr_schedulers().get_last_lr()[0])  # type: ignore
-        self.log("train/labels", float(self.labels_trained))
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        outputs = self.model(
-            input_ids=batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            labels=batch["labels"],
-        )
-        loss = outputs.loss
-        self.log("valid/loss", loss.item())
-        self.log("train/labels", float(self.labels_trained))
-
-
-def concat_batches(batches: list[dict], keys: list[str]) -> dict:
-    return {k: torch.concat([b[k] for b in batches]) for k in keys}
-
-
-def _configure_optimizers(model: nn.Module, base_lr: float = 2e-5):
-    no_decay = ["bias", "LayerNorm.weight"]
-    grouped_params = [
-        {
-            "params": [
-                p
-                for pn, p in model.named_parameters()
-                if not any(n in pn for n in no_decay)
-            ],
-            "weight_decay": 0.01,
-        },
-        {
-            "params": [
-                p
-                for pn, p in model.named_parameters()
-                if any(n in pn for n in no_decay)
-            ],
-            "weight_decay": 0.0,
-        },
-    ]
-    optimizer = AdamW(grouped_params, lr=base_lr)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.2)
-    return [optimizer], [lr_scheduler]

@@ -20,7 +20,7 @@ from spot.utils import assert_eq, groupby, not_none, show_string_diff
 
 def project_from_code(name2code: dict[ModuleName, str]):
     modules = [
-        PythonModule.from_cst(cst.parse_module(code), name)
+        PythonModule.from_cst(cst.parse_module(code), name, True)
         for name, code in name2code.items()
     ]
     return PythonProject.from_modules(Path("[test project]"), modules)
@@ -86,7 +86,8 @@ from ..top import *
 from infer.type import *   
 from . import E
 """
-    mod = PythonModule.from_cst(cst.parse_module(import_code), "root.file1")
+    proj = project_from_code({"root.file1": import_code})
+    mod = proj.modules["root.file1"]
     assert mod.imported_modules == {
         "A",
         "B",
@@ -897,7 +898,8 @@ class A:
 
 """
 
-    m1 = PythonModule.from_cst(cst.parse_module(code1), "root.file1")
+    project = project_from_code({"root.file1": code1})
+    m1 = project.modules["root.file1"]
 
     assert len(m1.global_vars) == 0
     assert len(m1.functions) == 0
