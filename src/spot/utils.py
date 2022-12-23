@@ -497,12 +497,12 @@ import urllib
 _pushover_warned = [False]
 
 
-def get_pushover_config() -> tuple[str, str] | None:
+def get_pushover_config() -> dict[str, str] | None:
     config_file = proj_root() / "config/pushover.json"
     if config_file.exists():
         match json.loads(config_file.read_text()):
             case {"user": user, "token": token}:
-                return user, token
+                return {"user": user, "token": token}
     if not _pushover_warned[0]:
         logging.warning(
             f"No pushover config file found at {config_file}. Not able to push message."
@@ -518,16 +518,15 @@ def pushover_alert(
     config = get_pushover_config()
     if print_to_console or (notify and config is None):
         print(f"Pushover: ({title}) {message}")
-    elif notify and config is not None:
-        user, token = config
-        conn = http.client.HTTPSConnection("api.pushover.net:443")
+    if notify and config is not None:
+        conn = http.client.HTTPSConnection("api.pushover.net")
         conn.request(
             "POST",
             "/1/messages.json",
             urllib.parse.urlencode(  # type: ignore
                 {
-                    "token": token,
-                    "user": user,
+                    "user": config["user"],
+                    "token": config["token"],
                     "title": title,
                     "message": message,
                 }
