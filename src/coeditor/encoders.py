@@ -10,12 +10,13 @@ from coeditor.encoding import (
     TokenizedEdit,
     TruncateAt,
     break_into_chunks,
-    change_to_input_output,
+    change_tks_to_input_output,
     change_to_tokens,
     collapse_code,
     encode_basic,
     truncate_output_tks,
     truncate_section,
+    truncate_sections,
 )
 from spot.static_analysis import (
     ModuleName,
@@ -69,6 +70,7 @@ class BasicTkQueryEdit(TokenizedEdit):
     output_tks: TokenSeq
     path: ProjectPath
     change_type: Change[None]
+    prev_chunks: Sequence[TokenSeq]
     tk_pedit: TkProjectEdit["BasicTkQueryEdit"]
     is_rename_update: bool | None = None
 
@@ -80,10 +82,15 @@ class BasicTkQueryEdit(TokenizedEdit):
         return self.show_prediction(None)
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
+        prev_segs = {self.path: self.prev_chunks}
+        ref_segs = {
+            path: seg
+            for path, seg in self.tk_pedit.tk_references.items()
+            if path != self.path
+        }
         return {
             str(path) + (f" ({i})" if len(segs) > 1 else ""): seg
-            for path, segs in self.tk_pedit.tk_references.items()
-            if path != self.path
+            for path, segs in (prev_segs | ref_segs).items()
             for i, seg in enumerate(segs)
         }
 
@@ -106,12 +113,19 @@ class BasicTkQueryEdit(TokenizedEdit):
 
 
 @dataclass
+class EditRequest:
+    target: Change[PythonFunction]
+    respect_lines: int
+
+
+@dataclass
 class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
     "Only use changed elements in a commit as references."
-    VERSION = 3
+    VERSION = 4
     max_ref_tks: int = 512
     ref_chunk_overlap: int = 16
     max_chunks_per_ref: int = 4
+    max_lines_per_function: int = 500
     max_query_tks: int = 512
     max_output_tks: int = 256
     add_stubs: bool = True
@@ -121,20 +135,18 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
     def encode_pedits(
         self,
         pedits: Sequence[ProjectEdit],
-        include_additions: bool = False,
+        training: bool,
     ) -> Iterable[BasicTkQueryEdit]:
         stub_cache = TimedCache()
         for pedit in pedits:
-            yield from self.encode_pedit(
-                pedit, stub_cache, include_additions=include_additions
-            )
+            yield from self.encode_pedit(pedit, stub_cache, training=training)
 
     def encode_pedit(
         self,
         pedit: ProjectEdit,
         stub_cache: TimedCache[ModuleName, list[TokenSeq], int],
-        include_additions: bool = False,
-        queries: Sequence[Change[PythonFunction]] | None = None,
+        training: bool,
+        queries: Sequence[EditRequest] | None = None,
     ) -> Iterable[BasicTkQueryEdit]:
         """
         Args:
@@ -175,53 +187,64 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         tk_pedit = TkProjectEdit(
             tk_references=tk_refs, qedits=query_data, module_stubs=module_stubs
         )
-        for_training = queries is None
+        no_queries = queries is None
         if queries is None:
-            queries = list(
-                pedit.modified_functions(ast_must_change=True, body_must_change=True)
-            )
+            queries = [
+                req
+                for mf in pedit.modified_functions(
+                    ast_must_change=True, body_must_change=True
+                )
+                for req in self.sample_requests(mf, training)
+            ]
         renamed_updates = {
             get_change_path(c)
             for c in find_rename_updates(
                 renamed, [q for q in queries if isinstance(q, Modified)]
             )
         }
-        # for r in renamed.values():
-        #     if isinstance(r.after, PythonVariable) and r.before.name != r.after.name:
-        #         print("Renamed var:", r.after.path)
-        #         print(show_change(r))
-        #         print("Rename updates:", renamed_updates)
-        for mf in queries:
+
+        for request in queries:
+            mf = request.target
             assert not isinstance(mf, Deleted)
             if mf.after.path in renamed_paths:
                 mf = after_to_mf[mf.after.path]
-            body_change = mf.map(lambda x: x.header_body_code[1])
+            code_change = mf.map(lambda x: x.code)
+
             if (
-                isinstance(body_change, Modified)
-                and count_lines(body_change.before) > 99
+                no_queries
+                and not training
+                and isinstance(mf, Modified)
+                and count_lines(mf.before.header_body_code[1]) > 99
             ):
-                if for_training:
-                    continue  # skip large functions during training
-                else:
-                    warnings.warn(
-                        "Function has more than 99 lines, only the first 100 lines will be edited."
-                    )
-            input_tks, output_tks = change_to_input_output(body_change)
-            path = get_change_path(cast(Change, mf))
+                # skip large functions during evaluation
+                continue
+
+            change_tks = change_to_tokens(code_change)
+            (input_tks, output_tks), context = change_tks_to_query_context(
+                change_tks, request.respect_lines
+            )
+
+            path = get_change_path(mf)
             path_tks = encode_basic(f"# edit: {path}")
-            header_tks = change_to_tokens(mf.map(lambda x: x.header_body_code[0]))
             cls_tks = tuple()
             if (cls_p := mf.after.parent_class) is not None:
                 cls_tks = (ctx_enc.encode_ctx_element(cls_p),)
-            input_tks = join_list(
-                (path_tks, *cls_tks, header_tks, input_tks), sep=Newline_id
-            )
-            input_tks = truncate_section(
-                input_tks,
-                TruncateAt.Right,
-                self.max_query_tks,
+            context = join_list((*cls_tks, context), sep=Newline_id)
+
+            input_tks, used_context = truncate_sections(
+                self.max_query_tks - len(path_tks),
+                (input_tks, TruncateAt.Right),
+                (context, TruncateAt.Left),
                 add_bos=self.add_truncate_bos,
             )
+            input_tks = join_list((path_tks, used_context, input_tks), sep=Newline_id)
+            if len(used_context) == len(context):
+                prev_chunks = []
+            else:
+                to_keep = len(context) - len(used_context) + self.ref_chunk_overlap + 1
+                remaining_context = context[:to_keep]
+                remaining_context.append(EOS_id)
+                prev_chunks = list(self.encode_previous_chunks(path, remaining_context))
             output_tks = truncate_output_tks(input_tks, output_tks)
             output_tks = truncate_section(
                 output_tks,
@@ -229,7 +252,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 self.max_output_tks,
                 add_bos=self.add_truncate_bos,
             )
-            if for_training and not output_tks:
+            if no_queries and not output_tks:
                 # can happen if input too long
                 continue
             query_data[path] = BasicTkQueryEdit(
@@ -237,11 +260,34 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 output_tks=output_tks,
                 path=path,
                 change_type=mf.map(lambda _: None),
+                prev_chunks=prev_chunks,
                 tk_pedit=tk_pedit,
                 is_rename_update=path in renamed_updates,
             )
         if query_data:
             yield from query_data.values()
+
+    def sample_requests(
+        self, mf: Modified[PythonFunction], training: bool
+    ) -> Iterable[EditRequest]:
+        if not training:
+            # keep the signature changes at test time
+            yield EditRequest(mf, len(mf.after.header_body_code[0]))
+        else:
+            if (
+                len(mf.before.code.split("\n")) > self.max_lines_per_function
+                or len(mf.after.code.split("\n")) > self.max_lines_per_function
+            ):
+                return  # skip oversized functions
+            lines_per_request = 50
+            min_lines_to_edit = 5
+            end = max(1, len(mf.after.code.split("\n")) - min_lines_to_edit)
+            # split it into chunks of 50 lines
+            for i in range(0, end, lines_per_request):
+                x = random.uniform(i, min(end, i + lines_per_request))
+                # round x into nearest int
+                x = int(x + 0.5)
+                yield EditRequest(mf, x)
 
     def encode_elem_change(
         self, c: Change[PythonElem], ctx_encoder: CtxEncoder
@@ -256,9 +302,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
         path_tks.append(Newline_id)
         change_tks = ctx_encoder.encode_ctx_element(get_change_path(c))
         change_tks = self.maybe_wrap_bos(change_tks)
-        # all_tks = truncate_section(
-        #     all_tks, TruncateAt.Right, self.max_ref_tks, add_bos=self.add_truncate_bos
-        # )
+
         chunks = break_into_chunks(
             change_tks,
             self.max_ref_tks - len(path_tks),
@@ -269,6 +313,30 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             to_check = tks if i == 0 else tks[self.ref_chunk_overlap :]
             if has_change(to_check):
                 yield path_tks + tks
+
+    def encode_previous_chunks(
+        self, path: ProjectPath, context_tks: TokenSeq
+    ) -> Iterable[TokenSeq]:
+        "Encode the changes immediately before the current editing focus."
+        if not context_tks:
+            return
+        path_tks = encode_basic(f"# edit: {str(path)}")
+        path_tks = truncate_section(
+            path_tks,
+            TruncateAt.Left,
+            self.max_ref_tks // 4,
+            add_bos=self.add_truncate_bos,
+        )
+        path_tks.append(Newline_id)
+        chunks = break_into_chunks(
+            context_tks,
+            self.max_ref_tks - len(path_tks),
+            overlap=self.ref_chunk_overlap,
+            add_bos=self.add_truncate_bos,
+        )
+        for tks in chunks:
+            # these important context should always be seen by the model
+            yield path_tks + tks
 
     def encode_elem_move(
         self,
@@ -392,3 +460,20 @@ def find_rename_updates(
         code2 = normalize_code_by_ast(show_expr(tree2))
         if code1 == code2:
             yield m
+
+
+def change_tks_to_query_context(change_tks: TokenSeq, keep_changed_lines: int):
+    lines = split_list(change_tks, Newline_id)
+    spliter = 0
+    result_lines = -1
+    for i, l in enumerate(lines):
+        if l and l[0] == Del_id:
+            pass
+        else:
+            result_lines += 1
+        if result_lines == keep_changed_lines:
+            spliter = i
+
+    ref = join_list(lines[:spliter], Newline_id)
+    query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
+    return query, ref

@@ -4,7 +4,7 @@ import copy
 import torch
 from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
-from coeditor.encoders import BasicQueryEditEncoder
+from coeditor.encoders import BasicQueryEditEncoder, EditRequest
 from coeditor.encoding import (
     Add_id,
     Del_id,
@@ -206,7 +206,7 @@ class EditPredictionService:
             if not isinstance(now_elem, PythonFunction):
                 raise ValueError(f"Only functions can be edited by the model.")
 
-        cursor_offset = self.compute_offset(now_mod, now_elem, line)
+        edit_offset = self.compute_offset(now_mod, now_elem, line)
 
         with timed("construct project edit"):
             pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
@@ -232,9 +232,16 @@ class EditPredictionService:
                 if self.config.drop_comments:
                     trans_elem.tree = remove_comments(trans_elem.tree)
                 elem_change = Modified(trans_elem, trans_elem)
+
         with timed("encode edits"):
+            req = EditRequest(elem_change, edit_offset)
             qedits = list(
-                self.encoder.encode_pedit(pedit, self.stub_cache, queries=[elem_change])
+                self.encoder.encode_pedit(
+                    pedit,
+                    self.stub_cache,
+                    queries=[req],
+                    training=False,
+                )
             )
             if qedits[0].tk_pedit.module_stubs:
                 print("stub files:", qedits[0].tk_pedit.module_stubs.keys())
@@ -247,18 +254,19 @@ class EditPredictionService:
             dec_args = self.dec_args.to_model_args()
             input_tks = batch["input_ids"][0]
             references = batch["references"]
-            output_prefix, output_truth = split_label_by_post_edit_line(
-                batch["labels"][0], cursor_offset
-            )
+            output_truth = batch["labels"][0]
+            # output_prefix, output_truth = split_label_by_post_edit_line(
+            #     batch["labels"][0], cursor_offset
+            # )
             gen_out = self.model.generate(
                 self.model.encode_token_seqs([input_tks]),
                 references=references,
                 query_ref_list=batch["query_ref_list"],
-                prefix_allowed_tokens_fn=(
-                    CoeditorModel._prefix_constraint([output_prefix])
-                    if output_prefix
-                    else None
-                ),
+                # prefix_allowed_tokens_fn=(
+                #     CoeditorModel._prefix_constraint([output_prefix])
+                #     if output_prefix
+                #     else None
+                # ),
                 output_scores=True,
                 return_dict_in_generate=True,
                 num_return_sequences=self.dec_args.num_beams,
@@ -276,9 +284,9 @@ class EditPredictionService:
         out_tks = gen_out.sequences[0].tolist()
         if apply_edit:
             new_elem_code = self.edit_current_element(
-                now_mod.location_map, now_elem, out_tks
+                now_mod.location_map, now_elem, edit_offset, out_tks
             )
-            now_span = now_mod.location_map[now_elem.tree.body]
+            now_span = now_mod.location_map[now_elem.tree]
             new_code = replace_lines(now_code, now_span, new_elem_code)
             file.write_text(new_code)
             print("Edit applied to source.")
@@ -288,15 +296,15 @@ class EditPredictionService:
         header = lambda s: "=" * 10 + s + "=" * 10
         indent = lambda s: textwrap.indent(s, "    ")
         with log_file.open("w") as f:
-            print(f"{cursor_offset = }", file=f)
+            print(f"{edit_offset = }", file=f)
             print(f"{len(input_tks) = }", file=f)
             print(f"{len(references) = }", file=f)
-            print(header("User prefix"), file=f)
-            print(indent(decode_tokens(output_prefix)), file=f)
+            # print(header("User prefix"), file=f)
+            # print(indent(decode_tokens(output_prefix)), file=f)
             print(header("Ground truth"), file=f)
             print(indent(decode_tokens(output_truth)), file=f)
             print(header("Predicted"), file=f)
-            print(indent(decode_tokens(out_tks[len(output_prefix) + 1 :])), file=f)
+            print(indent(decode_tokens(out_tks[len(out_tks) + 1 :])), file=f)
             print(header("Input"), file=f)
             print(indent(decode_tokens(input_tks)), file=f)
             print(header("References"), file=f)
@@ -304,16 +312,18 @@ class EditPredictionService:
                 print("-" * 6 + f"Reference {i}" + "-" * 6, file=f)
                 print(indent(decode_tokens(ref)), file=f)
 
-    def compute_offset(self, mod: PythonModule, elem: PythonFunction, line: int):
+    def compute_offset(
+        self, now_mod: PythonModule, now_elem: PythonFunction, line: int
+    ):
         "Compute the relative offset of a given line in the body of a function."
-        body_line = mod.location_map[elem.tree.body].start.line
-        origin_offset = line - body_line + 1
+        start_line = now_mod.location_map[now_elem.tree].start.line
+        origin_offset = line - start_line + 1
         if not self.config.drop_comments:
             return origin_offset
         else:
             removed_lines = 0
-            remover = CommentRemover(mod.location_map)
-            elem.tree.visit(remover)
+            remover = CommentRemover(now_mod.location_map)
+            now_elem.tree.visit(remover)
             for c in remover.removed_lines:
                 span = remover.src_map[c]
                 if span.end.line < line:
@@ -324,6 +334,7 @@ class EditPredictionService:
         self,
         pre_src_map: Mapping[cst.CSTNode, CodeRange],
         pre_elem: PythonFunction,
+        out_line_offset: int,
         out_tks: TokenSeq,
     ) -> str:
 
@@ -338,10 +349,10 @@ class EditPredictionService:
         else:
             line_map = None
 
-        pre_body_code = pre_elem.header_body_code[1]
-        line_groups: list[list[str]] = [[]] + [[l] for l in pre_body_code.split("\n")]
+        pre_code = pre_elem.code
+        line_groups: list[list[str]] = [[]] + [[l] for l in pre_code.split("\n")]
         for tk, out_seg in output_ids_as_seqs(out_tks).items():
-            target_line = extra_id_to_number(tk)
+            target_line = extra_id_to_number(tk) + out_line_offset
             if line_map:
                 target_line = line_map[target_line]
             for seg in split_list(out_seg, Newline_id):

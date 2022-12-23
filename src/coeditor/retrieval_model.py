@@ -1079,7 +1079,9 @@ def edit_groups_to_batches(
             random.shuffle(key_stubs)
             random.shuffle(key_refs)
             random.shuffle(all_rest)
-            all_refs = key_stubs + key_refs + all_rest
+            for j, seg in enumerate(edit.prev_chunks):
+                id2ref_name[id(seg)] = f"{j}"
+            all_refs = list(edit.prev_chunks) + key_stubs + key_refs + all_rest
             ref_size_sum = 0
             ref_selected = list[TokenSeq]()
             for ref in all_refs:

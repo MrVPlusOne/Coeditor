@@ -79,9 +79,11 @@ def get_extra_id(i: int) -> int:
     assert 0 <= i < N_Extra_Ids
     return _Tokenizer.additional_special_tokens_ids[N_Extra_Ids - 1 - i]
 
+
 def extra_id_to_number(tk: int) -> int:
     assert is_extra_id(tk)
     return _max_extra_id - tk
+
 
 def decode_tokens(tokens: TokenSeq) -> str:
     return _Tokenizer.decode(tokens, add_special_tokens=False)
@@ -166,8 +168,6 @@ def check_output_tokens(tks: TokenSeq) -> bool:
     return True
 
 
-# TODO: change this to output a sequence of pairs
-# also take in a list of chunk start lines
 def change_to_input_output(change: Change[str]) -> tuple[TokenSeq, TokenSeq]:
     """
     Encode the change as a pair of input and output token sequences.
@@ -179,6 +179,11 @@ def change_to_input_output(change: Change[str]) -> tuple[TokenSeq, TokenSeq]:
     in `code_to_input`.
     """
     tks = change_to_tokens(change)
+    return change_tks_to_input_output(tks)
+
+
+def change_tks_to_input_output(tks: TokenSeq) -> tuple[TokenSeq, TokenSeq]:
+    "See `change_to_input_output`."
     tk_lines = split_list(tks, Newline_id)
 
     input_lines: list[TokenSeq] = []
@@ -212,6 +217,7 @@ def change_to_input_output(change: Change[str]) -> tuple[TokenSeq, TokenSeq]:
     output = join_list(output_segs, None)
     if not check_output_tokens(output):
         str_segs = [decode_tokens(tks) for tks in output_segs]
+        change = tokens_to_change(tks)
         msg = f"Invalid output tokens.\n Output segs: {str_segs}\n Change: {show_change(change)}"
         raise ValueError(msg)
     return input, output
@@ -617,7 +623,7 @@ class EditEncoder(Generic[T1], ABC):
     def encode_pedit(
         self,
         pedit: ProjectEdit,
-        include_additions: bool = False,
+        training: bool,
     ) -> Iterable[T1]:
         pass
 
@@ -644,7 +650,7 @@ class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
     def encode_pedit(
         self,
         pedit: ProjectEdit,
-        include_additions: bool = False,
+        training: bool,
     ) -> Iterable[FileBasedTokenizedEdit]:
         for me in pedit.changes.values():
             yield from self.encode_medit(me)
@@ -762,11 +768,12 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
     n_max_tks: int = 4000
     collapse_unchanged: bool = True
     add_truncate_bos: bool = True
+    include_additions: bool = False
 
     def encode_pedit(
         self,
         pedit: ProjectEdit,
-        include_additions: bool = False,
+        training: bool,
     ) -> Iterable[CstBasedTokenizedEdit]:
         def get_selected(
             elems: Iterable[ProjectPath], elem_lens: Iterable[int], selection_len: int
@@ -781,7 +788,7 @@ class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
         ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
         for mname, medit in pedit.changes.items():
             mod_fs = medit.modified_functions(ast_must_change=True)
-            if include_additions:
+            if training and self.include_additions:
                 mod_fs |= medit.added_functions()
             if not mod_fs:
                 continue
@@ -906,14 +913,14 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
     def encode_pedit(
         self,
         pedit: ProjectEdit,
-        include_additions: bool = False,
+        training: bool,
     ):
         raise NotImplementedError("Use `encode_pedits` instead.")
 
     def encode_pedits(
         self,
         pedits: Sequence[ProjectEdit],
-        include_additions: bool = False,
+        training: bool,
     ) -> Iterable[AnalysisBasedTokenizedEdit]:
         analyses = analyze_edits(
             pedits, record_type_usages=self.record_type_usages, silent=True
@@ -928,9 +935,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
             pedit = analysis.pedit
             ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
             path_to_cxt_edit = {e.path: e for e in analysis.ctx_edits}
-            tk_edits = list(
-                cst_encoder.encode_pedit(pedit, include_additions=include_additions)
-            )
+            tk_edits = list(cst_encoder.encode_pedit(pedit, training=training))
             for edit in tk_edits:
                 ctx_edit = path_to_cxt_edit[edit.path]
                 ctx_changes = [
