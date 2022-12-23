@@ -7,7 +7,7 @@ from train_model import check_save_dir, TokenizedEditDataset
 
 import wandb
 from coeditor.common import *
-from coeditor.encoders import BasicQueryEditEncoder
+from coeditor.encoders import QueryRefEditEncoder
 from coeditor.retrieval_model import RetrievalEditorModel, BatchArgs, TrainingArgs
 from prepare_data import make_or_load_datasets
 
@@ -15,7 +15,7 @@ from prepare_data import make_or_load_datasets
 def train_model(
     dataset_name="medium",
     model_variant="-sig-analysis-post_usees",
-    encoder: BasicQueryEditEncoder = BasicQueryEditEncoder(),
+    encoder: QueryRefEditEncoder = QueryRefEditEncoder(),
     batch_args=BatchArgs.train_default(),
     test_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
@@ -33,12 +33,7 @@ def train_model(
     if not eval_only:
         check_save_dir(model_name)
 
-    datasets = make_or_load_datasets(
-        dataset_name,
-        encoder,
-        recreate_data=recreate_data,
-        predict_added_in_training=not batch_args.use_only_modified,
-    )
+    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=recreate_data)
 
     config_dict = {
         k: get_modified_args(v)
@@ -120,9 +115,9 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="large",
-            model_variant="-query-stub",
+            model_variant="-request-stub",
             train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
-            encoder=BasicQueryEditEncoder(),
+            encoder=QueryRefEditEncoder(),
             recreate_data=False,
             eval_only=False,
         )

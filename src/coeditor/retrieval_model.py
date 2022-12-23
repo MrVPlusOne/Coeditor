@@ -978,12 +978,12 @@ class BatchArgs:
             self.max_total_ref_tks, self.max_query_tks, self.max_output_tks
         )
 
-    @staticmethod
-    def train_default() -> "BatchArgs":
-        return BatchArgs()
+    @classmethod
+    def train_default(cls) -> Self:
+        return cls()
 
-    @staticmethod
-    def eval_default() -> "BatchArgs":
+    @classmethod
+    def eval_default(cls) -> Self:
         return BatchArgs(
             max_total_ref_tks=8000 * 2,
             max_queries=32,
@@ -991,8 +991,8 @@ class BatchArgs:
             shuffle_extra_ids=False,
         )
 
-    @staticmethod
-    def service_default() -> "BatchArgs":
+    @classmethod
+    def service_default(cls) -> Self:
         args = BatchArgs.eval_default()
         args.max_query_tks *= 2
         args.max_output_tks *= 2
@@ -1034,6 +1034,7 @@ def edit_groups_to_batches(
             return random_subset(xs, n, random._inst)
 
         def pack_batch(rows: list[dict]):
+            assert rows, "empty batch found"
             input_ids = [x["input_tks"] for x in rows]
             labels = [x["output_tks"] for x in rows]
             refs = [x["ref_selected"] for x in rows]
@@ -1104,7 +1105,7 @@ def edit_groups_to_batches(
             if cost > cost_limit and not warned_batch_size:
                 warned_batch_size = True
                 warnings.warn("Batch cost limit is too small.")
-            if (
+            if (not current_batch) or (
                 cost + current_cost <= cost_limit
                 and len(current_batch) < args.max_queries
             ):
@@ -1192,6 +1193,7 @@ def edits_to_dataloader(
 
 
 def pad_token_seqs(seqs: Sequence[TokenSeq], pad_id=None) -> LongTensor:
+    assert seqs, "Cannot pad empty sequence."
     max_len = max(len(ref) for ref in seqs)
     if pad_id is None:
         pad_id = PAD_id

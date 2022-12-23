@@ -11,24 +11,17 @@ from spot.utils import pretty_print_dict
 def make_or_load_datasets(
     dataset_name: str,
     encoder: EditEncoder[TEdit],
-    predict_added_in_training: bool = False,
     recreate_data: bool = False,
 ) -> dict[str, TokenizedEditDataset[TEdit]]:
-    tag = "with_added-" if predict_added_in_training else ""
-    save_dir = get_dataset_dir(dataset_name) / (tag + repr_modified_args(encoder))
+    save_dir = get_dataset_dir(dataset_name) / (repr_modified_args(encoder))
 
     if recreate_data or not save_dir.exists():
         if dataset_name == "SPOT":
-            datasets = {
-                "test": dataset_from_projects(
-                    [proj_root()], encoder, [predict_added_in_training]
-                )
-            }
+            datasets = {"test": dataset_from_projects([proj_root()], encoder, [False])}
         else:
             datasets = datasets_from_repos(
                 get_dataset_dir(dataset_name) / "repos",
                 encoder,
-                predict_added_in_training=predict_added_in_training,
             )
         with timed_action("Saving datasets to disk"):
             save_datasets(datasets, save_dir)
@@ -55,8 +48,4 @@ if __name__ == "__main__":
     ]
     for encoder in encoders:
         with timed_action(f"Preparing dataset with encoder {encoder}"):
-            make_or_load_datasets(
-                dataset_name,
-                encoder,
-                predict_added_in_training=True,
-            )
+            make_or_load_datasets(dataset_name, encoder)

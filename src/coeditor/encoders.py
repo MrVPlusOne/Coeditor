@@ -57,7 +57,10 @@ class TkProjectEdit(Generic[TQueryEdit]):
     @property
     def stats(self) -> Mapping[str, int]:
         return {
-            "references": len(self.tk_references),
+            "n_references": len(self.tk_references),
+            "ref_size_max": max(
+                len(tks) for segs in self.tk_references.values() for tks in segs
+            ),
             "ref_size_sum": sum(
                 len(tks) for segs in self.tk_references.values() for tks in segs
             ),
@@ -108,6 +111,7 @@ class BasicTkQueryEdit(TokenizedEdit):
         return {
             "input_tks": len(self.input_tks),
             "output_tks": len(self.output_tks),
+            "prev_chunks": len(self.prev_chunks),
             "is_rename_update": is_rename_update,
         } | self.tk_pedit.stats
 
@@ -119,8 +123,26 @@ class EditRequest:
 
 
 @dataclass
-class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
-    "Only use changed elements in a commit as references."
+class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
+    """Encode edits as queries and references.
+    # Args
+    - `max_ref_tks`: The maximum number of tokens in each reference.
+    - `ref_chunk_overlap`: The number of tokens to overlap between reference
+    or query chunks. When a reference/query is longer than its limit, it will
+    be broken into chunks.
+    - `max_chunks_per_ref`: The maximum number of chunks to use for each reference.
+    More chunks will be discarded.
+    - `max_lines_per_function`: Functions larger than this limit will be discarded
+    during training.
+    - `max_query_tks`: The maximum number of tokens in each query.
+    - `max_output_tks`: The maximum number of tokens in each output sequence. Exceeding
+    parts will be cut off during training.
+    - `add_stubs`: Whether to add stubs of changed modules as references.
+    - `add_truncate_bos`: Whether to add a BOS and EOS tokens when truncating.
+    - `collapse_unchanged`: Whether to omit of the body of unchanged definitions
+    when generating the references.
+    """
+
     VERSION = 4
     max_ref_tks: int = 512
     ref_chunk_overlap: int = 16
@@ -182,6 +204,9 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             tk_refs[d] = list(self.encode_elem_move(d, a, change))[
                 : self.max_chunks_per_ref
             ]
+        for refs in tk_refs.values():
+            for seg in refs:
+                assert len(seg) <= self.max_ref_tks
 
         query_data = dict[ProjectPath, BasicTkQueryEdit]()
         tk_pedit = TkProjectEdit(
@@ -232,7 +257,7 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             context = join_list((*cls_tks, context), sep=Newline_id)
 
             input_tks, used_context = truncate_sections(
-                self.max_query_tks - len(path_tks),
+                self.max_query_tks - len(path_tks) - 2,
                 (input_tks, TruncateAt.Right),
                 (context, TruncateAt.Left),
                 add_bos=self.add_truncate_bos,
@@ -253,8 +278,9 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 add_bos=self.add_truncate_bos,
             )
             if no_queries and not output_tks:
-                # can happen if input too long
                 continue
+            assert len(input_tks) <= self.max_query_tks
+            assert len(output_tks) <= self.max_output_tks
             query_data[path] = BasicTkQueryEdit(
                 input_tks=input_tks,
                 output_tks=output_tks,
@@ -280,14 +306,15 @@ class BasicQueryEditEncoder(EditEncoder[BasicTkQueryEdit]):
             ):
                 return  # skip oversized functions
             lines_per_request = 50
-            min_lines_to_edit = 5
-            end = max(1, len(mf.after.code.split("\n")) - min_lines_to_edit)
-            # split it into chunks of 50 lines
-            for i in range(0, end, lines_per_request):
-                x = random.uniform(i, min(end, i + lines_per_request))
-                # round x into nearest int
-                x = int(x + 0.5)
-                yield EditRequest(mf, x)
+            min_lines_to_edit = 3
+            # split it into chunks
+            focus_max = max(1, len(mf.after.code.split("\n")) - min_lines_to_edit)
+            for start in range(0, focus_max, lines_per_request):
+                x = random.random()
+                end = min(focus_max, start + lines_per_request)
+                # bias focus toward start
+                focus = int(x * x * (end - start) + 0.5) + start
+                yield EditRequest(mf, focus)
 
     def encode_elem_change(
         self, c: Change[PythonElem], ctx_encoder: CtxEncoder
@@ -474,6 +501,6 @@ def change_tks_to_query_context(change_tks: TokenSeq, keep_changed_lines: int):
         if result_lines == keep_changed_lines:
             spliter = i
 
-    ref = join_list(lines[:spliter], Newline_id)
+    context = join_list(lines[:spliter], Newline_id)
     query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
-    return query, ref
+    return query, context

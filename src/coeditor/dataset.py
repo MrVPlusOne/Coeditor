@@ -1,5 +1,5 @@
 import numpy as np
-from coeditor.encoders import BasicQueryEditEncoder
+from coeditor.encoders import QueryRefEditEncoder
 from coeditor.encoding import (
     AnalysisBasedEditEncoder,
     Del_id,
@@ -96,7 +96,7 @@ def _process_commits(
         return []
     tk_edits = list()
     if isinstance(encoder, AnalysisBasedEditEncoder) or isinstance(
-        encoder, BasicQueryEditEncoder
+        encoder, QueryRefEditEncoder
     ):
         tk_edits.extend(encoder.encode_pedits(edits, training))
     else:

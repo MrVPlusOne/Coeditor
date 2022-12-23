@@ -4,7 +4,7 @@ import copy
 import torch
 from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
-from coeditor.encoders import BasicQueryEditEncoder, EditRequest
+from coeditor.encoders import QueryRefEditEncoder, EditRequest
 from coeditor.encoding import (
     Add_id,
     Del_id,
@@ -154,7 +154,7 @@ class EditPredictionService:
         project: Path,
         model: RetrievalEditorModel,
         batch_args: BatchArgs = BatchArgs(max_ref_dropout=0.0, shuffle_extra_ids=False),
-        encoder: BasicQueryEditEncoder = BasicQueryEditEncoder(),
+        encoder: QueryRefEditEncoder = QueryRefEditEncoder(),
         dec_args: DecodingArgs = DecodingArgs(),
         config: ChangeDetectionConfig = ChangeDetectionConfig(),
     ) -> None:

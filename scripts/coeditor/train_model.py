@@ -67,7 +67,6 @@ def train_model(
         dataset_name,
         encoder,
         recreate_data=recreate_data,
-        predict_added_in_training=not data_args.use_only_modified,
     )
 
     config_dict = {
