@@ -462,6 +462,7 @@ class PythonModule:
     tree: cst.Module
     location_map: dict[cst.CSTNode, CodeRange]
     elem2pos: dict[ElemPath, CodeRange]
+    removed_comments: list[cst.CSTNode]
 
     @cached_property
     def classes_dict(self) -> dict[ElemPath, PythonClass]:
@@ -480,12 +481,15 @@ class PythonModule:
         wrapper = MetadataWrapper(module)
         src_map = dict(wrapper.resolve(PositionProvider))
         module = wrapper.module
+        removed_comments = []
         if drop_comments:
             remover = CommentRemover(src_map=src_map)
             module = module.visit(remover)
             src_map = remover.src_map
+            removed_comments = remover.removed_lines
+            removed_comments.sort(key=lambda c: src_map[c].start.line)
         _fix_function_location_(src_map)
-        return _build_python_module(module, src_map, name)
+        return _build_python_module(module, src_map, name, removed_comments)
 
     def __repr__(self):
         return f"PythonModule(n_functions={len(self.functions)}, n_classes={len(self.classes)})"
@@ -1411,6 +1415,7 @@ def _build_python_module(
     module: cst.Module,
     node2location: Mapping[cst.CSTNode, CodeRange],
     module_name: ModuleName,
+    removed_comments: list[cst.CSTNode],
 ):
     """Construct a `PythonModule` from a `cst.Module`.
     If multiple definitions of the same name are found, only the last one is kept."""
@@ -1622,6 +1627,7 @@ def _build_python_module(
         tree=module,
         elem2pos=elem2pos,
         location_map=src_map,
+        removed_comments=removed_comments,
     )
 
 
@@ -1946,13 +1952,17 @@ class EmptyLineRemove(cst.CSTTransformer):
 class CommentRemover(cst.CSTTransformer):
     def __init__(self, src_map: Mapping[cst.CSTNode, CodeRange] | None = None):
         super().__init__()
-        self.removed = list[cst.CSTNode]()
+        self.removed_lines = list[cst.CSTNode]()
         self.src_map = dict(src_map) if src_map else dict()
 
-    def on_leave(self, original: cst.CSTNodeT, updated: cst.CSTNodeT):
-        if (old_span := self.src_map.pop(original, None)) is not None:
-            self.src_map[updated] = old_span
-        return super().on_leave(original, updated)
+    def on_leave(self, original: cst.CSTNode, updated: cst.CSTNode):
+        result = super().on_leave(original, updated)
+        if (
+            isinstance(result, cst.CSTNode)
+            and (old_span := self.src_map.pop(original, None)) is not None
+        ):
+            self.src_map[result] = old_span
+        return result
 
     def leave_IndentedBlock(
         self, node: cst.IndentedBlock, updated: cst.IndentedBlock
@@ -1960,7 +1970,7 @@ class CommentRemover(cst.CSTTransformer):
         to_keep = []
         for n in updated.body:
             if self.is_doc_string(n):
-                self.removed.append(n)
+                self.removed_lines.append(n)
             else:
                 to_keep.append(n)
         if len(to_keep) != len(updated.body):
@@ -1974,19 +1984,39 @@ class CommentRemover(cst.CSTTransformer):
 
     def leave_EmptyLine(self, node: cst.EmptyLine, updated: cst.EmptyLine):
         if updated.comment is not None:
-            self.removed.append(updated)
+            self.removed_lines.append(updated.comment)
             return cst.RemoveFromParent()
         else:
             return updated
 
     def leave_TrailingWhitespace(self, node, updated: cst.TrailingWhitespace):
         if updated.comment is not None:
-            self.removed.append(updated)
             return updated.with_changes(
                 comment=None, whitespace=cst.SimpleWhitespace("")
             )
         else:
             return updated
+
+    def line_map(self, post_node: cst.CSTNode) -> dict[int, int]:
+        """Map lines in the post-removal code into pre-removal lines.
+        Line numbers are relative to the start of `node`, 0-based."""
+
+        origin_span = self.src_map[post_node]
+        start_line = origin_span.start.line
+        origin_lines = origin_span.end.line - start_line + 1
+        is_removed = [False for _ in range(origin_lines)]
+        for c in self.removed_lines:
+            span = self.src_map[c]
+            for post_i in range(span.start.line, span.end.line + 1):
+                is_removed[post_i - start_line] = True
+
+        line_map = dict[int, int]()
+        pre_i = 0
+        for post_i, r in enumerate(is_removed):
+            line_map[pre_i] = post_i
+            if not r:
+                pre_i += 1
+        return line_map
 
     @staticmethod
     def is_doc_string(node: cst.BaseStatement) -> bool:

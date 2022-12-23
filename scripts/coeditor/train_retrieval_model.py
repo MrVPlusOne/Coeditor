@@ -124,5 +124,5 @@ if __name__ == "__main__":
             train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
             encoder=BasicQueryEditEncoder(),
             recreate_data=False,
-            eval_only=True,
+            eval_only=False,
         )

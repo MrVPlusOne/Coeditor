@@ -1,5 +1,6 @@
 # End-user API as an editing suggestion tool.
 
+import copy
 import torch
 from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
@@ -7,7 +8,9 @@ from coeditor.encoders import BasicQueryEditEncoder
 from coeditor.encoding import (
     Add_id,
     Del_id,
+    Newline_id,
     decode_tokens,
+    extra_id_to_number,
     extract_edit_change,
     is_extra_id,
 )
@@ -29,6 +32,7 @@ from coeditor.retrieval_model import (
     RetrievalEditorModel,
     edit_groups_to_batches,
 )
+from spot.data import output_ids_as_seqs
 from spot.static_analysis import (
     CommentRemover,
     ModuleName,
@@ -52,7 +56,10 @@ class ChangeDetectionConfig:
     drop_comments: bool = True
 
     def get_pedit(
-        self, project_root: Path, prev_cache: TimedCache, now_cache: TimedCache
+        self,
+        project_root: Path,
+        prev_cache: TimedCache[ModuleName, PythonModule, str],
+        now_cache: TimedCache,
     ) -> ProjectEdit:
         def is_src(path_s: str) -> bool:
             path = Path(path_s)
@@ -160,10 +167,10 @@ class EditPredictionService:
         self.config = config
         self.show_max_solutions = 3
 
-        self.prev_cache = TimedCache()
-        self.now_cache = TimedCache()
-        self.parse_cache = TimedCache()
-        self.stub_cache = TimedCache()
+        self.prev_cache = TimedCache[ModuleName, PythonModule, str]()
+        self.now_cache = TimedCache[ModuleName, PythonModule, float]()
+        self.parse_cache = TimedCache[ModuleName, PythonModule, float]()
+        self.stub_cache = TimedCache[ModuleName, list[TokenSeq], int]()
         self.tlogger = TimeLogger()
 
     def suggest_edit(
@@ -171,6 +178,7 @@ class EditPredictionService:
         file: Path,
         line: int,
         log_file: Path | None = Path("coeditor-log.txt"),
+        apply_edit: bool = False,
     ) -> None:
         """Make the suggestion in-place at the given location."""
         timed = self.tlogger.timed
@@ -181,43 +189,49 @@ class EditPredictionService:
 
         with timed("get target element"):
             mname = PythonProject.rel_path_to_module_name(file.relative_to(project))
-            stamp = str(os.stat(file).st_mtime)
-            mod = self.parse_cache.cached(
+            stamp = os.stat(file).st_mtime
+            now_code = file.read_text()
+            now_mod = self.parse_cache.cached(
                 mname,
                 stamp,
                 lambda: PythonModule.from_cst(
-                    cst.parse_module(file.read_text()), mname, drop_comments=False
+                    cst.parse_module(now_code), mname, drop_comments=False
                 ),
             )
-            elem = get_elem_by_line(mod, line)
-            if elem is None:
+            now_elem = get_elem_by_line(now_mod, line)
+            if now_elem is None:
                 raise ValueError(
                     f"No code element found at line {line} in file {file}."
                 )
-            if not isinstance(elem, PythonFunction):
+            if not isinstance(now_elem, PythonFunction):
                 raise ValueError(f"Only functions can be edited by the model.")
-        cursor_offset = self.compute_offset(mod, elem, line)
+
+        cursor_offset = self.compute_offset(now_mod, now_elem, line)
 
         with timed("construct project edit"):
             pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
-            this_file_changed = mname in pedit.changes
+            now_trans_mod = self.now_cache.cached(
+                mname,
+                stamp,
+                lambda: PythonModule.from_cst(
+                    now_mod.tree, mname, self.config.drop_comments
+                ),
+            )
             if mname not in pedit.after.modules:
-                this_module = self.now_cache.cached(
-                    mname,
-                    stamp,
-                    lambda: PythonModule.from_cst(
-                        mod.tree, mname, self.config.drop_comments
-                    ),
-                )
-                pedit.after.modules[mname] = this_module
-                pedit.changes[mname] = ModuleEdit.from_no_change(this_module)
-        match [c for c in pedit.all_elem_changes() if get_change_path(c) == elem.path]:
+                pedit.after.modules[mname] = now_trans_mod
+                pedit.changes[mname] = ModuleEdit.from_no_change(now_trans_mod)
+        match [
+            c for c in pedit.all_elem_changes() if get_change_path(c) == now_elem.path
+        ]:
             case [Modified(PythonFunction(), PythonFunction()) as mf]:
                 elem_change = cast(Modified[PythonFunction], mf)
             case [Added(PythonFunction()) as mf]:
                 elem_change = cast(Added[PythonFunction], mf)
             case _:
-                elem_change = Modified(elem, elem)
+                trans_elem = copy.copy(now_elem)
+                if self.config.drop_comments:
+                    trans_elem.tree = remove_comments(trans_elem.tree)
+                elem_change = Modified(trans_elem, trans_elem)
         with timed("encode edits"):
             qedits = list(
                 self.encoder.encode_pedit(pedit, self.stub_cache, queries=[elem_change])
@@ -251,13 +265,24 @@ class EditPredictionService:
                 **dec_args,
             )
             assert not isinstance(gen_out, torch.LongTensor)
-            for i in range(gen_out.sequences.size(0))[: self.show_max_solutions]:
-                out_tks = gen_out.sequences[i].tolist()
-                pred_change = extract_edit_change(input_tks, out_tks)
-                print("=" * 10, f"Sugeestion {i}", "=" * 10)
-                if (scores := getattr(gen_out, "sequences_scores", None)) is not None:
-                    print(f"score: {scores[i].item():.4g}")
-                print(show_change(pred_change))
+        for i in range(gen_out.sequences.size(0))[: self.show_max_solutions]:
+            out_tks = gen_out.sequences[i].tolist()
+            pred_change = extract_edit_change(input_tks, out_tks)
+            print("=" * 10, f"Sugeestion {i}", "=" * 10)
+            if (scores := getattr(gen_out, "sequences_scores", None)) is not None:
+                print(f"score: {scores[i].item():.4g}")
+            print(show_change(pred_change))
+
+        out_tks = gen_out.sequences[0].tolist()
+        if apply_edit:
+            span, new_code = self.edit_current_element(
+                now_mod.location_map, now_elem, out_tks
+            )
+            start_ln, end_ln = span.start.line - 1, span.end.line - 1
+            now_lines = now_code.split("\n")
+            new_lines = now_lines[:start_ln] + [new_code] + now_lines[end_ln + 1 :]
+            file.write_text("\n".join(new_lines))
+            print("Edit applied to source.")
 
         if log_file is None:
             return
@@ -272,7 +297,6 @@ class EditPredictionService:
             print(header("Ground truth"), file=f)
             print(indent(decode_tokens(output_truth)), file=f)
             print(header("Predicted"), file=f)
-            out_tks = gen_out.sequences[0].tolist()
             print(indent(decode_tokens(out_tks[len(output_prefix) + 1 :])), file=f)
             print(header("Input"), file=f)
             print(indent(decode_tokens(input_tks)), file=f)
@@ -283,18 +307,52 @@ class EditPredictionService:
 
     def compute_offset(self, mod: PythonModule, elem: PythonFunction, line: int):
         "Compute the relative offset of a given line in the body of a function."
-        origin_offset = line - mod.location_map[elem.tree.body].start.line + 1
+        body_line = mod.location_map[elem.tree.body].start.line
+        origin_offset = line - body_line + 1
         if not self.config.drop_comments:
             return origin_offset
         else:
             removed_lines = 0
             remover = CommentRemover(mod.location_map)
             elem.tree.visit(remover)
-            for c in remover.removed:
+            for c in remover.removed_lines:
                 span = remover.src_map[c]
                 if span.end.line < line:
                     removed_lines += span.end.line - span.start.line + 1
             return origin_offset - removed_lines
+
+    def edit_current_element(
+        self,
+        pre_src_map: Mapping[cst.CSTNode, CodeRange],
+        pre_elem: PythonFunction,
+        out_tks: TokenSeq,
+    ) -> tuple[CodeRange, str]:
+        assert self.config.drop_comments
+
+        remover = CommentRemover(pre_src_map)
+        post_tree = pre_elem.tree.visit(remover)
+        assert isinstance(post_tree, cst.FunctionDef)
+        line_map = remover.line_map(post_tree.body)
+        post_lines = len(line_map)
+        # handle the extra appending line
+        line_map[post_lines] = line_map[post_lines - 1] + 1
+
+        pre_body_code = pre_elem.header_body_code[1]
+        line_groups: list[list[str]] = [[]] + [[l] for l in pre_body_code.split("\n")]
+        for tk, out_seg in output_ids_as_seqs(out_tks).items():
+            target_line = line_map[extra_id_to_number(tk)] + 1
+            for seg in split_list(out_seg, Newline_id):
+                match seg:
+                    case [tag, *content] if tag == Add_id:
+                        line_groups[target_line - 1].append(decode_tokens(content))
+                    case [tag, *_] if tag == Del_id:
+                        line_groups[target_line] = []
+        new_body_code = "\n".join(line for group in line_groups for line in group)
+
+        body_span = pre_src_map[pre_elem.tree.body]
+        n_indent = body_span.start.column
+        textwrap.indent(textwrap.dedent(new_body_code), " " * n_indent)
+        return body_span, new_body_code
 
 
 def get_elem_by_line(module: PythonModule, line: int) -> PythonElem | None:

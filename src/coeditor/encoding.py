@@ -79,6 +79,9 @@ def get_extra_id(i: int) -> int:
     assert 0 <= i < N_Extra_Ids
     return _Tokenizer.additional_special_tokens_ids[N_Extra_Ids - 1 - i]
 
+def extra_id_to_number(tk: int) -> int:
+    assert is_extra_id(tk)
+    return _max_extra_id - tk
 
 def decode_tokens(tokens: TokenSeq) -> str:
     return _Tokenizer.decode(tokens, add_special_tokens=False)
@@ -163,6 +166,8 @@ def check_output_tokens(tks: TokenSeq) -> bool:
     return True
 
 
+# TODO: change this to output a sequence of pairs
+# also take in a list of chunk start lines
 def change_to_input_output(change: Change[str]) -> tuple[TokenSeq, TokenSeq]:
     """
     Encode the change as a pair of input and output token sequences.

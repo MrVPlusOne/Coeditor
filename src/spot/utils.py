@@ -936,3 +936,7 @@ def show_expr(
 
 def cprint(color: str, *elems, **print_args):
     print(*(colored(str(e), color) for e in elems), **print_args)
+
+
+def show_code_range(crange: CodeRange) -> str:
+    return f"[{crange.start.line}:{crange.start.column+1}--{crange.end.line}:{crange.end.column+1}]"
