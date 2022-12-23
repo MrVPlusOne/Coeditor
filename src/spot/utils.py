@@ -179,12 +179,12 @@ def with_default_workers(workers: int):
 
 
 @dataclass
-class TaggedFunc(Generic[T1]):
+class _TaggedFunc(Generic[T1]):
     """Helper class to tag the output of a function. Useful for using
     with unordered map."""
 
     f: Callable[..., T1]
-    key_args: dict
+    key_args: Mapping[str, Any]
 
     def __call__(self, args: tuple) -> tuple[Any, T1]:
         return args[0], self.f(*args[1:], **self.key_args)
@@ -194,10 +194,10 @@ def pmap(
     f: Callable[..., T1],
     *f_args: Any,
     desc: str = "parallel map",
-    key_args: dict | None = None,
+    key_args: Mapping[str, Any] | None = None,
     max_workers: int | None = None,
     chunksize: int | None = None,
-    tqdm_args: dict | None = None,
+    tqdm_args: Mapping[str, Any] | None = None,
 ) -> list[T1]:
     """
     Parallel map with progress displaying.
@@ -207,19 +207,21 @@ def pmap(
 
     if tqdm_args is None:
         tqdm_args = {"smoothing": 0.0}
+    if key_args is None:
+        key_args = {}
 
     if max_workers is None:
         max_workers = DefaultWorkers
     if max_workers <= 1:
         outs = list[T1]()
         for i in tqdm(range(n), desc=desc, **tqdm_args):
-            outs.append(f(*(a[i] for a in f_args)))
+            outs.append(f(*(a[i] for a in f_args), **key_args))
         return outs
 
     if chunksize is None:
         chunksize = max(1, n // (50 * max_workers))
 
-    tag_f = TaggedFunc(f, key_args or {})
+    tag_f = _TaggedFunc(f, key_args)
     arg_tuples = zip(range(n), *f_args)
 
     with (
