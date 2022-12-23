@@ -275,13 +275,12 @@ class EditPredictionService:
 
         out_tks = gen_out.sequences[0].tolist()
         if apply_edit:
-            span, new_code = self.edit_current_element(
+            new_elem_code = self.edit_current_element(
                 now_mod.location_map, now_elem, out_tks
             )
-            start_ln, end_ln = span.start.line - 1, span.end.line - 1
-            now_lines = now_code.split("\n")
-            new_lines = now_lines[:start_ln] + [new_code] + now_lines[end_ln + 1 :]
-            file.write_text("\n".join(new_lines))
+            now_span = now_mod.location_map[now_elem.tree.body]
+            new_code = replace_lines(now_code, now_span, new_elem_code)
+            file.write_text(new_code)
             print("Edit applied to source.")
 
         if log_file is None:
@@ -326,33 +325,40 @@ class EditPredictionService:
         pre_src_map: Mapping[cst.CSTNode, CodeRange],
         pre_elem: PythonFunction,
         out_tks: TokenSeq,
-    ) -> tuple[CodeRange, str]:
-        assert self.config.drop_comments
+    ) -> str:
 
-        remover = CommentRemover(pre_src_map)
-        post_tree = pre_elem.tree.visit(remover)
-        assert isinstance(post_tree, cst.FunctionDef)
-        line_map = remover.line_map(post_tree.body)
-        post_lines = len(line_map)
-        # handle the extra appending line
-        line_map[post_lines] = line_map[post_lines - 1] + 1
+        if self.config.drop_comments:
+            remover = CommentRemover(pre_src_map)
+            post_tree = pre_elem.tree.visit(remover)
+            assert isinstance(post_tree, cst.FunctionDef)
+            line_map = remover.line_map(post_tree.body)
+            post_lines = len(line_map)
+            # handle the extra appending line
+            line_map[post_lines] = line_map[post_lines - 1] + 1
+        else:
+            line_map = None
 
         pre_body_code = pre_elem.header_body_code[1]
         line_groups: list[list[str]] = [[]] + [[l] for l in pre_body_code.split("\n")]
         for tk, out_seg in output_ids_as_seqs(out_tks).items():
-            target_line = line_map[extra_id_to_number(tk)] + 1
+            target_line = extra_id_to_number(tk)
+            if line_map:
+                target_line = line_map[target_line]
             for seg in split_list(out_seg, Newline_id):
                 match seg:
                     case [tag, *content] if tag == Add_id:
-                        line_groups[target_line - 1].append(decode_tokens(content))
+                        line_groups[target_line].append(decode_tokens(content))
                     case [tag, *_] if tag == Del_id:
-                        line_groups[target_line] = []
-        new_body_code = "\n".join(line for group in line_groups for line in group)
+                        line_groups[target_line + 1] = []
+        return "\n".join(line for group in line_groups for line in group)
 
-        body_span = pre_src_map[pre_elem.tree.body]
-        n_indent = body_span.start.column
-        textwrap.indent(textwrap.dedent(new_body_code), " " * n_indent)
-        return body_span, new_body_code
+
+def replace_lines(text: str, span: CodeRange, replacement: str):
+    start_ln, end_ln = span.start.line - 1, span.end.line - 1
+    replacemnet = textwrap.indent(textwrap.dedent(replacement), " " * span.start.column)
+    old_lines = text.split("\n")
+    new_lines = old_lines[:start_ln] + [replacemnet] + old_lines[end_ln + 1 :]
+    return "\n".join(new_lines)
 
 
 def get_elem_by_line(module: PythonModule, line: int) -> PythonElem | None:
