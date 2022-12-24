@@ -252,7 +252,13 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
                     max_span_size=6,
                     mask_name="MASKED",
                 )
-                code_before = show_element(tree_before, mf.before.in_class)
+                try:
+                    code_before = show_element(tree_before, mf.before.in_class)
+                except Exception as e:
+                    # e.add_note(f"CST:\n{tree_before}")
+                    # raise
+                    warnings.warn("Failed to show masked code: " + str(e))
+                    code_before = mf.before.code
                 code_change = Modified(code_before, mf.after.code)
             else:
                 code_change = mf.map(lambda x: x.code)
@@ -551,17 +557,25 @@ def random_mask_ast(
     size_map = compute_node_size(node)
 
     class Masker(cst.CSTTransformer):
-        def on_leave(self, original: cst.CSTNode, updated: cst.CSTNode):
+        def visit_ConcatenatedString(self, node: cst.ConcatenatedString):
+            return False
+
+        def on_leave(self, original: cst.CSTNode, updated):
+            updated = super().on_leave(original, updated)
             if (
                 isinstance(
                     original,
                     (
-                        cst.Call,
                         cst.Name,
+                        cst.Call,
                         cst.Attribute,
-                        cst.SimpleString,
+                        cst.Subscript,
                         cst.Lambda,
                         cst.BinaryOperation,
+                        cst.UnaryOperation,
+                        cst.Comparison,
+                        cst.BaseList,
+                        cst.SimpleString,
                         cst.SimpleStatementLine,
                     ),
                 )
@@ -571,9 +585,15 @@ def random_mask_ast(
                     mask = cst.Name(mask_name)
                     if isinstance(original, cst.SimpleStatementLine):
                         mask = cst.SimpleStatementLine([cst.Expr(mask)])
+                    elif isinstance(original, cst.SimpleString):
+                        mask = cst.SimpleString(repr(mask_name))
                     return mask
             return updated
 
-    new_node = node.visit(Masker())
+    try:
+        new_node = node.visit(Masker())
+    except Exception as e:
+        warnings.warn(f"Failed during random masking: {str(e)}")
+        return node
     assert isinstance(new_node, cst.CSTNode)
     return new_node

@@ -117,7 +117,7 @@ if __name__ == "__main__":
             dataset_name="large",
             model_variant="-request-stub-masked",
             train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
-            encoder=QueryRefEditEncoder(ast_mask_prob=0.08),
+            encoder=QueryRefEditEncoder(ast_mask_prob=0.06),
             recreate_data=False,
             eval_only=False,
         )
