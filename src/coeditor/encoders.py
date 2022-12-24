@@ -25,6 +25,7 @@ from spot.static_analysis import (
     PythonFunction,
     PythonModule,
     PythonVariable,
+    show_element,
     stub_from_module,
 )
 from .history import (
@@ -153,6 +154,7 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
     add_stubs: bool = True
     add_truncate_bos: bool = True
     collapse_unchanged: bool = True
+    ast_mask_prob: float = 0.0
 
     def encode_pedits(
         self,
@@ -233,7 +235,6 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
             assert not isinstance(mf, Deleted)
             if mf.after.path in renamed_paths:
                 mf = after_to_mf[mf.after.path]
-            code_change = mf.map(lambda x: x.code)
 
             if (
                 no_queries
@@ -244,6 +245,17 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 # skip large functions during evaluation
                 continue
 
+            if training and self.ast_mask_prob > 0 and isinstance(mf, Modified):
+                tree_before = random_mask_ast(
+                    mf.before.tree,
+                    mask_prob=self.ast_mask_prob,
+                    max_span_size=6,
+                    mask_name="MASKED",
+                )
+                code_before = show_element(tree_before, mf.before.in_class)
+                code_change = Modified(code_before, mf.after.code)
+            else:
+                code_change = mf.map(lambda x: x.code)
             change_tks = change_to_tokens(code_change)
             (input_tks, output_tks), context = change_tks_to_query_context(
                 change_tks, request.respect_lines
@@ -504,3 +516,64 @@ def change_tks_to_query_context(change_tks: TokenSeq, keep_changed_lines: int):
     context = join_list(lines[:spliter], Newline_id)
     query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
     return query, context
+
+
+def compute_node_size(node: cst.CSTNode) -> Mapping[cst.CSTNode, int]:
+    class Counter(cst.CSTVisitor):
+        def __init__(self):
+            self.counts: dict[cst.CSTNode, int] = {}
+            self.counter = 0
+
+        def on_visit(self, node: cst.CSTNode) -> bool:
+            self.counts[node] = self.counter
+            if isinstance(node, cst.BaseExpression):
+                self.counter += 1
+            return True
+
+        def on_leave(self, node: cst.CSTNode):
+            self.counts[node] = self.counter - self.counts[node]
+
+    counter = Counter()
+    node.visit(counter)
+    return counter.counts
+
+
+def random_mask_ast(
+    node: cst.CSTNode,
+    mask_prob: float,
+    max_span_size: int,
+    rng: random.Random | None = None,
+    mask_name: str = "MASKED",
+) -> cst.CSTNode:
+    if rng is None:
+        rng = random._inst
+
+    size_map = compute_node_size(node)
+
+    class Masker(cst.CSTTransformer):
+        def on_leave(self, original: cst.CSTNode, updated: cst.CSTNode):
+            if (
+                isinstance(
+                    original,
+                    (
+                        cst.Call,
+                        cst.Name,
+                        cst.Attribute,
+                        cst.SimpleString,
+                        cst.Lambda,
+                        cst.BinaryOperation,
+                        cst.SimpleStatementLine,
+                    ),
+                )
+                and 0 < (size := size_map[original]) <= max_span_size
+            ):
+                if cast(random.Random, rng).random() < mask_prob / size:
+                    mask = cst.Name(mask_name)
+                    if isinstance(original, cst.SimpleStatementLine):
+                        mask = cst.SimpleStatementLine([cst.Expr(mask)])
+                    return mask
+            return updated
+
+    new_node = node.visit(Masker())
+    assert isinstance(new_node, cst.CSTNode)
+    return new_node

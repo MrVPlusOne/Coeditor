@@ -115,9 +115,9 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="large",
-            model_variant="-request-stub",
+            model_variant="-request-stub-masked",
             train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
-            encoder=QueryRefEditEncoder(),
+            encoder=QueryRefEditEncoder(ast_mask_prob=0.08),
             recreate_data=False,
             eval_only=False,
         )
