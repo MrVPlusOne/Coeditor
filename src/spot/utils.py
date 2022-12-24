@@ -205,8 +205,9 @@ def pmap(
     n = len(f_args[0])
     assert_eq(n, *(len(xs) for xs in f_args))
 
-    if tqdm_args is None:
-        tqdm_args = {"smoothing": 0.0}
+    tqdm_args = dict(tqdm_args) if tqdm_args else {}
+    tqdm_args.setdefault("smoothing", 0.0)
+
     if key_args is None:
         key_args = {}
 
