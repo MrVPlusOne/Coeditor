@@ -4,11 +4,17 @@ import copy
 import torch
 from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
-from coeditor.encoders import QueryRefEditEncoder, EditRequest
+from coeditor.encoders import (
+    QueryRefEditEncoder,
+    EditRequest,
+    apply_output_tks_to_change,
+    change_tks_to_query_context,
+)
 from coeditor.encoding import (
     Add_id,
     Del_id,
     Newline_id,
+    change_to_tokens,
     decode_tokens,
     extra_id_to_number,
     extract_edit_change,
@@ -170,6 +176,7 @@ class EditPredictionService:
         self.prev_cache = TimedCache[ModuleName, PythonModule, str]()
         self.now_cache = TimedCache[ModuleName, PythonModule, float]()
         self.parse_cache = TimedCache[ModuleName, PythonModule, float]()
+        self.prev_parse_cache = TimedCache[ModuleName, PythonModule, str]()
         self.stub_cache = TimedCache[ModuleName, list[TokenSeq], int]()
         self.tlogger = TimeLogger()
 
@@ -179,7 +186,7 @@ class EditPredictionService:
         line: int,
         log_file: Path | None = Path("coeditor-log.txt"),
         apply_edit: bool = False,
-    ) -> None:
+    ) -> bool | None:
         """Make the suggestion in-place at the given location."""
         timed = self.tlogger.timed
         project = self.project
@@ -205,9 +212,6 @@ class EditPredictionService:
                 )
             if not isinstance(now_elem, PythonFunction):
                 raise ValueError(f"Only functions can be edited by the model.")
-
-        respect_lines = self.compute_offset(now_mod, now_elem, line) + 1
-        print(f"{respect_lines = }")
 
         with timed("construct project edit"):
             pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
@@ -235,6 +239,10 @@ class EditPredictionService:
                 elem_change = Modified(trans_elem, trans_elem)
 
         with timed("encode edits"):
+            respect_lines = (
+                self.compute_offset(now_mod, now_elem, line, drop_comments=True) + 1
+            )
+            print(f"{respect_lines = }")
             req = EditRequest(elem_change, respect_lines)
             qedits = list(
                 self.encoder.encode_pedit(
@@ -256,18 +264,10 @@ class EditPredictionService:
             input_tks = batch["input_ids"][0]
             references = batch["references"]
             output_truth = batch["labels"][0]
-            # output_prefix, output_truth = split_label_by_post_edit_line(
-            #     batch["labels"][0], cursor_offset
-            # )
             gen_out = self.model.generate(
                 self.model.encode_token_seqs([input_tks]),
                 references=references,
                 query_ref_list=batch["query_ref_list"],
-                # prefix_allowed_tokens_fn=(
-                #     CoeditorModel._prefix_constraint([output_prefix])
-                #     if output_prefix
-                #     else None
-                # ),
                 output_scores=True,
                 return_dict_in_generate=True,
                 num_return_sequences=self.dec_args.num_beams,
@@ -283,17 +283,23 @@ class EditPredictionService:
             print(show_change(pred_change))
 
         out_tks = gen_out.sequences[0].tolist()
+        changed = None
         if apply_edit:
-            new_elem_code = self.edit_current_element(
-                now_mod.location_map, now_elem, respect_lines, out_tks
+            new_elem_code = self.apply_edit_to_elem(
+                file,
+                now_elem,
+                self.compute_offset(now_mod, now_elem, line, drop_comments=False) + 1,
+                out_tks,
             )
             now_span = now_mod.location_map[now_elem.tree]
             new_code = replace_lines(now_code, now_span, new_elem_code)
-            file.write_text(new_code)
-            print("Edit applied to source.")
+            changed = new_code != now_code
+            if changed:
+                file.write_text(new_code)
+                print("Edit applied to source.")
 
         if log_file is None:
-            return
+            return changed
         header = lambda s: "=" * 10 + s + "=" * 10
         indent = lambda s: textwrap.indent(s, "    ")
         with log_file.open("w") as f:
@@ -310,14 +316,19 @@ class EditPredictionService:
             for i, ref in enumerate(references):
                 print("-" * 6 + f"Reference {i}" + "-" * 6, file=f)
                 print(indent(decode_tokens(ref)), file=f)
+        return changed
 
     def compute_offset(
-        self, now_mod: PythonModule, now_elem: PythonFunction, line: int
+        self,
+        now_mod: PythonModule,
+        now_elem: PythonFunction,
+        line: int,
+        drop_comments: bool,
     ):
         "Compute the relative offset of a given line w.r.t. the beginning of a function."
         start_line = now_mod.location_map[now_elem.tree].start.line
         origin_offset = line - start_line
-        if not self.config.drop_comments:
+        if not drop_comments:
             return origin_offset
         else:
             removed_lines = 0
@@ -329,42 +340,46 @@ class EditPredictionService:
                     removed_lines += span.end.line - span.start.line + 1
             return origin_offset - removed_lines
 
-    def edit_current_element(
+    def apply_edit_to_elem(
         self,
-        now_src_map: Mapping[cst.CSTNode, CodeRange],
-        now_elem: PythonFunction,
+        file: Path,
+        now_elem: PythonElem,
         respect_lines: int,
         out_tks: TokenSeq,
     ) -> str:
-
-        if self.config.drop_comments:
-            remover = CommentRemover(now_src_map)
-            post_tree = now_elem.tree.visit(remover)
-            assert isinstance(post_tree, cst.FunctionDef)
-            line_map = remover.line_map(post_tree)
-            post_lines = len(line_map)
-            # handle the extra appending line
-            line_map[post_lines] = line_map[post_lines - 1] + 1
-        else:
-            line_map = None
-
+        mname = now_elem.path.module
+        path_s = file.relative_to(self.project).as_posix()
+        prev_mod = self.prev_parse_cache.cached(
+            path_s,
+            self.config.prev_commit,
+            lambda: PythonModule.from_cst(
+                cst.parse_module(
+                    file_content_from_commit(
+                        self.project, self.config.prev_commit, path_s
+                    )
+                ),
+                mname,
+                drop_comments=False,
+            ),
+        )
         now_code = now_elem.code
-        line_groups: list[list[str]] = [[]] + [[l] for l in now_code.split("\n")]
-        for tk, out_seg in output_ids_as_seqs(out_tks).items():
-            target_line = extra_id_to_number(tk) + respect_lines
-            if line_map:
-                target_line = line_map[target_line]
-            for seg in split_list(out_seg, Newline_id):
-                match seg:
-                    case [tag, *content] if tag == Add_id:
-                        line_groups[target_line].append(decode_tokens(content))
-                    case [tag, *_] if tag == Del_id:
-                        line_groups[target_line + 1] = []
-        return "\n".join(line for group in line_groups for line in group)
+        prev_elem = prev_mod.elems_dict.get(now_elem.path.path)
+        if prev_elem is None:
+            code_change = Added(now_code)
+        else:
+            code_change = Modified(prev_elem.code, now_code)
+        print("Now respect lines:", respect_lines)
+        print("Now code change:")
+        print(show_change(code_change))
+        change_tks = change_to_tokens(code_change)
+        new_change = apply_output_tks_to_change(change_tks, respect_lines, out_tks)
+        print("New code change:")
+        print(show_change(new_change))
+        return new_change.after
 
 
 def replace_lines(text: str, span: CodeRange, replacement: str):
-    start_ln, end_ln = span.start.line - 1, span.end.line - 1
+    start_ln, end_ln = span.start.line - 1, span.end.line
     replacemnet = textwrap.indent(textwrap.dedent(replacement), " " * span.start.column)
     old_lines = text.split("\n")
     new_lines = old_lines[:start_ln] + [replacemnet] + old_lines[end_ln + 1 :]

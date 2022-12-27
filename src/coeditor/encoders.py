@@ -14,6 +14,8 @@ from coeditor.encoding import (
     change_to_tokens,
     collapse_code,
     encode_basic,
+    inline_output_tokens,
+    tokens_to_change,
     truncate_output_tks,
     truncate_section,
     truncate_sections,
@@ -522,6 +524,20 @@ def change_tks_to_query_context(change_tks: TokenSeq, respect_lines: int):
     context = join_list(lines[:spliter], Newline_id)
     query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
     return query, context
+
+
+def apply_output_tks_to_change(
+    change_tks: TokenSeq,
+    respect_lines: int,
+    out_tks: TokenSeq,
+) -> Modified[str]:
+    (input_tks, _), context = change_tks_to_query_context(change_tks, respect_lines)
+    change_tks = (
+        context
+        + [Newline_id]
+        + inline_output_tokens(input_tks, out_tks, leave_unpredicted=False)
+    )
+    return tokens_to_change(change_tks)
 
 
 def compute_node_size(node: cst.CSTNode) -> Mapping[cst.CSTNode, int]:
