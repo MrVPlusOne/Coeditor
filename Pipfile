@@ -25,6 +25,8 @@ termcolor = "~=1.0"
 prettytable = ">=3.4.1"
 nltk = "*"
 spot = {editable = true, path = "."}
+jsonrpclib = "*"
+jsonrpcserver = "*"
 
 [dev-packages]
 pytest = "*"
