@@ -1,6 +1,7 @@
 # End-user API as an editing suggestion tool.
 
 import copy
+import logging
 import torch
 from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
@@ -368,13 +369,9 @@ class EditPredictionService:
             code_change = Added(now_code)
         else:
             code_change = Modified(prev_elem.code, now_code)
-        print("Now respect lines:", respect_lines)
-        print("Now code change:")
-        print(show_change(code_change))
+        logging.info("Now respect lines:", respect_lines)
         change_tks = change_to_tokens(code_change)
         new_change = apply_output_tks_to_change(change_tks, respect_lines, out_tks)
-        print("New code change:")
-        print(show_change(new_change))
         return new_change.after
 
 

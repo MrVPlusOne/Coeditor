@@ -10,27 +10,32 @@ from coeditor.api import (
 from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
 
 
-def start_server(target_dir: Path, device, port: int = 5042):
-    model_path = get_model_dir(True) / "coeditor-large-request-stub"
+def start_server(device, port: int = 5042):
+    model_path = get_model_dir(True) / "coeditor-large-request-stub-masked"
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
-    print("Model loaded on device:", device)
+    print(f"Model '{model_path.name}' loaded on device:", device)
     batch_args = BatchArgs.service_default()
-    service = EditPredictionService(
-        target_dir,
-        model,
-        batch_args=batch_args,
-        encoder=QueryRefEditEncoder(
-            max_ref_tks=batch_args.max_ref_tks,
-            max_query_tks=batch_args.max_query_tks,
-            max_output_tks=batch_args.max_output_tks,
-        ),
-        dec_args=DecodingArgs(do_sample=False, num_beams=8, length_penalty=0.0),
-    )
-    print(f"Service started for project: {target_dir}")
+    services = dict[Path, EditPredictionService]()
 
     @method
-    def suggestAndApply(file: str, line: int):
+    def suggestAndApply(project: str, file: str, line: int):
+        target_dir = Path(project).resolve()
+        if (service := services.get(target_dir)) is None:
+            service = EditPredictionService(
+                target_dir,
+                model,
+                batch_args=batch_args,
+                encoder=QueryRefEditEncoder(
+                    max_ref_tks=batch_args.max_ref_tks,
+                    max_query_tks=batch_args.max_query_tks,
+                    max_output_tks=batch_args.max_output_tks,
+                ),
+                dec_args=DecodingArgs(do_sample=False, num_beams=8, length_penalty=0.0),
+            )
+            print(f"Service created for project: {target_dir}")
+            services[target_dir] = service
+
         print(f"Suggesting edit for line {line} in {file}")
         path = Path(file)
         if not Path.is_absolute(path):
@@ -41,9 +46,9 @@ def start_server(target_dir: Path, device, port: int = 5042):
         except Exception as e:
             return Error(message=str(e))
 
-    print(f"Starting server at localhost:{port}")
+    print(f"Starting suggestion server at localhost:{port}")
     serve("localhost", port)
 
 
 if __name__ == "__main__":
-    start_server(proj_root() / "../SPOT-copy", "cuda:2")
+    start_server("cuda:2")
