@@ -206,7 +206,8 @@ class EditPredictionService:
             if not isinstance(now_elem, PythonFunction):
                 raise ValueError(f"Only functions can be edited by the model.")
 
-        edit_offset = self.compute_offset(now_mod, now_elem, line)
+        respect_lines = self.compute_offset(now_mod, now_elem, line) + 1
+        print(f"{respect_lines = }")
 
         with timed("construct project edit"):
             pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
@@ -234,7 +235,7 @@ class EditPredictionService:
                 elem_change = Modified(trans_elem, trans_elem)
 
         with timed("encode edits"):
-            req = EditRequest(elem_change, edit_offset)
+            req = EditRequest(elem_change, respect_lines)
             qedits = list(
                 self.encoder.encode_pedit(
                     pedit,
@@ -284,7 +285,7 @@ class EditPredictionService:
         out_tks = gen_out.sequences[0].tolist()
         if apply_edit:
             new_elem_code = self.edit_current_element(
-                now_mod.location_map, now_elem, edit_offset, out_tks
+                now_mod.location_map, now_elem, respect_lines, out_tks
             )
             now_span = now_mod.location_map[now_elem.tree]
             new_code = replace_lines(now_code, now_span, new_elem_code)
@@ -296,15 +297,13 @@ class EditPredictionService:
         header = lambda s: "=" * 10 + s + "=" * 10
         indent = lambda s: textwrap.indent(s, "    ")
         with log_file.open("w") as f:
-            print(f"{edit_offset = }", file=f)
+            print(f"{respect_lines = }", file=f)
             print(f"{len(input_tks) = }", file=f)
             print(f"{len(references) = }", file=f)
-            # print(header("User prefix"), file=f)
-            # print(indent(decode_tokens(output_prefix)), file=f)
             print(header("Ground truth"), file=f)
             print(indent(decode_tokens(output_truth)), file=f)
             print(header("Predicted"), file=f)
-            print(indent(decode_tokens(out_tks[len(out_tks) + 1 :])), file=f)
+            print(indent(decode_tokens(out_tks)), file=f)
             print(header("Input"), file=f)
             print(indent(decode_tokens(input_tks)), file=f)
             print(header("References"), file=f)
@@ -315,9 +314,9 @@ class EditPredictionService:
     def compute_offset(
         self, now_mod: PythonModule, now_elem: PythonFunction, line: int
     ):
-        "Compute the relative offset of a given line in the body of a function."
+        "Compute the relative offset of a given line w.r.t. the beginning of a function."
         start_line = now_mod.location_map[now_elem.tree].start.line
-        origin_offset = line - start_line + 1
+        origin_offset = line - start_line
         if not self.config.drop_comments:
             return origin_offset
         else:
@@ -332,27 +331,27 @@ class EditPredictionService:
 
     def edit_current_element(
         self,
-        pre_src_map: Mapping[cst.CSTNode, CodeRange],
-        pre_elem: PythonFunction,
-        out_line_offset: int,
+        now_src_map: Mapping[cst.CSTNode, CodeRange],
+        now_elem: PythonFunction,
+        respect_lines: int,
         out_tks: TokenSeq,
     ) -> str:
 
         if self.config.drop_comments:
-            remover = CommentRemover(pre_src_map)
-            post_tree = pre_elem.tree.visit(remover)
+            remover = CommentRemover(now_src_map)
+            post_tree = now_elem.tree.visit(remover)
             assert isinstance(post_tree, cst.FunctionDef)
-            line_map = remover.line_map(post_tree.body)
+            line_map = remover.line_map(post_tree)
             post_lines = len(line_map)
             # handle the extra appending line
             line_map[post_lines] = line_map[post_lines - 1] + 1
         else:
             line_map = None
 
-        pre_code = pre_elem.code
-        line_groups: list[list[str]] = [[]] + [[l] for l in pre_code.split("\n")]
+        now_code = now_elem.code
+        line_groups: list[list[str]] = [[]] + [[l] for l in now_code.split("\n")]
         for tk, out_seg in output_ids_as_seqs(out_tks).items():
-            target_line = extra_id_to_number(tk) + out_line_offset
+            target_line = extra_id_to_number(tk) + respect_lines
             if line_map:
                 target_line = line_map[target_line]
             for seg in split_list(out_seg, Newline_id):

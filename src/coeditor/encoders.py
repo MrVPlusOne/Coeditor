@@ -507,17 +507,17 @@ def find_rename_updates(
             yield m
 
 
-def change_tks_to_query_context(change_tks: TokenSeq, keep_changed_lines: int):
+def change_tks_to_query_context(change_tks: TokenSeq, respect_lines: int):
     lines = split_list(change_tks, Newline_id)
     spliter = 0
-    result_lines = -1
+    result_lines = 0
     for i, l in enumerate(lines):
         if l and l[0] == Del_id:
             pass
         else:
             result_lines += 1
-        if result_lines == keep_changed_lines:
-            spliter = i
+        if result_lines == respect_lines:
+            spliter = i + 1
 
     context = join_list(lines[:spliter], Newline_id)
     query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
