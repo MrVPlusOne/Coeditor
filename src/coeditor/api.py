@@ -168,7 +168,6 @@ class EditPredictionService:
         self.project = project
         self.model = model
         self.batch_args = batch_args
-        self.model = model
         self.encoder = encoder
         self.dec_args = dec_args
         self.config = config
@@ -179,7 +178,7 @@ class EditPredictionService:
         self.parse_cache = TimedCache[ModuleName, PythonModule, float]()
         self.prev_parse_cache = TimedCache[ModuleName, PythonModule, str]()
         self.stub_cache = TimedCache[ModuleName, list[TokenSeq], int]()
-        self.tlogger = TimeLogger()
+        self.tlogger = model.tlogger
 
     def suggest_edit(
         self,
@@ -261,49 +260,47 @@ class EditPredictionService:
             batch = batches[0]
 
         with timed("run model"), torch.autocast("cuda"):
-            dec_args = self.dec_args.to_model_args()
-            input_tks = batch["input_ids"][0]
-            references = batch["references"]
-            output_truth = batch["labels"][0]
-            gen_out = self.model.generate(
-                self.model.encode_token_seqs([input_tks]),
-                references=references,
-                query_ref_list=batch["query_ref_list"],
-                output_scores=True,
-                return_dict_in_generate=True,
-                num_return_sequences=self.dec_args.num_beams,
-                **dec_args,
+            predictions = self.model.predict_on_batch(
+                batch, [req], self.dec_args, self.show_max_solutions
             )
-            assert not isinstance(gen_out, torch.LongTensor)
-        for i in range(gen_out.sequences.size(0))[: self.show_max_solutions]:
-            out_tks = gen_out.sequences[i].tolist()
-            pred_change = extract_edit_change(input_tks, out_tks)
+            assert_eq(len(predictions), 1)
+            predictions = predictions[0]
+            assert predictions
+
+        for i, (pred_change, _, score) in enumerate(predictions):
             print("=" * 10, f"Sugeestion {i}", "=" * 10)
-            if (scores := getattr(gen_out, "sequences_scores", None)) is not None:
-                print(f"score: {scores[i].item():.4g}")
+            print(f"score: {score:.4g}")
             print(show_change(pred_change))
 
-        out_tks = gen_out.sequences[0].tolist()
-        changed = None
-        if apply_edit:
-            new_elem_code = self.apply_edit_to_elem(
-                file,
-                now_elem,
-                self.compute_offset(now_mod, now_elem, line, drop_comments=False) + 1,
-                out_tks,
-            )
-            now_span = now_mod.location_map[now_elem.tree]
-            new_code = replace_lines(now_code, now_span, new_elem_code)
-            changed = new_code != now_code
-            if changed:
-                file.write_text(new_code)
-                print("Edit applied to source.")
+        with timed("apply edit"):
+            out_tks = predictions[0].out_tks
+            changed = None
+            if apply_edit:
+                now_lines = (
+                    self.compute_offset(now_mod, now_elem, line, drop_comments=False)
+                    + 1
+                )
+                new_elem_code = self.apply_edit_to_elem(
+                    file,
+                    now_elem,
+                    now_lines,
+                    out_tks,
+                )
+                now_span = now_mod.location_map[now_elem.tree]
+                new_code = replace_lines(now_code, now_span, new_elem_code)
+                changed = new_code != now_code
+                if changed:
+                    file.write_text(new_code)
+                    print("Edit applied to source.")
 
         if log_file is None:
             return changed
         header = lambda s: "=" * 10 + s + "=" * 10
         indent = lambda s: textwrap.indent(s, "    ")
         with log_file.open("w") as f:
+            input_tks = batch["input_ids"][0]
+            references = batch["references"]
+            output_truth = batch["labels"][0]
             print(f"{respect_lines = }", file=f)
             print(f"{len(input_tks) = }", file=f)
             print(f"{len(references) = }", file=f)

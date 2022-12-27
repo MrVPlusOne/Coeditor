@@ -1,8 +1,8 @@
 import copy
 
 from coeditor.dataset import TokenizedEditDataset
-from coeditor.encoders import BasicTkQueryEdit
-from coeditor.history import Modified
+from coeditor.encoders import BasicTkQueryEdit, EditRequest, apply_output_tks_to_change
+from coeditor.history import Change, Modified
 from coeditor.model import (
     DatasetDecodingResult,
     DecodingArgs,
@@ -37,6 +37,7 @@ from coeditor.encoding import (
     BOS_id,
     Del_id,
     EOS_id,
+    change_to_tokens,
     decode_tokens,
     encode_basic,
     get_tk_id,
@@ -67,6 +68,12 @@ def check_nan(name: str, x: Tensor, inputs: dict):
         for k, v in inputs.items():
             print(k, "=", v)
         raise Exception(f"NaN found in {name}")
+
+
+class PredictedChange(NamedTuple):
+    change: Modified[str]
+    out_tks: TokenSeq
+    score: float
 
 
 class RetrievalEditorModel(T5PreTrainedModel):
@@ -105,6 +112,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         self.post_init()
 
         self.query_attened_ref = True
+        self.tlogger = TimeLogger()
 
     def train_on_data(
         self,
@@ -284,6 +292,85 @@ class RetrievalEditorModel(T5PreTrainedModel):
             labels=[remove_pad_ids(d) for d in labels],
             predictions=[remove_pad_ids(d) for d in predictions],
         )
+
+    def predict_on_batch(
+        self,
+        batch: dict,
+        requests: Sequence[EditRequest],
+        dec_args: DecodingArgs,
+        n_solutions: int = 1,
+        timer: Callable | None = None,
+    ) -> list[list[PredictedChange]]:
+        """
+        Returns nested list of shape `(batch_size, n_solutions)`.
+        """
+        timed = self.tlogger.timed
+
+        def marginalize_preds(
+            preds: Sequence[Modified[str]],
+            out_tks: Sequence[TokenSeq],
+        ) -> list[PredictedChange]:
+            assert preds
+            groups = groupby(
+                range(len(preds)),
+                keyfunc=lambda i: normalize_code_by_ast(preds[i].after),
+            )
+            groups = list(groups.values())
+            groups.sort(key=len, reverse=True)
+            n = len(preds)
+            return [
+                PredictedChange(preds[gids[0]], out_tks[gids[0]], len(gids) / n)
+                for gids in groups
+            ]
+
+        use_marginalization = dec_args.marginalize_samples > 1
+        if use_marginalization:
+            assert_eq(dec_args.do_sample, True)
+            assert_eq(dec_args.num_beams, 1)
+            N = dec_args.marginalize_samples
+        else:
+            N = n_solutions
+        gen_args = dec_args.to_model_args()
+        input_ids = batch["input_ids"]
+        if not isinstance(input_ids, torch.LongTensor):
+            input_ids = torch.LongTensor(input_ids)
+        with timed("model.generate"):
+            gen_out = self.generate(
+                input_ids.to(self.device),
+                references=batch["references"],
+                query_ref_list=batch["query_ref_list"],
+                num_return_sequences=N,
+                return_dict_in_generate=True,
+                output_scores=True,
+                **gen_args,
+            )
+        assert not isinstance(gen_out, torch.LongTensor)
+        out_tks: list[TokenSeq] = gen_out.sequences.tolist()
+        assert_eq(len(out_tks), len(requests) * N)
+        if N > 1:
+            requests = join_list([[r] * N for r in requests])
+        if (pred_scores := getattr(gen_out, "sequences_scores", None)) is None:
+            pred_scores = [0.0] * len(out_tks)
+        with timed("assemble changes"):
+            pred_changes = list[Modified[str]]()
+            for req, out in zip(requests, out_tks):
+                change = req.target.map(lambda x: x.code)
+                change_tks = change_to_tokens(change)
+                pred = apply_output_tks_to_change(change_tks, req.respect_lines, out)
+                pred_changes.append(pred)
+        assert_eq(len(pred_changes), len(out_tks), len(pred_scores))
+
+        solutions = list[list[PredictedChange]]()
+        for i in range(0, len(pred_changes), N):
+            if use_marginalization:
+                sols = marginalize_preds(pred_changes[i : i + N], out_tks)
+            else:
+                sols = [
+                    PredictedChange(pred_changes[j], out_tks[j], pred_scores[j])
+                    for j in range(i, i + N)
+                ]
+            solutions.append(sols[:n_solutions])
+        return solutions
 
     def save(self, save_dir: Path, *args, **kwargs):
         super().save_pretrained(save_dir, *args, **kwargs)

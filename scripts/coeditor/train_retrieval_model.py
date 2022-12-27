@@ -78,7 +78,7 @@ def train_model(
                 batch_args=batch_args,
             )
 
-    model.to("cuda:" + os.environ["CUDA_VISIBLE_DEVICES"])
+    model.to("cuda")
     with timed_action("Loss Evaluation"):
         eval_result = model.eval_loss_on_data(datasets["test"], test_batch_args)
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
