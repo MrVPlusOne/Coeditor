@@ -597,7 +597,7 @@ def random_mask_ast(
                 )
                 and 0 < (size := size_map[original]) <= max_span_size
             ):
-                if cast(random.Random, rng).random() < mask_prob / size:
+                if cast(random.Random, rng).random() < mask_prob:
                     mask = cst.Name(mask_name)
                     if isinstance(original, cst.SimpleStatementLine):
                         mask = cst.SimpleStatementLine([cst.Expr(mask)])

@@ -971,6 +971,7 @@ class CtxEncoder:
     pedit: ProjectEdit
     collapse_unchanged: bool
     indent_in_class: bool = True
+    elem_size_limit: int = 8000
     cache: dict[ProjectPath, TokenSeq] = field(default_factory=dict)
 
     def encode_ctx_element(self, ppath: ProjectPath) -> TokenSeq:
@@ -979,7 +980,14 @@ class CtxEncoder:
             return self.cache[ppath]
         pedit = self.pedit
         can_indent = self.indent_in_class
-        maybe_dedent = (lambda x: x) if can_indent else dedent
+
+        def maybe_dedent(x: str):
+            if len(x) > self.elem_size_limit:
+                x = x[: max(0, self.elem_size_limit - 4)] + "</s>"
+            if not can_indent:
+                x = dedent(x)
+            return x
+
         if (medit := pedit.changes.get(ppath.module)) is None:
             medit = ModuleEdit.from_no_change(pedit.after.modules[ppath.module])
         module_after = medit.after

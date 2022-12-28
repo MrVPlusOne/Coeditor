@@ -26,7 +26,7 @@ def train_model(
     model_name = f"coeditor-{dataset_name}"
     model_name += model_variant
 
-    # dec_args = DecodingArgs()
+    dec_args = DecodingArgs()
     if train_args.quicktest:
         model_name = "quicktest-" + model_name
 
@@ -40,7 +40,7 @@ def train_model(
         for k, v in {
             "data_args": batch_args,
             "train_args": train_args,
-            # "dec_args": dec_args,
+            "dec_args": dec_args,
         }.items()
     }
 
@@ -87,7 +87,6 @@ def train_model(
     max_saved_samples = 200
 
     with timed_action("Accuracy Evaluating"):
-        dec_args = DecodingArgs()
         dec_result = model.predict_on_data(datasets["test"], test_batch_args, dec_args)
         pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
         exact_acc, exact_correct_map = dec_result.exact_match_accuracy()
@@ -115,7 +114,7 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="large",
-            model_variant="-request-stub-masked",
+            model_variant="-request-stub-masked-v2",
             train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
             encoder=QueryRefEditEncoder(ast_mask_prob=0.06),
             recreate_data=False,
