@@ -11,7 +11,7 @@ from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
 
 
 def start_server(device, port: int = 5042):
-    model_path = get_model_dir(True) / "coeditor-large-request-stub-masked"
+    model_path = get_model_dir(True) / "coeditor-large-request-stub"
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path.name}' loaded on device:", device)
@@ -31,7 +31,10 @@ def start_server(device, port: int = 5042):
                     max_query_tks=batch_args.max_query_tks,
                     max_output_tks=batch_args.max_output_tks,
                 ),
-                dec_args=DecodingArgs(do_sample=False, num_beams=8, length_penalty=0.0),
+                # dec_args=DecodingArgs(do_sample=False, num_beams=8, length_penalty=0.0),
+                dec_args=DecodingArgs(
+                    do_sample=True, top_p=0.95, marginalize_samples=20
+                ),
             )
             print(f"Service created for project: {target_dir}")
             services[target_dir] = service
@@ -41,8 +44,8 @@ def start_server(device, port: int = 5042):
         if not Path.is_absolute(path):
             path = target_dir / path
         try:
-            changed = service.suggest_edit(path, line, apply_edit=True)
-            return Success(changed)
+            desc = service.suggest_edit(path, line, apply_edit=True)
+            return Success(desc)
         except Exception as e:
             return Error(message=str(e))
 

@@ -186,7 +186,8 @@ class EditPredictionService:
         line: int,
         log_file: Path | None = Path("coeditor-log.txt"),
         apply_edit: bool = False,
-    ) -> bool | None:
+        apply_prob_threshold: float = 0.3,
+    ) -> str:
         """Make the suggestion in-place at the given location."""
         timed = self.tlogger.timed
         project = self.project
@@ -272,49 +273,53 @@ class EditPredictionService:
             print(f"score: {score:.4g}")
             print(show_change(pred_change))
 
-        with timed("apply edit"):
-            out_tks = predictions[0].out_tks
-            changed = None
-            if apply_edit:
-                now_lines = (
-                    self.compute_offset(now_mod, now_elem, line, drop_comments=False)
-                    + 1
-                )
-                new_elem_code = self.apply_edit_to_elem(
-                    file,
-                    now_elem,
-                    now_lines,
-                    out_tks,
-                )
-                now_span = now_mod.location_map[now_elem.tree]
-                new_code = replace_lines(now_code, now_span, new_elem_code)
-                changed = new_code != now_code
-                if changed:
-                    file.write_text(new_code)
-                    print("Edit applied to source.")
+        best_output = predictions[0].out_tks
+        best_score = predictions[0].score
 
-        if log_file is None:
-            return changed
         header = lambda s: "=" * 10 + s + "=" * 10
         indent = lambda s: textwrap.indent(s, "    ")
-        with log_file.open("w") as f:
-            input_tks = batch["input_ids"][0]
-            references = batch["references"]
-            output_truth = batch["labels"][0]
-            print(f"{respect_lines = }", file=f)
-            print(f"{len(input_tks) = }", file=f)
-            print(f"{len(references) = }", file=f)
-            print(header("Ground truth"), file=f)
-            print(indent(decode_tokens(output_truth)), file=f)
-            print(header("Predicted"), file=f)
-            print(indent(decode_tokens(out_tks)), file=f)
-            print(header("Input"), file=f)
-            print(indent(decode_tokens(input_tks)), file=f)
-            print(header("References"), file=f)
-            for i, ref in enumerate(references):
-                print("-" * 6 + f"Reference {i}" + "-" * 6, file=f)
-                print(indent(decode_tokens(ref)), file=f)
-        return changed
+        if log_file is not None:
+            with log_file.open("w") as f:
+                input_tks = batch["input_ids"][0]
+                references = batch["references"]
+                output_truth = batch["labels"][0]
+                print(f"{respect_lines = }", file=f)
+                print(f"{len(input_tks) = }", file=f)
+                print(f"{len(references) = }", file=f)
+                print(header("Ground truth"), file=f)
+                print(indent(decode_tokens(output_truth)), file=f)
+                print(header("Predicted"), file=f)
+                print(indent(decode_tokens(best_output)), file=f)
+                print(header("Input"), file=f)
+                print(indent(decode_tokens(input_tks)), file=f)
+                print(header("References"), file=f)
+                for i, ref in enumerate(references):
+                    print("-" * 6 + f"Reference {i}" + "-" * 6, file=f)
+                    print(indent(decode_tokens(ref)), file=f)
+
+        if not apply_edit:
+            return "Edit suggested but not applied. (apply_edit=False)"
+
+        with timed("apply edit"):
+            if best_score < apply_prob_threshold:
+                return f"Suggestion not applied due to low confidence (score {best_score:.3g} < {apply_prob_threshold})."
+            now_lines = (
+                self.compute_offset(now_mod, now_elem, line, drop_comments=False) + 1
+            )
+            new_elem_code = self.apply_edit_to_elem(
+                file,
+                now_elem,
+                now_lines,
+                best_output,
+            )
+            now_span = now_mod.location_map[now_elem.tree]
+            new_code = replace_lines(now_code, now_span, new_elem_code)
+            changed = new_code != now_code
+            if changed:
+                file.write_text(new_code)
+                return f"Top suggestion applied. (confidence: {best_score:.3g})"
+            else:
+                return "Top suggestion is same as the current state."
 
     def compute_offset(
         self,

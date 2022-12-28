@@ -380,7 +380,9 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 sols = marginalize_preds(pred_changes[i : i + N], out_tks, pred_scores)
             else:
                 sols = [
-                    PredictedChange(pred_changes[j], out_tks[j], pred_scores[j])
+                    PredictedChange(
+                        pred_changes[j], out_tks[j], math.exp(pred_scores[j])
+                    )
                     for j in range(i, i + N)
                 ]
             solutions.append(sols[:n_solutions])
