@@ -256,11 +256,20 @@ class WeightedSum(Generic[V, W]):
 CountedSum = WeightedSum[int, int]
 
 
-def normalize_code_by_ast(code: str) -> str:
+def normalize_code_by_ast(code: str, sort_keyargs: bool = True) -> str:
     """Normalize the code by parsing and unparsing it using the AST module.
     If parsing fails, return the original code."""
+
+    class KeyargSorter(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call):
+            if node.keywords:
+                node.keywords.sort(key=lambda x: x.arg or "None")
+            return node
+
     try:
         tree = ast.parse(dedent(code))
+        if sort_keyargs:
+            tree = KeyargSorter().visit(tree)
         return ast.unparse(tree)
     except SyntaxError:
         return code

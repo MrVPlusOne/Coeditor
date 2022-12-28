@@ -1,5 +1,6 @@
 from coeditor.history import *
 from coeditor.encoding import _BaseTokenizer
+import pytest
 
 
 def module_from_code(code: str, mname: ModuleName = "ex_module"):
@@ -297,3 +298,49 @@ def test_encoding_decoding_identity():
             )
             c_rec2 = tokens_to_change(inlined[:-1])
             assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)
+
+
+def test_code_normalization():
+    def check_code_equal(code1: str, code2: str):
+        if not code_equal(code1, code2):
+            e = AssertionError(f"code_equal failed.")
+            diff = show_string_diff(
+                normalize_code_by_ast(code1), normalize_code_by_ast(code2)
+            )
+            e.add_note("Diff in normalized code:\n" + diff)
+            raise e
+
+    ex_code = dedent(
+        """\
+        def f1(x, y):
+            return f1(x + 1, y - 1)
+        """
+    )
+    ex_code_compact = dedent(
+        """\
+        def f1(x,y):
+            return f1(x+1,y-1)
+        """
+    )
+    check_code_equal(ex_code, ex_code_compact)
+    ex_code_lose = dedent(
+        """\
+            
+        def f1(x,y):
+        
+            return f1(
+                x+1,
+                y-1
+            )
+        """
+    )
+    check_code_equal(ex_code, ex_code_lose)
+
+    ex_code_keyword1 = "f(x, y=y, z=z)"
+    ex_code_keyword2 = "f(x, z=z, y=y)"
+    check_code_equal(ex_code_keyword1, ex_code_keyword2)
+
+    ex_code_keyword3 = "f(x, y=y, z=z, **kwargs)"
+
+    with pytest.raises(AssertionError):
+        check_code_equal(ex_code_keyword1, ex_code_keyword3)
