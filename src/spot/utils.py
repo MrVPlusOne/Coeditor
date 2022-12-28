@@ -696,6 +696,12 @@ def pretty_show_dict(
 def compute_line_diffs(
     before: Sequence[str], after: Sequence[str], keep_explain_lines: bool = False
 ):
+    SizeLimit = 8000
+    if (
+        sum(len(x) for x in before) > SizeLimit
+        or sum(len(x) for x in after) > SizeLimit
+    ):
+        compute_line_diffs_fast(before, after)
     differ = difflib.Differ()
     result = []
     for line in differ.compare(before, after):
@@ -704,6 +710,14 @@ def compute_line_diffs(
         if keep_explain_lines or tag != "?":
             result.append(tag + line[2:])
     return result
+
+
+def compute_line_diffs_fast(before: Sequence[str], after: Sequence[str]):
+    diffs = list(difflib.unified_diff(before, after, n=100000, lineterm=""))[3:]
+    if not diffs:
+        # as a special case, `unified_diff` would return an empty when there is no change.
+        diffs = [" " + l for l in before]
+    return diffs
 
 
 def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
