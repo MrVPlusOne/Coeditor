@@ -1,4 +1,5 @@
 import copy
+import logging
 
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import BasicTkQueryEdit, EditRequest, apply_output_tks_to_change
@@ -52,6 +53,12 @@ from transformers import (
     EarlyStoppingCallback,
     EvalPrediction,
     BatchEncoding,
+)
+from transformers.generation.utils import (
+    SampleOutput,
+    LogitsProcessorList,
+    StoppingCriteriaList,
+    BeamSampleEncoderDecoderOutput,
 )
 from transformers.trainer import EvalLoopOutput
 from datasets.arrow_dataset import Dataset
@@ -293,13 +300,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
             predictions=[remove_pad_ids(d) for d in predictions],
         )
 
+    @torch.autocast("cuda")
     def predict_on_batch(
         self,
         batch: dict,
         requests: Sequence[EditRequest],
         dec_args: DecodingArgs,
         n_solutions: int = 1,
-        timer: Callable | None = None,
     ) -> list[list[PredictedChange]]:
         """
         Returns nested list of shape `(batch_size, n_solutions)`.
@@ -309,6 +316,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         def marginalize_preds(
             preds: Sequence[Modified[str]],
             out_tks: Sequence[TokenSeq],
+            scores: Sequence[float],
         ) -> list[PredictedChange]:
             assert preds
             groups = groupby(
@@ -316,11 +324,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 keyfunc=lambda i: normalize_code_by_ast(preds[i].after),
             )
             groups = list(groups.values())
-            groups.sort(key=len, reverse=True)
+            for group in groups:
+                # within each group, sort by score
+                group.sort(key=lambda i: scores[i], reverse=True)
+            groups.sort(key=lambda g: (len(g), scores[g[0]]), reverse=True)
             n = len(preds)
             return [
-                PredictedChange(preds[gids[0]], out_tks[gids[0]], len(gids) / n)
-                for gids in groups
+                PredictedChange(preds[g[0]], out_tks[g[0]], len(g) / n) for g in groups
             ]
 
         use_marginalization = dec_args.marginalize_samples > 1
@@ -345,11 +355,15 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 **gen_args,
             )
         assert not isinstance(gen_out, torch.LongTensor)
-        out_tks: list[TokenSeq] = gen_out.sequences.tolist()
+        out_tks = gen_out["sequences"]
+        if isinstance(out_tks, torch.Tensor):
+            out_tks = out_tks.tolist()
+        assert isinstance(out_tks, list)
+        logging.debug("Max out length:", max(len(x) for x in out_tks))
         assert_eq(len(out_tks), len(requests) * N)
         if N > 1:
             requests = join_list([[r] * N for r in requests])
-        if (pred_scores := getattr(gen_out, "sequences_scores", None)) is None:
+        if (pred_scores := gen_out.get("sequences_scores", None)) is None:
             pred_scores = [0.0] * len(out_tks)
         with timed("assemble changes"):
             pred_changes = list[Modified[str]]()
@@ -363,7 +377,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         solutions = list[list[PredictedChange]]()
         for i in range(0, len(pred_changes), N):
             if use_marginalization:
-                sols = marginalize_preds(pred_changes[i : i + N], out_tks)
+                sols = marginalize_preds(pred_changes[i : i + N], out_tks, pred_scores)
             else:
                 sols = [
                     PredictedChange(pred_changes[j], out_tks[j], pred_scores[j])
@@ -577,9 +591,125 @@ class RetrievalEditorModel(T5PreTrainedModel):
         return self.decoder
 
     def _reorder_cache(self, past, beam_idx):
-        return T5ForConditionalGeneration._reorder_cache(
-            cast(Any, None), past, beam_idx
-        )
+        if past is None:
+            logging.warning(
+                "You might want to consider setting `use_cache=True` to speed up decoding"
+            )
+            return past
+
+        reordered_decoder_past = ()
+        for layer_past_states in past:
+            # get the correct batch idx from layer past batch dim
+            # batch dim of `past` is at 2nd position
+            reordered_layer_past_states = ()
+            for layer_past_state in layer_past_states:
+                # need to set correct `past` for each of the four key / value states
+                reordered_layer_past_states = reordered_layer_past_states + (
+                    layer_past_state.index_select(
+                        0, beam_idx.to(layer_past_state.device)
+                    ),
+                )
+
+            # assert reordered_layer_past_states[0].shape == layer_past_states[0].shape
+            assert len(reordered_layer_past_states) == len(layer_past_states)
+
+            reordered_decoder_past = reordered_decoder_past + (
+                reordered_layer_past_states,
+            )
+        return reordered_decoder_past
+
+    @torch.no_grad()
+    def sample(
+        self,
+        input_ids: torch.LongTensor,
+        logits_processor=None,
+        stopping_criteria=None,
+        logits_warper=None,
+        # max_length: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_scores: Optional[bool] = None,
+        return_dict_in_generate: Optional[bool] = None,
+        synced_gpus: Optional[bool] = False,
+        **model_kwargs,
+    ):
+        """An optimized sample implementation that does not waste computation
+        on finished sequences."""
+        # init values
+        if logits_processor is None:
+            logits_processor = LogitsProcessorList()
+        if stopping_criteria is None:
+            stopping_criteria = StoppingCriteriaList()
+        if logits_warper is None:
+            logits_warper = LogitsProcessorList()
+        if pad_token_id is None:
+            pad_token_id = self.config.pad_token_id
+        if eos_token_id is None:
+            eos_token_id = self.config.eos_token_id
+
+        device = self.device
+
+        # keep track of which sequences are already finished
+        unfinished_ids = torch.LongTensor(range(input_ids.shape[0])).to(device)
+        sequences = input_ids.int().tolist()
+        sequences_scores = [0.0 for _ in range(input_ids.shape[0])]
+
+        # auto-regressive generation
+        while True:
+            # prepare model inputs
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+
+            # forward pass to get next token
+            outputs = self.forward(
+                **model_inputs,
+                return_dict=True,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
+
+            next_token_logits = cast(FloatTensor, outputs.logits[:, -1, :])
+
+            # pre-process distribution
+            next_token_scores = logits_processor(input_ids, next_token_logits)
+            next_token_scores = logits_warper(input_ids, next_token_scores)
+
+            # sample
+            probs = nn.functional.softmax(next_token_scores, dim=-1)
+            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+            assert_eq(next_tokens.ndim, 1)
+            for i, id in enumerate(unfinished_ids.tolist()):
+                sequences_scores[id] += math.log(probs[i, next_tokens[i]].item())
+                sequences[id].append(next_tokens[i].item())
+
+            next_subset = next_tokens != eos_token_id
+            subset_ids = torch.arange(len(unfinished_ids), device=device)[next_subset]
+            unfinished_ids = unfinished_ids[next_subset]
+
+            # update generated ids, model inputs, and length for next step
+            input_ids = cast(
+                torch.LongTensor,
+                next_tokens[next_subset].unsqueeze(-1),
+            )
+            assert_eq(input_ids.ndim, 2)
+            model_kwargs = self._update_model_kwargs_for_generation(
+                outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
+            )
+            if model_kwargs["past"] is not None:
+                model_kwargs["past"] = self._reorder_cache(
+                    model_kwargs["past"], subset_ids
+                )
+
+            # stop when each sentence is finished, or if we exceed the maximum length
+            fake_input = torch.LongTensor([sequences[0]]).to(device)
+            if len(unfinished_ids) == 0 or stopping_criteria(fake_input, None):  # type: ignore
+                break
+
+        if return_dict_in_generate:
+            return {"sequences": sequences, "sequences_scores": sequences_scores}
+        else:
+            return sequences
 
     @staticmethod
     def from_code_t5(
@@ -1081,8 +1211,8 @@ class BatchArgs:
     @classmethod
     def service_default(cls) -> Self:
         args = BatchArgs.eval_default()
-        args.max_query_tks *= 2
-        args.max_output_tks *= 2
+        # args.max_query_tks *= 2
+        # args.max_output_tks *= 2
         return args
 
 
