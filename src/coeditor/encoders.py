@@ -59,14 +59,11 @@ class TkProjectEdit(Generic[TQueryEdit]):
 
     @property
     def stats(self) -> Mapping[str, int]:
+        ref_lens = [len(tks) for segs in self.tk_references.values() for tks in segs]
         return {
             "n_references": len(self.tk_references),
-            "ref_size_max": max(
-                len(tks) for segs in self.tk_references.values() for tks in segs
-            ),
-            "ref_size_sum": sum(
-                len(tks) for segs in self.tk_references.values() for tks in segs
-            ),
+            "ref_size_max": max(ref_lens) if ref_lens else 0,
+            "ref_size_sum": sum(ref_lens) if ref_lens else 0,
         }
 
 
