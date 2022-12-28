@@ -18,6 +18,7 @@ from spot.utils import (
     assert_eq,
     groupby,
     show_expr,
+    compute_line_diffs,
     show_string_diff,
     timed_action,
     TimeLogger,

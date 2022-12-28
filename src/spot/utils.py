@@ -693,6 +693,19 @@ def pretty_show_dict(
         return s.getvalue()
 
 
+def compute_line_diffs(
+    before: Sequence[str], after: Sequence[str], keep_explain_lines: bool = False
+):
+    differ = difflib.Differ()
+    result = []
+    for line in differ.compare(before, after):
+        assert len(line) >= 2
+        tag = line[0]
+        if keep_explain_lines or tag != "?":
+            result.append(tag + line[2:])
+    return result
+
+
 def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
     def omit_lines(lines: list[str]) -> list[str]:
         if max_ctx is None:
@@ -713,17 +726,14 @@ def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
                 j = i + 1
                 while j < len(lines) and not to_keep[j]:
                     j += 1
-                new_lines.append(f"... {j - i} lines omitted ...")
+                new_lines.append(f"... {j - i} lines omitted...")
                 i = j
         return new_lines
 
-    diffs = difflib.unified_diff(
-        textwrap.indent(str1, "   ").splitlines(),
-        textwrap.indent(str2, "   ").splitlines(),
-        n=10000,
-        lineterm="",
+    diffs = compute_line_diffs(
+        textwrap.indent(str1, " ").split("\n"),
+        textwrap.indent(str2, " ").split("\n"),
     )
-    diffs = list(diffs)[3:]
     if len(diffs) == 0:
         return "\n".join(str1.split("\n"))
     return "\n".join(omit_lines(diffs))

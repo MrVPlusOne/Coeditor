@@ -98,15 +98,8 @@ def change_to_tokens(change: Change[str]) -> TokenSeq:
     "Encode a change as a token sequence."
     match change:
         case Modified(before, after):
-            diffs = list(
-                difflib.unified_diff(
-                    splitlines(before),
-                    splitlines(after),
-                    n=100000,  # don't really have a limit
-                    lineterm="",
-                )
-            )[3:]
-            rearrange_diffs_(diffs)
+            diffs = compute_line_diffs(splitlines(before), splitlines(after))
+            # rearrange_diffs_(diffs)
             if not diffs:
                 # as a special case, `unified_diff` would return an empty when there is no change.
                 diffs = [" " + l for l in splitlines(before)]
