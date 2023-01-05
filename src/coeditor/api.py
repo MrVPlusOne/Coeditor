@@ -19,6 +19,7 @@ from coeditor.encoding import (
     decode_tokens,
     extra_id_to_number,
     extract_edit_change,
+    get_extra_id,
     is_extra_id,
 )
 
@@ -303,13 +304,11 @@ class EditPredictionService:
         with timed("apply edit"):
             if best_score < apply_prob_threshold:
                 return f"Suggestion not applied due to low confidence (score {best_score:.3g} < {apply_prob_threshold})."
-            now_lines = (
-                self.compute_offset(now_mod, now_elem, line, drop_comments=False) + 1
-            )
             new_elem_code = self.apply_edit_to_elem(
                 file,
+                now_mod,
                 now_elem,
-                now_lines,
+                line,
                 best_output,
             )
             now_span = now_mod.location_map[now_elem.tree]
@@ -324,7 +323,7 @@ class EditPredictionService:
     def compute_offset(
         self,
         now_mod: PythonModule,
-        now_elem: PythonFunction,
+        now_elem: PythonElem,
         line: int,
         drop_comments: bool,
     ):
@@ -346,8 +345,9 @@ class EditPredictionService:
     def apply_edit_to_elem(
         self,
         file: Path,
+        now_mod: PythonModule,
         now_elem: PythonElem,
-        respect_lines: int,
+        cursor_line: int,
         out_tks: TokenSeq,
     ) -> str:
         mname = now_elem.path.module
@@ -371,9 +371,32 @@ class EditPredictionService:
             code_change = Added(now_code)
         else:
             code_change = Modified(prev_elem.code, now_code)
-        logging.info("Now respect lines:", respect_lines)
+        lines_with_comment = (
+            self.compute_offset(now_mod, now_elem, cursor_line, drop_comments=False) + 1
+        )
+        logging.info("Now respect lines:", lines_with_comment)
+        if self.config.drop_comments:
+            # map the changes to the original code locations with comments
+            remover = CommentRemover(now_mod.location_map)
+            elem1 = now_elem.tree.visit(remover)
+            assert isinstance(elem1, cst.CSTNode)
+            line_map = remover.line_map(elem1)
+            n_lines = len(line_map)
+            line_map[n_lines] = line_map[n_lines - 1] + 1
+            lines_no_comment = (
+                self.compute_offset(now_mod, now_elem, cursor_line, drop_comments=True)
+                + 1
+            )
+            new_out_tks = TokenSeq()
+            for k, seg in output_ids_as_seqs(out_tks).items():
+                line = line_map[extra_id_to_number(k) + lines_no_comment]
+                k1 = get_extra_id(line - lines_with_comment)
+                new_out_tks.append(k1)
+                new_out_tks.extend(seg)
+            out_tks = new_out_tks
+
         change_tks = change_to_tokens(code_change)
-        new_change = apply_output_tks_to_change(change_tks, respect_lines, out_tks)
+        new_change = apply_output_tks_to_change(change_tks, lines_with_comment, out_tks)
         return new_change.after
 
 

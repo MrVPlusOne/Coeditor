@@ -315,17 +315,17 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
     ) -> Iterable[EditRequest]:
         if not training:
             # keep the signature changes at test time
-            yield EditRequest(mf, len(mf.after.header_body_code[0]))
+            yield EditRequest(mf, count_lines(mf.after.header_body_code[0]))
         else:
             if (
-                len(mf.before.code.split("\n")) > self.max_lines_per_function
+                count_lines(mf.before.code) > self.max_lines_per_function
                 or len(mf.after.code.split("\n")) > self.max_lines_per_function
             ):
                 return  # skip oversized functions
             lines_per_request = 50
             min_lines_to_edit = 3
             # split it into chunks
-            focus_max = max(1, len(mf.after.code.split("\n")) - min_lines_to_edit)
+            focus_max = max(1, count_lines(mf.after.code) - min_lines_to_edit)
             for start in range(0, focus_max, lines_per_request):
                 x = random.random()
                 end = min(focus_max, start + lines_per_request)
@@ -517,6 +517,7 @@ def change_tks_to_query_context(change_tks: TokenSeq, respect_lines: int):
             result_lines += 1
         if result_lines == respect_lines:
             spliter = i + 1
+            break
 
     context = join_list(lines[:spliter], Newline_id)
     query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
