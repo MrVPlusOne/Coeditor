@@ -53,6 +53,7 @@ from transformers import (
     EarlyStoppingCallback,
     EvalPrediction,
     BatchEncoding,
+    AutoConfig,
 )
 from transformers.generation.utils import (
     SampleOutput,
@@ -152,6 +153,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         )
 
         model = self
+        # model = torch.compile(self.to("cuda"))  # pytorch doesn't support python 3.11 yet.
 
         class DynamicTrainer(Seq2SeqTrainer):
             def get_train_dataloader(self):
@@ -203,6 +205,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             push_to_hub=False,
             report_to=["wandb"],
             disable_tqdm=True,
+            # torchdynamo="inductor",  # use compiled model
         )
 
         trainer = DynamicTrainer(
@@ -657,6 +660,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         unfinished_ids = torch.LongTensor(range(input_ids.shape[0])).to(device)
         sequences = input_ids.int().tolist()
         sequences_scores = [0.0 for _ in range(input_ids.shape[0])]
+        # TODO: reduce cost using particle weights
 
         # auto-regressive generation
         while True:
@@ -718,8 +722,14 @@ class RetrievalEditorModel(T5PreTrainedModel):
         size: Literal["small", "base", "large"],
         query_attened_ref: bool = True,
         reuse_embed: bool = False,
+        reinit_weights: bool = False,
     ) -> "RetrievalEditorModel":
-        model = RetrievalEditorModel.from_pretrained(f"Salesforce/codet5-{size}")
+        model_path = f"Salesforce/codet5-{size}"
+        if reinit_weights:
+            config = AutoConfig.from_pretrained(model_path)
+            model = RetrievalEditorModel(config)
+        else:
+            model = RetrievalEditorModel.from_pretrained(model_path)
         assert isinstance(model, RetrievalEditorModel)
         embed_layer = model.resize_token_embeddings(len(_Tokenizer))
         if reuse_embed:

@@ -68,6 +68,7 @@ class TrainingArgs:
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     max_train_epochs: int = 3
+    reinit_weights: bool = False
     quicktest: bool = False
 
 

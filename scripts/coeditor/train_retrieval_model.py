@@ -56,7 +56,9 @@ def train_model(
             )
 
     if not eval_only:
-        model = RetrievalEditorModel.from_code_t5("base", reuse_embed=True)
+        model = RetrievalEditorModel.from_code_t5(
+            "base", reuse_embed=True, reinit_weights=train_args.reinit_weights
+        )
         model.query_attened_ref = True
     else:
         model = RetrievalEditorModel.load(get_model_dir() / model_name)
@@ -114,9 +116,11 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="large",
-            model_variant="-request-stub-masked-v2",
-            train_args=TrainingArgs(max_train_epochs=4, quicktest=False),
-            encoder=QueryRefEditEncoder(ast_mask_prob=0.06),
+            model_variant="-request-stub-v3",
+            train_args=TrainingArgs(
+                max_train_epochs=4, reinit_weights=False, quicktest=False
+            ),
+            encoder=QueryRefEditEncoder(),  # (ast_mask_prob=0.06),
             recreate_data=False,
             eval_only=False,
         )
