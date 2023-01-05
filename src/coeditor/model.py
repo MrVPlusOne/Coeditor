@@ -177,14 +177,22 @@ class CoeditorModel:
             dataset, eval_args.max_batch_cost, data_collator, shuffle=True
         )
         pred_dict = self.predict_on_loader(loader, dec_args)
-        pred_seq = [pred_dict[i] for i in range(len(eval_edits))]
+        all_outputs = [pred_dict[i] for i in range(len(eval_edits))]
+        all_inputs = dataset["input_ids"]
+        all_labels = dataset["labels"]
+        predictions = [
+            ModelPrediction(
+                input_ids=all_inputs[i],
+                output_ids=all_outputs[i],
+                labels=all_labels[i],
+            )
+            for i in range(len(eval_edits))
+        ]
 
         return DatasetDecodingResult(
             eval_args={"eval_args": eval_args, "dec_arsg": dec_args},
             edits=eval_edits,
-            input_ids=dataset["input_ids"],
-            labels=dataset["labels"],
-            predictions=pred_seq,
+            predictions=predictions,
         )
 
     def save_pretrained(self, path: Path):
@@ -303,31 +311,42 @@ class CoeditorModel:
         return CoeditorModel(codet5, data_args=data_args)
 
 
+class ModelPrediction(TypedDict):
+    input_ids: TokenSeq
+    output_ids: TokenSeq
+    labels: TokenSeq
+
+
 @dataclass
 class DatasetDecodingResult(Generic[TEdit]):
     eval_args: dict
-    edits: list[TEdit]
-    input_ids: list[TokenSeq]
-    labels: list[TokenSeq]
-    predictions: list[TokenSeq]
+    edits: Sequence[TEdit]
+    predictions: Sequence[ModelPrediction]
+
+    def show_prediction(self, edit: TEdit, pred: ModelPrediction) -> str:
+        return edit.show_prediction(pred["output_ids"])
 
     def __post_init__(self):
-        assert_eq(len(self.input_ids), len(self.predictions), len(self.labels))
+        assert_eq(len(self.edits), len(self.predictions))
 
     def subset(self, ids: Sequence[int]):
         return DatasetDecodingResult(
             self.eval_args,
             [self.edits[i] for i in ids],
-            [self.input_ids[i] for i in ids],
-            [self.labels[i] for i in ids],
             [self.predictions[i] for i in ids],
         )
 
     def exact_match_accuracy(self) -> tuple[CountedSum, dict[int, bool]]:
         ex2correct = dict[int, bool]()
-        for i, (x, y, pred) in enumerate(
-            zip(self.input_ids, self.labels, self.predictions)
-        ):
+        for i, elem in enumerate(self.predictions):
+            edit = self.edits[i]
+            id_map = {
+                k: get_extra_id(i)
+                for i, k in enumerate(output_ids_as_seqs(elem["labels"]))
+            }
+            x = edit.input_tks
+            y = [id_map.get(tk, tk) for tk in elem["labels"]]
+            pred = [id_map.get(tk, tk) for tk in elem["output_ids"]]
             true_code = extract_edit_change(x, y).after
             pred_code = extract_edit_change(x, pred).after
             is_correct = code_equal(pred_code, true_code)
@@ -339,16 +358,16 @@ class DatasetDecodingResult(Generic[TEdit]):
         correct_count = CountedSum(0, 0)
         ex2correct = dict[int, bool]()
         failed_to_parse = CountedSum(0, 0)
-        for ex_i in range(len(self.input_ids)):
+        for ex_i, ex in enumerate(self.predictions):
             edit = self.edits[ex_i]
             assert isinstance(edit, AnalysisBasedTokenizedEdit)
             if not (calls := edit.updated_calls):
                 continue
 
-            pred_tks = self.predictions[ex_i]
+            pred_tks = ex["output_ids"]
             id_map = {
                 k: get_extra_id(i)
-                for i, k in enumerate(output_ids_as_seqs(self.labels[ex_i]))
+                for i, k in enumerate(output_ids_as_seqs(ex["labels"]))
             }
             pred_tks = [id_map.get(t, t) for t in pred_tks]
             main_tks = self.edits[ex_i].main_tks
@@ -392,13 +411,8 @@ class DatasetDecodingResult(Generic[TEdit]):
         (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
 
         for ex_id, correct in tqdm(ex2correct.items(), desc="saving examples"):
-            pred_tks = self.predictions[ex_id]
-            id_map = {
-                k: get_extra_id(i)
-                for i, k in enumerate(output_ids_as_seqs(self.labels[ex_id]))
-            }
-            pred_tks = [id_map.get(t, t) for t in pred_tks]
-            compare_str = self.edits[ex_id].show_prediction(pred_tks)
+            ex = self.predictions[ex_id]
+            compare_str = self.show_prediction(self.edits[ex_id], ex)
             out_file = (
                 out_dir / ("correct" if correct else "incorrect") / f"ex-{ex_id}.txt"
             )

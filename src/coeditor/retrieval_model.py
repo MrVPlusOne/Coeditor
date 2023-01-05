@@ -1,5 +1,6 @@
 import copy
 import logging
+from textwrap import indent
 
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import BasicTkQueryEdit, EditRequest, apply_output_tks_to_change
@@ -8,10 +9,12 @@ from coeditor.model import (
     DatasetDecodingResult,
     DecodingArgs,
     EvalArgs,
+    ModelPrediction,
     TrainingArgs,
     compute_loss_metrics,
     wrap_bos,
 )
+from spot.data import output_ids_as_seqs
 from spot.static_analysis import ModuleName, ProjectPath
 from spot.utils import cprint, groupby, scalar_stats
 
@@ -38,10 +41,12 @@ from coeditor.encoding import (
     BOS_id,
     Del_id,
     EOS_id,
+    Newline_id,
     change_to_tokens,
     decode_tokens,
     encode_basic,
     get_tk_id,
+    is_extra_id,
     random_extra_id_map,
     _Tokenizer,
 )
@@ -82,6 +87,64 @@ class PredictedChange(NamedTuple):
     change: Modified[str]
     out_tks: TokenSeq
     score: float
+
+
+class RetrievalModelPrediction(ModelPrediction):
+    references: list[TokenSeq]
+
+
+class RetrievalDecodingResult(DatasetDecodingResult[BasicTkQueryEdit]):
+    @classmethod
+    def show_prediction(
+        cls, edit: BasicTkQueryEdit | None, pred: RetrievalModelPrediction
+    ) -> str:
+        def show_label(i: int):
+            return f" <{i}>" if i <= 9 else f"<{i}>"
+
+        def show_extra_tokens(tks: TokenSeq, main_tk_lines: dict[Token, TokenSeq]):
+            segs = output_ids_as_seqs(tks)
+            lines = []
+            for k, seg in segs.items():
+                if not seg:
+                    continue  # skip empty lines
+                if seg[-1] == Del_id:
+                    # show the delted line
+                    origin_line = main_tk_lines.get(k, [])
+                    seg = seg + origin_line
+                label = show_label(id_map.get(k, -1))
+                lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
+            return "".join(lines)
+
+        main_segs = output_ids_as_seqs(pred["input_ids"])
+        id_map = {k: i for i, k in enumerate(main_segs)}
+        main_lines = list[str]()
+        for line_tks in split_list(pred["input_ids"], Newline_id):
+            if line_tks and is_extra_id(line_tks[0]):
+                line = show_label(id_map.get(line_tks[0], -1)) + decode_tokens(
+                    line_tks[1:]
+                )
+            else:
+                line = decode_tokens(line_tks)
+            main_lines.append(line)
+
+        pred_lines = [
+            "========Prediction========",
+            f"{show_extra_tokens(pred['output_ids'], main_segs)}",
+        ]
+        meta_lines = [] if edit is None else edit.meta_data_lines()
+        outputs = [
+            *meta_lines,
+            "========Ground Truth========",
+            show_extra_tokens(pred["labels"], main_segs),
+            *pred_lines,
+            "========Main Code========",
+            "\n".join(main_lines),
+            "========References========",
+        ]
+        for i, ref in enumerate(pred["references"]):
+            outputs.append(indent("-" * 6 + f"Reference {i}" + "-" * 6, "  "))
+            outputs.append(indent(decode_tokens(ref), "  "))
+        return "\n".join(outputs)
 
 
 class RetrievalEditorModel(T5PreTrainedModel):
@@ -282,9 +345,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         )
 
         gen_args = dec_args.to_model_args()
-        input_ids = []
-        labels = []
-        predictions = []
+        batch_elems = list[ModelPrediction]()
         for batch in eval_loader:  # type: ignore
             out_tks = self.generate(
                 batch["input_ids"].to(self.device),
@@ -292,15 +353,24 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 query_ref_list=batch["query_ref_list"],
                 **gen_args,
             ).tolist()  # type: ignore
-            input_ids.extend(batch["input_ids"].tolist())
-            labels.extend(batch["labels"].tolist())
-            predictions.extend(out_tks)
-        return DatasetDecodingResult(
+            input_ids = batch["input_ids"].tolist()
+            labels = batch["labels"].tolist()
+            query_ref_list = batch["query_ref_list"]
+            output_ids = [remove_pad_ids(out_tk) for out_tk in out_tks]
+            for i in range(len(input_ids)):
+                all_refs = batch["references"]
+                references = [all_refs[j] for j in query_ref_list[i]]
+                e = RetrievalModelPrediction(
+                    input_ids=input_ids[i],
+                    output_ids=output_ids[i],
+                    labels=labels[i],
+                    references=references,
+                )
+                batch_elems.append(e)
+        return RetrievalDecodingResult(
             eval_args={"batch_args": batch_args, "dec_args": dec_args},
             edits=eval_edits,
-            input_ids=[remove_pad_ids(d) for d in input_ids],
-            labels=[remove_pad_ids(d) for d in labels],
-            predictions=[remove_pad_ids(d) for d in predictions],
+            predictions=batch_elems,
         )
 
     @torch.autocast("cuda")
