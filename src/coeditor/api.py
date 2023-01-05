@@ -37,7 +37,9 @@ from coeditor.history import (
 from coeditor.model import CoeditorModel, DecodingArgs
 from coeditor.retrieval_model import (
     BatchArgs,
+    RetrievalDecodingResult,
     RetrievalEditorModel,
+    RetrievalModelPrediction,
     edit_groups_to_batches,
 )
 from spot.data import output_ids_as_seqs
@@ -63,9 +65,13 @@ class ChangeDetectionConfig:
     prev_commit: str = "HEAD"
     drop_comments: bool = True
 
+    def get_prev_content(self, project: Path, path_s: str):
+        return file_content_from_commit(project, self.prev_commit, path_s)
+
     def get_pedit(
         self,
         project_root: Path,
+        target_file: Path,
         prev_cache: TimedCache[ModuleName, PythonModule, str],
         now_cache: TimedCache,
     ) -> ProjectEdit:
@@ -74,9 +80,6 @@ class ChangeDetectionConfig:
             return path.suffix == ".py" and all(
                 p not in self.ignore_dirs for p in path.parts
             )
-
-        def get_prev_content(path_s: str):
-            return file_content_from_commit(project_root, self.prev_commit, path_s)
 
         src_map = dict[ModuleName, Path]()
 
@@ -90,6 +93,9 @@ class ChangeDetectionConfig:
         commit_stamp = run_command(
             ["git", "log", "-1", "--format=%ci"], cwd=project_root
         )
+        assert (
+            self.prev_commit == "HEAD"
+        ), "Currently only prev_commit=HEAD is supported."
 
         changed_files = run_command(
             ["git", "status", "--porcelain"], cwd=project_root
@@ -118,6 +124,11 @@ class ChangeDetectionConfig:
                     current_module2file[get_module_path(path2)] = path2
                     current_module2file[get_module_path(path1)] = None
                     prev_module2file[get_module_path(path1)] = path1
+        if target_file.is_absolute():
+            target_file = target_file.relative_to(project_root)
+        target_mname = get_module_path(target_file.as_posix())
+        if target_mname not in prev_module2file:
+            prev_module2file[target_mname] = target_file.as_posix()
 
         prev_modules = dict[ModuleName, PythonModule]()
         for mname, file_prev in prev_module2file.items():
@@ -125,7 +136,7 @@ class ChangeDetectionConfig:
                 mname,
                 commit_stamp,
                 lambda: PythonModule.from_cst(
-                    cst.parse_module(get_prev_content(file_prev)),
+                    cst.parse_module(self.get_prev_content(project_root, file_prev)),
                     mname,
                     self.drop_comments,
                 ),
@@ -216,17 +227,15 @@ class EditPredictionService:
                 raise ValueError(f"Only functions can be edited by the model.")
 
         with timed("construct project edit"):
-            pedit = self.config.get_pedit(project, self.prev_cache, self.now_cache)
-            now_trans_mod = self.now_cache.cached(
-                mname,
-                stamp,
-                lambda: PythonModule.from_cst(
-                    now_mod.tree, mname, self.config.drop_comments
-                ),
+            pedit = self.config.get_pedit(
+                project, file, self.prev_cache, self.now_cache
             )
-            if mname not in pedit.after.modules:
-                pedit.after.modules[mname] = now_trans_mod
-                pedit.changes[mname] = ModuleEdit.from_no_change(now_trans_mod)
+            if mname not in pedit.changes:
+                assert mname in pedit.before.modules
+                assert mname in pedit.after.modules
+                pedit.changes[mname] = ModuleEdit.from_no_change(
+                    pedit.before.modules[mname]
+                )
         match [
             c for c in pedit.all_elem_changes() if get_change_path(c) == now_elem.path
         ]:
@@ -277,8 +286,6 @@ class EditPredictionService:
         best_output = predictions[0].out_tks
         best_score = predictions[0].score
 
-        header = lambda s: "=" * 10 + s + "=" * 10
-        indent = lambda s: textwrap.indent(s, "    ")
         if log_file is not None:
             with log_file.open("w") as f:
                 input_tks = batch["input_ids"][0]
@@ -287,16 +294,14 @@ class EditPredictionService:
                 print(f"{respect_lines = }", file=f)
                 print(f"{len(input_tks) = }", file=f)
                 print(f"{len(references) = }", file=f)
-                print(header("Ground truth"), file=f)
-                print(indent(decode_tokens(output_truth)), file=f)
-                print(header("Predicted"), file=f)
-                print(indent(decode_tokens(best_output)), file=f)
-                print(header("Input"), file=f)
-                print(indent(decode_tokens(input_tks)), file=f)
-                print(header("References"), file=f)
-                for i, ref in enumerate(references):
-                    print("-" * 6 + f"Reference {i}" + "-" * 6, file=f)
-                    print(indent(decode_tokens(ref)), file=f)
+                pred = RetrievalModelPrediction(
+                    input_ids=input_tks,
+                    output_ids=best_output,
+                    labels=output_truth,
+                    references=references,
+                )
+                pred_str = RetrievalDecodingResult.show_prediction(None, pred)
+                print(pred_str, file=f)
 
         if not apply_edit:
             return "Edit suggested but not applied. (apply_edit=False)"

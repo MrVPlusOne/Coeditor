@@ -193,7 +193,7 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
                     name, id(pymod), lambda: self.encode_module_stub(not_none(pymod))
                 )[: self.max_chunks_per_ref]
                 for name in pedit.changes
-                if (pymod := pedit.after.modules.get(name)) is not None
+                if (pymod := pedit.before.modules.get(name)) is not None
             }
         tk_refs = {
             get_change_path(c): list(self.encode_elem_change(c, ctx_enc))[
@@ -257,8 +257,6 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 try:
                     code_before = show_element(tree_before, mf.before.in_class)
                 except Exception as e:
-                    # e.add_note(f"CST:\n{tree_before}")
-                    # raise
                     warnings.warn("Failed to show masked code: " + str(e))
                     code_before = mf.before.code
                 code_change = Modified(code_before, mf.after.code)
