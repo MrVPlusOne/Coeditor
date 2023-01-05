@@ -516,18 +516,29 @@ class TruncateAt(enum.Enum):
 
 
 def break_into_chunks(
-    tks: TokenSeq, chunk_size: int, overlap: int, add_bos: bool
+    tks: TokenSeq,
+    header_f: Callable[[int], TokenSeq],
+    chunk_size: int,
+    overlap: int,
+    add_bos: bool,
 ) -> list[TokenSeq]:
     # break the token sequence into chunks of size chunk_size
     chunks = list[TokenSeq]()
-    for i in range(0, len(tks), chunk_size - overlap):
-        chunk = tks[i : i + chunk_size]
-        if add_bos:
-            if i > 0:
-                chunk[0] = BOS_id
-            if i + chunk_size < len(tks):
-                chunk[-1] = EOS_id
+    i = 0
+    while i < len(tks):
+        chunk_id = len(chunks)
+        chunk = header_f(chunk_id)
+        this_overlap = overlap if i > 0 else 0
+        progress = chunk_size - len(chunk) - this_overlap
+        assert progress > 0, f"Not making progress: {progress = }"
+        chunk.extend(tks[i - this_overlap : i + progress])
+        if add_bos and i > 0:
+            chunk[0] = BOS_id
+        if add_bos and i + progress < len(tks) - 1:
+            chunk[-1] = EOS_id
+        assert len(chunk) <= chunk_size
         chunks.append(chunk)
+        i += progress
     return chunks
 
 

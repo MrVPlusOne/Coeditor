@@ -15,6 +15,7 @@ from coeditor.encoding import (
     collapse_code,
     encode_basic,
     inline_output_tokens,
+    is_extra_id,
     tokens_to_change,
     truncate_output_tks,
     truncate_section,
@@ -143,7 +144,7 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
     when generating the references.
     """
 
-    VERSION = 5
+    VERSION = 6
     max_ref_tks: int = 512
     ref_chunk_overlap: int = 16
     max_chunks_per_ref: int = 4
@@ -207,7 +208,9 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
             ]
         for refs in tk_refs.values():
             for seg in refs:
-                assert len(seg) <= self.max_ref_tks
+                assert (
+                    len(seg) <= self.max_ref_tks
+                ), f"{len(seg) = } > {self.max_ref_tks = }"
 
         query_data = dict[ProjectPath, BasicTkQueryEdit]()
         tk_pedit = TkProjectEdit(
@@ -273,13 +276,13 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 cls_tks = (ctx_enc.encode_ctx_element(cls_p),)
             context = join_list((*cls_tks, context), sep=Newline_id)
 
-            input_tks, used_context = truncate_sections(
+            used_input, used_context = truncate_sections(
                 self.max_query_tks - len(path_tks) - 2,
                 (input_tks, TruncateAt.Right),
                 (context, TruncateAt.Left),
                 add_bos=self.add_truncate_bos,
             )
-            input_tks = join_list((path_tks, used_context, input_tks), sep=Newline_id)
+
             if len(used_context) == len(context):
                 prev_chunks = []
             else:
@@ -287,6 +290,21 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 remaining_context = context[:to_keep]
                 remaining_context.append(EOS_id)
                 prev_chunks = list(self.encode_previous_chunks(path, remaining_context))
+
+            if len(used_input) == len(input_tks):
+                next_chunks = []
+            else:
+                to_keep = len(input_tks) - len(used_input) + self.ref_chunk_overlap + 1
+                remaining_input = input_tks[-to_keep:]
+                remaining_input.insert(0, BOS_id)
+                remaining_input = [tk for tk in remaining_input if not is_extra_id(tk)]
+                next_chunks = list(
+                    self.encode_previous_chunks(
+                        path, remaining_input, start_chunk=len(prev_chunks) + 1
+                    )
+                )
+
+            input_tks = join_list((path_tks, used_context, used_input), sep=Newline_id)
             output_tks = truncate_output_tks(input_tks, output_tks)
             output_tks = truncate_section(
                 output_tks,
@@ -303,7 +321,7 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
                 output_tks=output_tks,
                 path=path,
                 change_type=mf.map(lambda _: None),
-                prev_chunks=prev_chunks,
+                prev_chunks=prev_chunks + next_chunks,
                 tk_pedit=tk_pedit,
                 is_rename_update=path in renamed_updates,
             )
@@ -325,62 +343,73 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
             lines_per_request = 50
             min_lines_to_edit = 3
             # split it into chunks
-            focus_max = max(1, count_lines(mf.after.code) - min_lines_to_edit)
-            for start in range(0, focus_max, lines_per_request):
+            focus_max = max(0, count_lines(mf.after.code) - min_lines_to_edit)
+            for start in range(0, focus_max + 1, lines_per_request):
                 x = random.random()
                 end = min(focus_max, start + lines_per_request)
                 # bias focus toward start
                 focus = int(x * x * (end - start) + 0.5) + start
                 yield EditRequest(mf, focus)
 
+    def _mk_path_header(
+        self, path_tks: TokenSeq, header_fraction: int = 4, start_chunk: int = 0
+    ):
+        def get_header(i: int):
+            i += start_chunk
+            tks = path_tks.copy()
+            if i > 0:
+                tks.extend(encode_basic(f"[{i}]"))
+            tks = truncate_section(
+                tks,
+                TruncateAt.Left,
+                self.max_ref_tks // header_fraction,
+                add_bos=self.add_truncate_bos,
+            )
+            tks.append(Newline_id)
+            return tks
+
+        return get_header
+
     def encode_elem_change(
         self, c: Change[PythonElem], ctx_encoder: CtxEncoder
     ) -> Iterable[TokenSeq]:
         path_tks = change_to_tokens(c.map(lambda e: f"# {e.path}"))
-        path_tks = truncate_section(
-            path_tks,
-            TruncateAt.Left,
-            self.max_ref_tks // 4,
-            add_bos=self.add_truncate_bos,
-        )
-        path_tks.append(Newline_id)
+
         change_tks = ctx_encoder.encode_ctx_element(get_change_path(c))
         change_tks = self.maybe_wrap_bos(change_tks)
 
         chunks = break_into_chunks(
             change_tks,
-            self.max_ref_tks - len(path_tks),
+            self._mk_path_header(path_tks),
+            self.max_ref_tks,
             overlap=self.ref_chunk_overlap,
             add_bos=self.add_truncate_bos,
         )
         for i, tks in enumerate(chunks):
             to_check = tks if i == 0 else tks[self.ref_chunk_overlap :]
             if has_change(to_check):
-                yield path_tks + tks
+                yield tks
 
     def encode_previous_chunks(
-        self, path: ProjectPath, context_tks: TokenSeq
+        self,
+        path: ProjectPath,
+        context_tks: TokenSeq,
+        start_chunk: int = 0,
     ) -> Iterable[TokenSeq]:
         "Encode the changes immediately before the current editing focus."
         if not context_tks:
             return
         path_tks = encode_basic(f"# edit: {str(path)}")
-        path_tks = truncate_section(
-            path_tks,
-            TruncateAt.Left,
-            self.max_ref_tks // 4,
-            add_bos=self.add_truncate_bos,
-        )
-        path_tks.append(Newline_id)
         chunks = break_into_chunks(
             context_tks,
-            self.max_ref_tks - len(path_tks),
+            self._mk_path_header(path_tks, start_chunk=start_chunk),
+            self.max_ref_tks,
             overlap=self.ref_chunk_overlap,
             add_bos=self.add_truncate_bos,
         )
         for tks in chunks:
             # these important context should always be seen by the model
-            yield path_tks + tks
+            yield tks
 
     def encode_elem_move(
         self,
@@ -400,36 +429,32 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
         before_prefix = f"# old: {old_path}\n"
         after_prefix = f"# new: {new_path}\n"
         prefix_tks = change_to_tokens(Modified(before_prefix, after_prefix))
-        prefix_tks = truncate_section(
-            prefix_tks,
-            TruncateAt.Left,
-            self.max_ref_tks // 2,
-            add_bos=self.add_truncate_bos,
-        )
         chunks = break_into_chunks(
             code_tks,
-            self.max_ref_tks - len(prefix_tks),
+            self._mk_path_header(prefix_tks, header_fraction=2),
+            self.max_ref_tks,
             overlap=self.ref_chunk_overlap,
             add_bos=self.add_truncate_bos,
         )
         for i, tks in enumerate(chunks):
             to_check = tks if i == 0 else tks[self.ref_chunk_overlap :]
             if has_change(to_check):
-                yield prefix_tks + tks
+                yield tks
 
     def encode_module_stub(self, module: PythonModule) -> list[TokenSeq]:
-        name_tks = encode_basic(f"# stub: {module.name}\n")
+        name_tks = encode_basic(f"# stub: {module.name}")
 
         stub_tks = encode_basic(
             stub_from_module(module.tree, lightweight=False, keep_types=True).code
         )
         chunks = break_into_chunks(
             stub_tks,
-            self.max_ref_tks - len(name_tks),
+            self._mk_path_header(name_tks),
+            self.max_ref_tks,
             overlap=self.ref_chunk_overlap,
             add_bos=self.add_truncate_bos,
         )
-        return [name_tks + tks for tks in chunks]
+        return chunks
 
 
 def has_change(tks: TokenSeq) -> bool:
