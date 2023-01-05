@@ -527,15 +527,17 @@ def break_into_chunks(
     i = 0
     while i < len(tks):
         chunk_id = len(chunks)
-        chunk = header_f(chunk_id)
+        header = header_f(chunk_id)
         this_overlap = overlap if i > 0 else 0
-        progress = chunk_size - len(chunk) - this_overlap
+        progress = chunk_size - len(header) - this_overlap
         assert progress > 0, f"Not making progress: {progress = }"
-        chunk.extend(tks[i - this_overlap : i + progress])
+        body = TokenSeq()
+        body.extend(tks[i - this_overlap : i + progress])
         if add_bos and i > 0:
-            chunk[0] = BOS_id
+            body[0] = BOS_id
         if add_bos and i + progress < len(tks) - 1:
-            chunk[-1] = EOS_id
+            body[-1] = EOS_id
+        chunk = header + body
         assert len(chunk) <= chunk_size
         chunks.append(chunk)
         i += progress
