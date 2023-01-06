@@ -88,7 +88,7 @@ def train_model(
 
     max_saved_samples = 200
 
-    with timed_action("Accuracy Evaluating"):
+    with timed_action("Accuracy Evaluation"):
         dec_result = model.predict_on_data(datasets["test"], test_batch_args, dec_args)
         pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
         exact_acc, exact_correct_map = dec_result.exact_match_accuracy()
@@ -115,10 +115,11 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_retrieval_model.py"):
         train_model(
-            dataset_name="large",
+            dataset_name="xl",
             model_variant="-request-stub-v3",
             train_args=TrainingArgs(
-                max_train_epochs=4, reinit_weights=False, quicktest=False
+                max_train_epochs=2,
+                quicktest=False,
             ),
             encoder=QueryRefEditEncoder(),  # (ast_mask_prob=0.06),
             recreate_data=False,

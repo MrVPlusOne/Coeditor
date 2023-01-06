@@ -247,7 +247,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
         epoch_steps = len(train_lodader)
         print("Number of training batches (estimate):")
-        eval_interval = max(10, epoch_steps // 4)
+        eval_interval = max(10, epoch_steps // train_args.evals_per_epoch)
         trainer_args = Seq2SeqTrainingArguments(
             output_dir=str(train_dir),
             overwrite_output_dir=True,
