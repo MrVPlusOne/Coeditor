@@ -983,6 +983,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
 class CtxEncoder:
     pedit: ProjectEdit
     collapse_unchanged: bool
+    compress_ctx: int | None = 6
     indent_in_class: bool = True
     elem_size_limit: int = 8000
     cache: dict[ProjectPath, TokenSeq] = field(default_factory=dict)
@@ -1011,16 +1012,21 @@ class CtxEncoder:
             elem = mod.before if isinstance(mod, Deleted) else mod.after
             if (
                 self.collapse_unchanged
-                and isinstance(mod, Deleted)
-                and isinstance(mod.before, PythonFunction)
+                and (isinstance(mod, Deleted) or isinstance(mod, Added))
+                and isinstance(elem, PythonFunction)
             ):
-                # as a special case, we also collapose the body of deleted functions
+                # as a special case, we also collapose the body of deleted or added functions
                 f_code = show_element(
-                    collapse_code(mod.before.tree), can_indent and elem.in_class
+                    collapse_code(elem.tree), can_indent and elem.in_class
                 )
-                elem_tks = change_to_tokens(Deleted(f_code))
+                f_change = (
+                    Deleted(f_code) if isinstance(mod, Deleted) else Added(f_code)
+                )
+                elem_tks = change_to_tokens(f_change)
             else:
                 elem_tks = change_to_tokens(mod.map(lambda e: maybe_dedent(e.code)))
+                if self.compress_ctx is not None:
+                    elem_tks = compress_change_tks(elem_tks, self.compress_ctx)
         elif path in module_after.elems_dict:
             elem = module_after.elems_dict[path]
             if self.collapse_unchanged and isinstance(elem, PythonFunction):
@@ -1057,6 +1063,30 @@ class CtxEncoder:
             (self.encode_ctx_element(p) for p in sorted_paths),
             sep=Newline_id,
         )
+
+
+def compress_change_tks(tks: TokenSeq, max_ctx: int):
+    lines = split_list(tks, sep=Newline_id)
+    to_keep = [False for _ in lines]
+    # mark which lines to keep
+    for i, line in enumerate(lines):
+        if line and (line[0] == Add_id or line[0] == Del_id):
+            for j in range(max(0, i - max_ctx), min(len(lines), i + max_ctx + 1)):
+                to_keep[j] = True
+    new_lines = list[TokenSeq]()
+    i = 0
+    OMIT = encode_basic("...")
+    while i < len(lines):
+        if to_keep[i]:
+            new_lines.append(lines[i])
+            i += 1
+        else:
+            j = i + 1
+            while j < len(lines) and not to_keep[j]:
+                j += 1
+            new_lines.append(OMIT)
+            i = j
+    return join_list(new_lines, sep=Newline_id)
 
 
 def collapse_code(tree: cst.CSTNode) -> cst.CSTNode:

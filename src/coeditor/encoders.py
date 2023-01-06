@@ -144,7 +144,7 @@ class QueryRefEditEncoder(EditEncoder[BasicTkQueryEdit]):
     when generating the references.
     """
 
-    VERSION = 6
+    VERSION = 7
     max_ref_tks: int = 512
     ref_chunk_overlap: int = 16
     max_chunks_per_ref: int = 4
