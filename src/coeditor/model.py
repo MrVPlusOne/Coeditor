@@ -63,13 +63,14 @@ class DecodingArgs:
 
 @dataclass
 class TrainingArgs:
+    # not used for retrieval model
     max_batch_cost: float = input_cost_model(4100, 512)
+    # not used for retrieval model
     max_batch_size: int = 32
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     max_train_epochs: int = 3
     reinit_weights: bool = False
-    evals_per_epoch: int = 4
     quicktest: bool = False
 
 

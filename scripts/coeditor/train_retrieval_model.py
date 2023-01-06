@@ -71,13 +71,34 @@ def train_model(
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     if not eval_only:
-        with timed_action("Training"):
+        train_edits = datasets["train"].all_edits()
+        warmup_edits = train_edits[: len(train_edits) // 2]
+        finetune_edits = train_edits[len(train_edits) // 2 :]
+        print(f"{len(warmup_edits) = }")
+
+        with timed_action("Warm-up Training"):
+            warmup_bargs = copy.deepcopy(batch_args)
+            warmup_bargs.max_total_ref_tks //= 4
+            warmup_bargs.min_queires *= 4
+            warmup_bargs.max_queries *= 2
+            warmup_targs = copy.deepcopy(train_args)
+            warmup_targs.learning_rate *= 2
             model.train_on_data(
                 model_name,
-                datasets["train"],
+                TokenizedEditDataset.from_edits(warmup_edits),
+                datasets["valid"],
+                warmup_targs,
+                batch_args=warmup_bargs,
+                eval_batch_args=test_batch_args,
+            )
+        with timed_action("Fine-tune Training"):
+            model.train_on_data(
+                model_name,
+                TokenizedEditDataset.from_edits(finetune_edits),
                 datasets["valid"],
                 train_args,
                 batch_args=batch_args,
+                eval_batch_args=test_batch_args,
             )
 
     model.to("cuda")
@@ -100,14 +121,6 @@ def train_model(
         )
         print("Exact-match samples saved to:", out_dir)
 
-        # if isinstance(encoder, AnalysisBasedEditEncoder):
-        #     call_acc, call_correct_map = dec_result.call_update_accuracy()
-        #     wandb.log({"test/call-update-acc": call_acc.average()})
-        #     out_dir = get_model_dir() / model_name / "call_update_samples"
-        #     dec_result.save_examples_to_dir(
-        #         out_dir, random_subset(call_correct_map, max_saved_samples)
-        #     )
-        #     print("Call-update samples saved to:", out_dir)
     return model
 
 
@@ -118,7 +131,7 @@ if __name__ == "__main__":
             dataset_name="xl",
             model_variant="-request-stub-v3",
             train_args=TrainingArgs(
-                max_train_epochs=2,
+                max_train_epochs=4,
                 quicktest=False,
             ),
             encoder=QueryRefEditEncoder(),  # (ast_mask_prob=0.06),

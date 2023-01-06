@@ -59,6 +59,7 @@ from transformers import (
     EvalPrediction,
     BatchEncoding,
     AutoConfig,
+    SchedulerType,
 )
 from transformers.generation.utils import (
     SampleOutput,
@@ -192,6 +193,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         eval_data: TokenizedEditDataset,
         train_args: "TrainingArgs",
         batch_args: "BatchArgs",
+        eval_batch_args: "BatchArgs",
     ) -> None:
         train_dir = get_model_dir(trained=False) / training_name
 
@@ -202,11 +204,6 @@ class RetrievalEditorModel(T5PreTrainedModel):
         train_lodader = edits_to_dataloader(
             train_edits, args=batch_args, shuffle=True, desc="Training Epoch"
         )
-        eval_batch_args = copy.deepcopy(batch_args)
-        eval_batch_args.max_queries *= 2
-        eval_batch_args.min_queires *= 2
-        eval_batch_args.shuffle_extra_ids = False
-        eval_batch_args.max_ref_dropout = 0.0
         eval_loader = edits_to_dataloader(
             eval_edits,
             args=eval_batch_args,
@@ -246,19 +243,16 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 )
 
         epoch_steps = len(train_lodader)
-        print("Number of training batches (estimate):")
-        eval_interval = max(10, epoch_steps // train_args.evals_per_epoch)
+        print("Number of training batches (estimate):", epoch_steps)
         trainer_args = Seq2SeqTrainingArguments(
             output_dir=str(train_dir),
             overwrite_output_dir=True,
-            evaluation_strategy="steps",
-            save_strategy="steps",
-            eval_steps=eval_interval,
-            logging_steps=eval_interval,
-            save_steps=eval_interval,
+            evaluation_strategy="epoch",
+            save_strategy="epoch",
+            logging_steps=max(1, epoch_steps // 10),
             num_train_epochs=train_args.max_train_epochs,
-            save_total_limit=3,
-            # prediction_loss_only=True,
+            save_total_limit=2,
+            lr_scheduler_type=SchedulerType.CONSTANT,
             learning_rate=train_args.learning_rate,
             weight_decay=train_args.weight_decay,
             metric_for_best_model="loss_per_tk",
@@ -274,7 +268,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         trainer = DynamicTrainer(
             self,
             trainer_args,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
         )
 
         trainer.train()
@@ -1267,7 +1261,7 @@ class BatchArgs:
     min_queires: int = 1
     max_queries: int = 8
     max_ref_tks: int = 512
-    max_total_ref_tks: int = 8000
+    max_total_ref_tks: int = 512 * 16
     max_ref_dropout: float = 1.0
     shuffle_extra_ids: bool = True
     use_only_modified: bool = True
@@ -1284,7 +1278,7 @@ class BatchArgs:
     @classmethod
     def eval_default(cls) -> Self:
         return BatchArgs(
-            max_total_ref_tks=8000 * 2,
+            max_total_ref_tks=512 * 32,
             max_queries=32,
             max_ref_dropout=0.0,
             shuffle_extra_ids=False,
@@ -1376,12 +1370,11 @@ def edit_groups_to_batches(
             key_refs = down_sample(key_refs)
             rest_refs = down_sample(rest_refs)
             all_rest = rest_stubs + rest_refs
-            random.shuffle(key_stubs)
-            random.shuffle(key_refs)
+            key_refs.sort(key=len)
             random.shuffle(all_rest)
             for j, seg in enumerate(edit.prev_chunks):
                 id2ref_name[id(seg)] = f"{j}"
-            all_refs = list(edit.prev_chunks) + key_stubs + key_refs + all_rest
+            all_refs = list(edit.prev_chunks) + key_refs + key_stubs + all_rest
             ref_size_sum = 0
             ref_selected = list[TokenSeq]()
             for ref in all_refs:
@@ -1435,7 +1428,7 @@ def edit_groups_to_batches(
 @dataclass
 class _BatchSampler:
     edit_groups: list[list[BasicTkQueryEdit]]
-    data_args: BatchArgs
+    batch_args: BatchArgs
     shuffle: bool
     desc: str
     tqdm_args: dict | None = None
@@ -1450,14 +1443,14 @@ class _BatchSampler:
         return self._len_est
 
     def estimate_n_batches(self) -> int:
-        batches = edit_groups_to_batches(self.edit_groups, self.data_args)
+        batches = edit_groups_to_batches(self.edit_groups, self.batch_args)
         return len(batches)
 
     def __iter__(self) -> Iterable[Mapping]:
         if self.shuffle:
             for es in self.edit_groups:
                 random.shuffle(es)
-        batches = edit_groups_to_batches(self.edit_groups, self.data_args)
+        batches = edit_groups_to_batches(self.edit_groups, self.batch_args)
         if self.shuffle:
             random.shuffle(batches)
 
