@@ -40,7 +40,7 @@ from coeditor.retrieval_model import (
     RetrievalDecodingResult,
     RetrievalEditorModel,
     RetrievalModelPrediction,
-    edit_groups_to_batches,
+    query_edits_to_batches,
 )
 from spot.data import output_ids_as_seqs
 from spot.static_analysis import (
@@ -266,7 +266,7 @@ class EditPredictionService:
             if qedits[0].tk_pedit.module_stubs:
                 print("stub files:", qedits[0].tk_pedit.module_stubs.keys())
             assert len(qedits) == 1
-            batches = edit_groups_to_batches([qedits], self.batch_args)
+            batches = query_edits_to_batches(qedits, self.batch_args)
             assert len(batches) == 1
             batch = batches[0]
 

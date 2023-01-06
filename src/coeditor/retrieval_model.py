@@ -332,10 +332,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 "Shuffling extra ids during eval can lead to incorrect results."
             )
         eval_edits = eval_data.all_edits()
-        edit_groups = list(groupby(eval_edits, lambda e: id(e.tk_pedit)).values())
-        eval_edits = join_list(edit_groups)
         eval_loader = _BatchSampler(
-            edit_groups, batch_args, shuffle=False, desc="Decoding Epoch"
+            eval_edits, batch_args, shuffle=False, desc="Decoding Epoch"
         )
 
         gen_args = dec_args.to_model_args()
@@ -901,9 +899,16 @@ class RetrivalEncoder:
 
         q_lens = input_ids.ne(PAD_id).sum(dim=1).tolist()
 
+        def query_group_key(q: int) -> tuple[int, int]:
+            q_len = q_lens[q]
+            ref_len = sum(
+                len(not_none(references)[r]) for r in not_none(query_ref_list)[q]
+            )
+            return _round_length_group(q_len), _round_length_group(ref_len)
+
         last_hidden_states = batched_map(
             range(n_queries),
-            group_key=lambda q: _round_length_group(q_lens[q]),
+            group_key=query_group_key,
             f=encode_queries,
         )
         last_hidden_state, hidden_state_mask = stack_pad_tensors(last_hidden_states)
@@ -1292,8 +1297,8 @@ class BatchArgs:
         return args
 
 
-def edit_groups_to_batches(
-    edit_groups: Sequence[Sequence[BasicTkQueryEdit]],
+def query_edits_to_batches(
+    query_edits: Sequence[BasicTkQueryEdit],
     args: BatchArgs,
     silent: bool = False,
 ) -> list[dict]:
@@ -1317,11 +1322,9 @@ def edit_groups_to_batches(
     cost_limit = args.cost_limit()
     warned_batch_size = False
 
-    def group_to_batches(
-        group: Sequence[BasicTkQueryEdit],
+    def edits_to_batches(
+        edits: Sequence[BasicTkQueryEdit],
     ) -> Iterable[dict]:
-        pedit = edit_group[0].tk_pedit
-
         def down_sample(xs: list[TokenSeq]) -> list[TokenSeq]:
             n = round(len(xs) * (1 - args.max_ref_dropout * random.random()))
             return random_subset(xs, n, random._inst)
@@ -1345,7 +1348,8 @@ def edit_groups_to_batches(
         # sample references for each query
         current_batch = []
         current_cost = 0
-        for i, edit in enumerate(group):
+        for edit in edits:
+            pedit = edit.tk_pedit
             key_stubs = list[TokenSeq]()
             rest_stubs = list[TokenSeq]()
             id2ref_name = dict[int, str]()
@@ -1412,22 +1416,20 @@ def edit_groups_to_batches(
 
     batches = list[dict]()
     bsizes = list[int]()
-    for edit_group in edit_groups:
-        for batch in group_to_batches(edit_group):
-            batches.append(batch)
-            bsizes.append(len(batch["input_ids"]))
+    for batch in edits_to_batches(query_edits):
+        batches.append(batch)
+        bsizes.append(len(batch["input_ids"]))
 
     batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
     if not silent:
-        cprint("blue", f"num batches: {len(batches)}")
-        cprint("blue", f"Batch stats: {batch_stats}")
+        cprint("blue", f"num batches: {len(batches)},", f"batch stats: {batch_stats}")
 
     return batches
 
 
 @dataclass
 class _BatchSampler:
-    edit_groups: list[list[BasicTkQueryEdit]]
+    all_edits: list[BasicTkQueryEdit]
     batch_args: BatchArgs
     shuffle: bool
     desc: str
@@ -1435,7 +1437,7 @@ class _BatchSampler:
 
     def __post_init__(self):
         if self.shuffle:
-            random.shuffle(self.edit_groups)
+            random.shuffle(self.all_edits)
         self._len_est = self.estimate_n_batches()
         self.epochs = 0
 
@@ -1443,14 +1445,13 @@ class _BatchSampler:
         return self._len_est
 
     def estimate_n_batches(self) -> int:
-        batches = edit_groups_to_batches(self.edit_groups, self.batch_args)
+        batches = query_edits_to_batches(self.all_edits, self.batch_args)
         return len(batches)
 
     def __iter__(self) -> Iterable[Mapping]:
         if self.shuffle:
-            for es in self.edit_groups:
-                random.shuffle(es)
-        batches = edit_groups_to_batches(self.edit_groups, self.batch_args)
+            random.shuffle(self.all_edits)
+        batches = query_edits_to_batches(self.all_edits, self.batch_args)
         if self.shuffle:
             random.shuffle(batches)
 
@@ -1477,10 +1478,8 @@ def edits_to_dataloader(
     # if args.use_only_modified:
     #     edits = [e for e in edits if isinstance(e.change_type, Modified)]
     assert edits
-    edit_groups = list(groupby(edits, lambda e: id(e.tk_pedit)).values())
-    assert edit_groups
     return _BatchSampler(
-        edit_groups, args, shuffle=shuffle, desc=desc, tqdm_args=tqdm_args
+        list(edits), args, shuffle=shuffle, desc=desc, tqdm_args=tqdm_args
     )
 
 
@@ -1497,6 +1496,4 @@ def pad_token_seqs(seqs: Sequence[TokenSeq], pad_id=None) -> LongTensor:
 
 
 def _round_length_group(x: int) -> int:
-    if x <= 64:
-        return 64
-    return 2 ** math.ceil(math.log(x, 2))
+    return math.ceil(x / 64) * 64
