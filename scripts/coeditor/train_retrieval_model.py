@@ -8,7 +8,12 @@ from train_model import check_save_dir, TokenizedEditDataset
 import wandb
 from coeditor.common import *
 from coeditor.encoders import QueryRefEditEncoder
-from coeditor.retrieval_model import RetrievalEditorModel, BatchArgs, TrainingArgs
+from coeditor.retrieval_model import (
+    AttentionMode,
+    RetrievalEditorModel,
+    BatchArgs,
+    TrainingArgs,
+)
 from prepare_data import make_or_load_datasets
 
 
@@ -59,7 +64,7 @@ def train_model(
         model = RetrievalEditorModel.from_code_t5(
             "base", reuse_embed=True, reinit_weights=train_args.reinit_weights
         )
-        model.query_attened_ref = True
+        model.attention_mode = AttentionMode.bidirectional
     else:
         model = RetrievalEditorModel.load(get_model_dir() / model_name)
 
@@ -128,8 +133,8 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_retrieval_model.py"):
         train_model(
-            dataset_name="xl",
-            model_variant="-request-stub-v3",
+            dataset_name="large",
+            model_variant="-bi-request-stub-v4",
             train_args=TrainingArgs(
                 max_train_epochs=4,
                 quicktest=False,
