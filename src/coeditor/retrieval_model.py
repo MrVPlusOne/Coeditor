@@ -1233,6 +1233,7 @@ def t5_sparse_attention(
     batch_size, seq_length = hidden_states.shape[:2]
     if not block_lens:
         raise ValueError("block_lens must not be empty")
+    block_lens = list(block_lens)
 
     blocks = list[tuple[int, int]]()
     start = 0
@@ -1242,40 +1243,46 @@ def t5_sparse_attention(
         start = end
     assert_eq(start, seq_length)
 
-    def shape(states):
+    def shape(states: Tensor):
         """projection"""
         return states.view(
             batch_size, -1, self.n_heads, self.key_value_proj_dim
         ).transpose(1, 2)
 
-    def unshape(states):
-        """reshape"""
+    def unshape(states: Tensor):
+        """reshape from (batch_size, n_heads, seq_length, dim_per_head) to (batch_size, seq_length, dim)"""
         return states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
 
     # (batch_size, n_heads, seq_length, dim_per_head)
     query_states = shape(self.q(hidden_states))
-
-    # get key/value states
     key_states = shape(self.k(hidden_states))
     value_states = shape(self.v(hidden_states))
 
+    queries = list(torch.split_with_sizes(query_states, block_lens, dim=2))
+    keys = list(torch.split_with_sizes(key_states, block_lens, dim=2))
+    values = list(torch.split_with_sizes(value_states, block_lens, dim=2))
+
     g_start, g_end = blocks[-1]
+    # add everything except the last block as special blocks
+    queries.append(query_states[:, :, :g_start, :])
+    keys.append(key_states[:, :, :g_start, :])
+    values.append(value_states[:, :, :g_start, :])
+    N = len(blocks)
 
     attn_outputs = []
 
     # compute for ref blocks
-    for i, (start, end) in enumerate(blocks):
+    for i, self_len in enumerate(block_lens):
         is_global = i == len(blocks) - 1
-        other = (0, g_start) if is_global else blocks[-1]
+        j = N if is_global else N - 1
 
-        self_len = end - start
-        other_len = other[1] - other[0]
-        query = query_states[:, :, start:end, :]
-        key = key_states[:, :, start:end, :]
-        value = value_states[:, :, start:end, :]
+        query = queries[i]
+        key = keys[i]
+        value = values[i]
 
-        other_key = key_states[:, :, other[0] : other[1], :]
-        other_value = value_states[:, :, other[0] : other[1], :]
+        other_key = keys[j]
+        other_value = values[j]
+        other_len = other_key.size(2)
 
         # compute scores
         self_scores = torch.matmul(query, key.transpose(3, 2))
@@ -1290,12 +1297,15 @@ def t5_sparse_attention(
         )
         other_weights = attn_weights[:, :, :, :other_len]
         self_weights = attn_weights[:, :, :, other_len:]
-        # (batch_size, seq_length, dim)
-        self_output = unshape(torch.matmul(self_weights, value))
-        other_output = unshape(torch.matmul(other_weights, other_value))
-        attn_outputs.append(self_output + other_output)
+        self_output = torch.matmul(self_weights, value)
+        other_output = torch.matmul(other_weights, other_value)
+        # (batch_size, n_heads, seq_length, dim_per_head)
+        out = self_output + other_output
+        assert_eq(out.size(2), self_len)
+        attn_outputs.append(out)
 
-    attn_output = torch.cat(attn_outputs, dim=1)
+    # (batch_size, seq_length, dim)
+    attn_output = unshape(torch.cat(attn_outputs, dim=2))
     assert_eq(attn_output.ndim, 3)
     assert_eq(attn_output.size(1), seq_length)
 
@@ -1416,9 +1426,7 @@ def _get_position_bias(
     ref_pos = (torch.arange(ref_len, device=device, dtype=torch.long) - RefDistance)[
         None, :
     ]  # (1, ref_len)
-    ref_pos = ref_pos + torch.zeros(
-        n_queries, 1, device=device, dtype=torch.long
-    )  # (n_queries, ref_len)
+    ref_pos = ref_pos.expand(n_queries, -1)
     query_pos = (
         torch.arange(query_len, device=device, dtype=torch.long)[None, :] + ref_lens
     )  # (n_queries, query_len)
