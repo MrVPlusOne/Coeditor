@@ -13,6 +13,7 @@ from coeditor.retrieval_model import (
     RetrievalEditorModel,
     BatchArgs,
     TrainingArgs,
+    SchedulerType,
 )
 from prepare_data import make_or_load_datasets
 
@@ -64,7 +65,7 @@ def train_model(
         model = RetrievalEditorModel.from_code_t5(
             "base", reuse_embed=True, reinit_weights=train_args.reinit_weights
         )
-        model.attention_mode = AttentionMode.bidirectional
+        model.attention_mode = AttentionMode.query2ref
     else:
         model = RetrievalEditorModel.load(get_model_dir() / model_name)
 
@@ -76,21 +77,18 @@ def train_model(
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     if not eval_only:
-        train_edits = datasets["train"].all_edits()
-        warmup_edits = train_edits[: len(train_edits) // 2]
-        finetune_edits = train_edits[len(train_edits) // 2 :]
-        print(f"{len(warmup_edits) = }")
-
         with timed_action("Warm-up Training"):
             warmup_bargs = copy.deepcopy(batch_args)
-            warmup_bargs.max_total_ref_tks //= 4
-            warmup_bargs.min_queires *= 4
+            warmup_bargs.max_total_ref_tks //= 3
+            warmup_bargs.min_queires *= 3
             warmup_bargs.max_queries *= 2
+
             warmup_targs = copy.deepcopy(train_args)
-            warmup_targs.learning_rate *= 2
+            warmup_targs.learning_rate *= 3
+            warmup_targs.max_train_epochs = 1
             model.train_on_data(
                 model_name,
-                TokenizedEditDataset.from_edits(warmup_edits),
+                datasets["train"],
                 datasets["valid"],
                 warmup_targs,
                 batch_args=warmup_bargs,
@@ -99,7 +97,7 @@ def train_model(
         with timed_action("Fine-tune Training"):
             model.train_on_data(
                 model_name,
-                TokenizedEditDataset.from_edits(finetune_edits),
+                datasets["train"],
                 datasets["valid"],
                 train_args,
                 batch_args=batch_args,
@@ -134,9 +132,9 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="large",
-            model_variant="-bi-request-stub-v4",
+            model_variant="-request-stub-v4",
             train_args=TrainingArgs(
-                max_train_epochs=4,
+                max_train_epochs=3,
                 quicktest=False,
             ),
             encoder=QueryRefEditEncoder(),  # (ast_mask_prob=0.06),

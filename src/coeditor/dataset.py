@@ -38,6 +38,9 @@ class TokenizedEditDataset(Generic[TEdit]):
     def subset(self, repos: Iterable[Path]) -> "TokenizedEditDataset":
         return TokenizedEditDataset({repo: self.project2edits[repo] for repo in repos})
 
+    def subset_edits(self, n_edits: int) -> "TokenizedEditDataset":
+        return TokenizedEditDataset.from_edits(self.all_edits()[:n_edits])
+
     def map(self, f: Callable[[TEdit], TEdit]) -> "TokenizedEditDataset[TEdit]":
         repos = tqdm(self.project2edits.items(), desc="transforming dataset")
         return TokenizedEditDataset(

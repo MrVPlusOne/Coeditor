@@ -31,6 +31,8 @@ jsonrpcserver = "*"
 [dev-packages]
 pytest = "*"
 black = "*"
+snakeviz = "*"
+line-profiler = "*"
 
 [requires]
 python_version = "3.11"

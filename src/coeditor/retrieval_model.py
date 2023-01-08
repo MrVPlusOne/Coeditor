@@ -69,7 +69,7 @@ from transformers.generation.utils import (
 )
 from transformers.trainer import EvalLoopOutput
 from datasets.arrow_dataset import Dataset
-
+from torch.utils.checkpoint import checkpoint
 
 PAD_id = 0
 CheckNaN: bool = False
@@ -258,7 +258,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             logging_steps=max(1, epoch_steps // 10),
             num_train_epochs=train_args.max_train_epochs,
             save_total_limit=2,
-            lr_scheduler_type=SchedulerType.CONSTANT,
+            lr_scheduler_type=train_args.lr_scheduler_type,
             learning_rate=train_args.learning_rate,
             weight_decay=train_args.weight_decay,
             metric_for_best_model="loss_per_tk",
@@ -488,6 +488,36 @@ class RetrievalEditorModel(T5PreTrainedModel):
         out = pad_token_seqs(references, pad_id=pad_id)
         out = out.to(self.device)
         return cast(LongTensor, out)
+
+    def profile_run(self, repeats: int = 10, max_refs: int = 10):
+        rand = random.Random(42)
+        for i in tqdm(range(repeats), "test run"):
+            input_ids = 5 * torch.ones(
+                1, rand.randint(64, 512), dtype=torch.long, device=self.device
+            )
+            n_refs = rand.randint(max_refs // 2, max_refs)
+            references = [[5] * rand.randint(64, 512) for _ in range(n_refs)]
+            labels = 5 * torch.ones(1, 128, dtype=torch.long, device=self.device)
+            with torch.autocast("cuda"):
+                self.forward(as_any(input_ids), references, labels=as_any(labels))
+
+    def run_on_edits(self, edits: Sequence[BasicTkQueryEdit], batch_args: "BatchArgs"):
+        train_edits = edits
+        assert len(train_edits) > 0, "No training edits provided."
+
+        random.seed(42)
+        train_lodader = edits_to_dataloader(
+            train_edits, args=batch_args, shuffle=True, desc="Training Epoch"
+        )
+        for batch in train_lodader.__iter__():
+            out = self.forward(
+                input_ids=batch["input_ids"].to(self.device),
+                references=batch["references"],
+                query_ref_list=batch["query_ref_list"],
+                labels=batch["labels"].to(self.device),
+            )
+            assert out.loss is not None
+            out.loss.backward()
 
     def forward(
         self,
@@ -915,6 +945,7 @@ class RetrivalEncoder:
                     query_ref_list=query_refs,
                 )
             else:
+                assert_eq(self.attention_mode.value, AttentionMode.basic.value)
                 enc = self.encode_query_simple(
                     query_ids=cast(LongTensor, q_tensor),
                     query_attention_mask=q_mask,
@@ -969,7 +1000,7 @@ class RetrivalEncoder:
 
         for i, block in enumerate(stack.block):
             assert isinstance(block, T5Block)
-            query_states, ref_states = query_ref_layer_batched(
+            query_states, ref_states = query_ref_layer(
                 block, query_states, ref_states, cache
             )
 
@@ -1041,9 +1072,9 @@ class RetrivalEncoder:
         ref_outputs: Sequence[BaseModelOutputWithPastAndCrossAttentions],
         query_ref_list: Sequence[Sequence[int]],
     ) -> tuple[Tensor, Tensor]:
-        assert (
-            query_ids[:, 0].ne(PAD_id).all()
-        ), "queries must be padded only at the end."
+        # assert (
+        #     query_ids[:, 0].ne(PAD_id).all()
+        # ), "queries must be padded only at the end."
         n_queries = len(query_ref_list)
         assert_eq(n_queries, query_ids.size(0))
         device = self.encoder.device
@@ -1137,7 +1168,7 @@ def encode_query_block(
     ref_hidden_states: Tensor,  # (n_queries, ref_len, model_dim)
     position_bias: Tensor,
     output_attentions: bool = False,
-) -> tuple[Tensor, ...]:
+) -> Tensor:
     """Run a T5Block to encode the query. Instead of using self-attention, this uses
     a hybrid attention where the query is allowed to attend to both itself and the references.
     """
@@ -1154,15 +1185,6 @@ def encode_query_block(
     )
     hidden_states = hybrid_attention_outputs[0]
 
-    check_nan(
-        "hybrid_attention_outputs[0]",
-        hidden_states,
-        {
-            "query_hidden_states": query_hidden_states,
-            "ref_hidden_states": ref_hidden_states,
-        },
-    )
-
     # clamp inf values to enable fp16 training
     if hidden_states.dtype == torch.float16 and torch.isinf(hidden_states).any():
         clamp_value = torch.finfo(hidden_states.dtype).max - 1000
@@ -1178,7 +1200,8 @@ def encode_query_block(
         clamp_value = torch.finfo(hidden_states.dtype).max - 1000
         hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
 
-    return (hidden_states, *hybrid_attention_outputs[1:])
+    # return (hidden_states, *hybrid_attention_outputs[1:])
+    return hidden_states
 
 
 def _get_extended_attention_mask(
@@ -1237,20 +1260,14 @@ def _get_position_bias(
 
     input_shape = (n_queries, query_len)
     # Masking query will cause numerical issues. We don't need to mask it anyway.
-    input_attention_mask = torch.ones(*input_shape, dtype=torch.bool, device=device)
-    if ref_mask is None:
-        ref_mask = cast(
-            BoolTensor, torch.ones(n_queries, ref_len, dtype=torch.bool, device=device)
-        )
+    # input_attention_mask = torch.ones(*input_shape, dtype=torch.bool, device=device)
 
     assert_eq(ref_mask.ndim, 2)
     assert_eq(query_mask.ndim, 2)
     assert_eq(ref_mask.size(0), query_mask.size(0))
     # combine input and ref attention masks
-    attention_mask = input_attention_mask.unsqueeze(2) * torch.cat(
-        [ref_mask, query_mask], dim=1
-    ).unsqueeze(1)
-    assert_eq(tuple(attention_mask.shape), (n_queries, query_len, query_len + ref_len))
+    attention_mask = torch.cat([ref_mask, query_mask], dim=1).unsqueeze(1)
+    assert_eq(tuple(attention_mask.shape), (n_queries, 1, query_len + ref_len))
 
     ref_lens = ref_mask.sum(dim=1)[:, None]  # (n_queries, 1)
     # relative pos needs to be of shape (n_quries, query_len, ref_len + query_len)
@@ -1308,7 +1325,7 @@ def query_ref_layer(
                 attention_layer, query, ref, None, None, RefDistance=RefDistance
             )
             cache[("pbias", "query", i)] = pbias
-        new_query = encode_query_block(block, query, ref, pbias)[0]
+        new_query = encode_query_block(block, query, ref, pbias)
         assert_eq(new_query.shape, query.shape)
         new_query_states.append(new_query)
 
@@ -1321,7 +1338,7 @@ def query_ref_layer(
                     attention_layer, ref, query, None, None, RefDistance=-RefDistance
                 )
                 cache[("pbias", "ref", i, j)] = pbias
-            new_ref = encode_query_block(block, ref, query, pbias)[0]
+            new_ref = encode_query_block(block, ref, query, pbias)
             assert_eq(new_ref.shape, ref.shape)
             new_refs.append(new_ref)
         new_ref_states.append(new_refs)
@@ -1361,7 +1378,7 @@ def query_ref_layer_batched(
                 attention_layer, query, all_ref, None, None, RefDistance=RefDistance
             )
             cache[("pbias", "query", i)] = pbias
-        new_query = encode_query_block(block, query, all_ref, pbias)[0]
+        new_query = encode_query_block(block, query, all_ref, pbias)
         assert_eq(new_query.shape, query.shape)
         new_query_states.append(new_query)
 
@@ -1382,7 +1399,7 @@ def query_ref_layer_batched(
                 cache[("pbias", "refs", i, cache_key)] = pbias
 
             query_view = query.expand(ref.size(0), -1, -1)
-            new_ref = encode_query_block(block, ref, query_view, pbias)[0]
+            new_ref = encode_query_block(block, ref, query_view, pbias)
             assert_eq(new_ref.shape, ref.shape)
             new_refs = [new_ref[i, : x.size(0)] for i, x in enumerate(refs)]
             return new_refs
@@ -1432,7 +1449,7 @@ def encode_query_stack(
     for i, block in enumerate(stack.block):
         assert isinstance(block, T5Block)
         ref_states = ref_hidden_states[i]
-        layer_outputs = encode_query_block(
+        hidden_states = encode_query_block(
             block,
             hidden_states,
             ref_states,
@@ -1442,14 +1459,14 @@ def encode_query_stack(
 
         # layer_outputs is a tuple with:
         # hidden-states, key-value-states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
-        layer_outputs = layer_outputs[:1] + (None,) + layer_outputs[1:]
+        # layer_outputs = layer_outputs[:1] + (None,) + layer_outputs[1:]
 
         check_nan(
             "hidden_states",
-            layer_outputs[0],
+            not_none(hidden_states),
             {"i": i, "input_hidden_states": hidden_states, "ref_states": ref_states},
         )
-        hidden_states, present_key_value_state = layer_outputs[:2]
+        # hidden_states, present_key_value_state = layer_outputs[:2]
         assert isinstance(hidden_states, Tensor)
 
     hidden_states = stack.final_layer_norm(hidden_states)
@@ -1502,7 +1519,7 @@ class BatchArgs:
     min_queires: int = 1
     max_queries: int = 8
     max_ref_tks: int = 512
-    max_total_ref_tks: int = 512 * 16
+    max_total_ref_tks: int = 512 * 12
     max_ref_dropout: float = 1.0
     shuffle_extra_ids: bool = True
     use_only_modified: bool = True
@@ -1519,7 +1536,7 @@ class BatchArgs:
     @classmethod
     def eval_default(cls) -> Self:
         return BatchArgs(
-            max_total_ref_tks=512 * 32,
+            max_total_ref_tks=BatchArgs.max_total_ref_tks * 2,
             max_queries=32,
             max_ref_dropout=0.0,
             shuffle_extra_ids=False,

@@ -325,10 +325,12 @@ def batched_map(
     following the original order of `xs`.
     """
     groups = groupby(range(len(xs)), lambda i: group_key(xs[i]))
+    batches = [[xs[i] for i in ids] for ids in groups.values()]
+    results = [f(batch) for batch in batches]
+
     outputs = dict[int, T2]()
-    for ids in groups.values():
-        batch = [xs[i] for i in ids]
-        for i, y in zip(ids, f(batch)):
+    for ids, result in zip(groups.values(), results):
+        for i, y in zip(ids, result):
             outputs[i] = y
     return [outputs[i] for i in range(len(xs))]
 

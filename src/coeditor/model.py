@@ -36,6 +36,7 @@ from transformers import (
     Seq2SeqTrainer,
     DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
+    SchedulerType,
 )
 from datasets.arrow_dataset import Dataset
 
@@ -72,6 +73,7 @@ class TrainingArgs:
     max_train_epochs: int = 3
     reinit_weights: bool = False
     quicktest: bool = False
+    lr_scheduler_type: SchedulerType = SchedulerType.LINEAR
 
 
 @dataclass
@@ -256,6 +258,7 @@ class CoeditorModel:
             learning_rate=train_args.learning_rate,
             weight_decay=train_args.weight_decay,
             num_train_epochs=train_args.max_train_epochs,
+            lr_scheduler_type=train_args.lr_scheduler_type,
             fp16=True,
             load_best_model_at_end=True,
             push_to_hub=False,
