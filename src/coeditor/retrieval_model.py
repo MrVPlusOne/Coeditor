@@ -2,6 +2,8 @@ import copy
 import logging
 from textwrap import indent
 
+from numpy import zeros_like
+
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import BasicTkQueryEdit, EditRequest, apply_output_tks_to_change
 from coeditor.history import Change, Modified
@@ -938,7 +940,7 @@ class RetrivalEncoder:
             assert_eq(q_tensor.dim(), 2)
 
             if self.attention_mode.value == AttentionMode.query2ref.value:
-                enc = self.encode_query_complex(
+                enc = self.encode_query_uni_directional(
                     query_ids=cast(LongTensor, q_tensor),
                     query_attention_mask=q_mask,
                     ref_outputs=ref_outputs,
@@ -946,7 +948,7 @@ class RetrivalEncoder:
                 )
             else:
                 assert_eq(self.attention_mode.value, AttentionMode.basic.value)
-                enc = self.encode_query_simple(
+                enc = self.encode_query_basic(
                     query_ids=cast(LongTensor, q_tensor),
                     query_attention_mask=q_mask,
                     ref_outputs=ref_outputs,
@@ -1000,7 +1002,7 @@ class RetrivalEncoder:
 
         for i, block in enumerate(stack.block):
             assert isinstance(block, T5Block)
-            query_states, ref_states = query_ref_layer(
+            query_states, ref_states = query_ref_layer_batched(
                 block, query_states, ref_states, cache
             )
 
@@ -1033,7 +1035,7 @@ class RetrivalEncoder:
         )
         return out
 
-    def encode_query_simple(
+    def encode_query_basic(
         self,
         query_ids: LongTensor,
         query_attention_mask: Tensor,
@@ -1065,7 +1067,7 @@ class RetrivalEncoder:
 
         return qref_states, qref_masks
 
-    def encode_query_complex(
+    def encode_query_uni_directional(
         self,
         query_ids: LongTensor,
         query_attention_mask: BoolTensor,
@@ -1143,6 +1145,7 @@ def t5_cross_attention(
     output_attentions=False,
 ) -> tuple[Tensor, ...]:
     """Use a self attention layer as a cross attention layer.
+    Basically a self attention layer with layer_norm, dropout, and skip connection.
     Note that you should encode any attention mask directly into position_bias.
     """
     normed_hidden_states = layer.layer_norm(hidden_states)
@@ -1160,6 +1163,146 @@ def t5_cross_attention(
     hidden_states = hidden_states + layer.dropout(attention_output[0])
     outputs = (hidden_states,) + attention_output[1:]
     return cast(tuple[Tensor, ...], outputs)
+
+
+def t5_attention(
+    self: T5Attention,
+    hidden_states,
+    key_value_states,
+    position_bias=None,
+):
+    """
+    Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
+    """
+    # Input is (batch_size, seq_length, dim)
+    # Mask is (batch_size, key_length) (non-causal) or (batch_size, key_length, key_length)
+    # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
+    batch_size, seq_length = hidden_states.shape[:2]
+
+    def shape(states):
+        """projection"""
+        return states.view(
+            batch_size, -1, self.n_heads, self.key_value_proj_dim
+        ).transpose(1, 2)
+
+    def unshape(states):
+        """reshape"""
+        return states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+
+    # (batch_size, n_heads, seq_length, dim_per_head)
+    query_states = shape(self.q(hidden_states))
+
+    # get key/value states
+    key_states = shape(self.k(key_value_states))
+    value_states = shape(self.v(key_value_states))
+
+    # compute scores
+    scores = torch.matmul(
+        query_states, key_states.transpose(3, 2)
+    )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+
+    scores += position_bias
+    attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
+        scores
+    )  # (batch_size, n_heads, seq_length, key_length)
+    attn_weights = nn.functional.dropout(
+        attn_weights, p=self.dropout, training=self.training
+    )  # (batch_size, n_heads, seq_length, key_length)
+
+    attn_output = unshape(
+        torch.matmul(attn_weights, value_states)
+    )  # (batch_size, seq_length, dim)
+    attn_output = self.o(attn_output)
+
+    return attn_output
+
+
+def t5_sparse_attention(
+    self: T5Attention,
+    hidden_states: Tensor,
+    block_lens: Sequence[int],
+    get_bias: Callable[[int, int, bool], Tensor],
+):
+    """
+    A block-sparse self-attention layer that allows all blocks to attend to the
+    last block (in additon to themselves).
+    """
+    # Input is (batch_size, seq_length, dim)
+    # Mask is (batch_size, key_length) (non-causal) or (batch_size, key_length, key_length)
+    # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
+    batch_size, seq_length = hidden_states.shape[:2]
+    if not block_lens:
+        raise ValueError("block_lens must not be empty")
+
+    blocks = list[tuple[int, int]]()
+    start = 0
+    for block_len in block_lens:
+        end = start + block_len
+        blocks.append((start, end))
+        start = end
+    assert_eq(start, seq_length)
+
+    def shape(states):
+        """projection"""
+        return states.view(
+            batch_size, -1, self.n_heads, self.key_value_proj_dim
+        ).transpose(1, 2)
+
+    def unshape(states):
+        """reshape"""
+        return states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+
+    # (batch_size, n_heads, seq_length, dim_per_head)
+    query_states = shape(self.q(hidden_states))
+
+    # get key/value states
+    key_states = shape(self.k(hidden_states))
+    value_states = shape(self.v(hidden_states))
+
+    g_start, g_end = blocks[-1]
+
+    attn_outputs = []
+
+    # compute for ref blocks
+    for i, (start, end) in enumerate(blocks):
+        is_global = i == len(blocks) - 1
+        other = (0, g_start) if is_global else blocks[-1]
+
+        self_len = end - start
+        other_len = other[1] - other[0]
+        query = query_states[:, :, start:end, :]
+        key = key_states[:, :, start:end, :]
+        value = value_states[:, :, start:end, :]
+
+        other_key = key_states[:, :, other[0] : other[1], :]
+        other_value = value_states[:, :, other[0] : other[1], :]
+
+        # compute scores
+        self_scores = torch.matmul(query, key.transpose(3, 2))
+        other_scores = torch.matmul(query, other_key.transpose(3, 2))
+        # (batch_size, n_heads, query_len, query_len + global_len)
+        scores = torch.cat([other_scores, self_scores], dim=-1)
+        pos_bias = get_bias(self_len, other_len, is_global)
+        scores += pos_bias
+        attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
+        attn_weights = nn.functional.dropout(
+            attn_weights, p=self.dropout, training=self.training
+        )
+        other_weights = attn_weights[:, :, :, :other_len]
+        self_weights = attn_weights[:, :, :, other_len:]
+        # (batch_size, seq_length, dim)
+        self_output = unshape(torch.matmul(self_weights, value))
+        other_output = unshape(torch.matmul(other_weights, other_value))
+        attn_outputs.append(self_output + other_output)
+
+    attn_output = torch.cat(attn_outputs, dim=1)
+    assert_eq(attn_output.ndim, 3)
+    assert_eq(attn_output.size(1), seq_length)
+
+    attn_output = self.o(attn_output)
+    assert isinstance(attn_output, Tensor)
+    assert_eq(attn_output.shape, hidden_states.shape)
+    return attn_output
 
 
 def encode_query_block(
@@ -1185,23 +1328,26 @@ def encode_query_block(
     )
     hidden_states = hybrid_attention_outputs[0]
 
-    # clamp inf values to enable fp16 training
-    if hidden_states.dtype == torch.float16 and torch.isinf(hidden_states).any():
-        clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-        hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
-
     # Apply Feed Forward layer
     ff_layer = block.layer[-1]
     assert isinstance(ff_layer, T5LayerFF)
-    hidden_states: Tensor = ff_layer.forward(hidden_states)
+    return run_t5_ff(ff_layer, hidden_states)
+
+
+def run_t5_ff(ff_layer: T5LayerFF, x: Tensor):
+    # clamp inf values to enable fp16 training
+    if x.dtype == torch.float16 and torch.isinf(x).any():
+        clamp_value = torch.finfo(x.dtype).max - 1000
+        x = torch.clamp(x, min=-clamp_value, max=clamp_value)
+
+    # Apply Feed Forward layer
+    x = ff_layer.forward(x)
 
     # clamp inf values to enable fp16 training
-    if hidden_states.dtype == torch.float16 and torch.isinf(hidden_states).any():
-        clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-        hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
-
-    # return (hidden_states, *hybrid_attention_outputs[1:])
-    return hidden_states
+    if x.dtype == torch.float16 and torch.isinf(x).any():
+        clamp_value = torch.finfo(x.dtype).max - 1000
+        x = torch.clamp(x, min=-clamp_value, max=clamp_value)
+    return x
 
 
 def _get_extended_attention_mask(
@@ -1235,19 +1381,15 @@ def _get_extended_attention_mask(
 
 def _get_position_bias(
     attention_layer: T5Attention,
-    query: Tensor,
-    ref: Tensor,
-    query_mask: BoolTensor | None,
-    ref_mask: BoolTensor | None,
+    batch_size: int,
+    query_len: int,
+    ref_len: int,
+    device,
+    query_mask: BoolTensor | None = None,
+    ref_mask: BoolTensor | None = None,
     RefDistance: int = 10000,
 ):
-    assert_eq(query.ndim, 3)
-    assert_eq(ref.ndim, 3)
-    device = query.device
-
-    n_queries = query.size(0)
-    ref_len = ref.size(1)
-    query_len = query.size(1)
+    n_queries = batch_size
     if query_mask is None:
         query_mask = cast(
             BoolTensor,
@@ -1321,8 +1463,14 @@ def query_ref_layer(
         assert_eq(ref.ndim, 3)
         pbias = cache.get(("pbias", "query", i))
         if pbias is None:
+            ref_len = ref.size(1)
             pbias = _get_position_bias(
-                attention_layer, query, ref, None, None, RefDistance=RefDistance
+                attention_layer,
+                n_query,
+                query_len,
+                ref_len,
+                device=query.device,
+                RefDistance=RefDistance,
             )
             cache[("pbias", "query", i)] = pbias
         new_query = encode_query_block(block, query, ref, pbias)
@@ -1335,7 +1483,12 @@ def query_ref_layer(
             pbias = cache.get(("pbias", "ref", i, j))
             if pbias is None:
                 pbias = _get_position_bias(
-                    attention_layer, ref, query, None, None, RefDistance=-RefDistance
+                    attention_layer,
+                    n_query,
+                    ref.size(1),
+                    query.size(1),
+                    query.device,
+                    RefDistance=-RefDistance,
                 )
                 cache[("pbias", "ref", i, j)] = pbias
             new_ref = encode_query_block(block, ref, query, pbias)
@@ -1355,61 +1508,51 @@ def query_ref_layer_batched(
     cache: dict,
     RefDistance: int = 10000,
 ):
-    attention_layer = block.layer[0].SelfAttention
-    assert isinstance(attention_layer, T5Attention)
+    st_layer = block.layer[0]
+    assert isinstance(st_layer, T5LayerSelfAttention)
+    ff_layer = block.layer[-1]
+    assert isinstance(ff_layer, T5LayerFF)
 
     new_query_states = list[Tensor]()
     new_ref_states = list[list[Tensor]]()
 
     query_states = [q.unsqueeze(0) for q in query_states]
     ref_states = [[r.unsqueeze(0) for r in refs] for refs in ref_states]
+    device = query_states[0].device
 
-    for i, (query, refs) in enumerate(zip(query_states, ref_states)):
-        n_query, query_len, model_d = query.shape
-        if refs:
-            all_ref = torch.cat(list(refs), dim=1)
-        else:
-            all_ref = torch.empty(n_query, 0, model_d).to(query.device)
-
-        assert_eq(all_ref.ndim, 3)
-        pbias = cache.get(("pbias", "query", i))
-        if pbias is None:
-            pbias = _get_position_bias(
-                attention_layer, query, all_ref, None, None, RefDistance=RefDistance
+    def get_bias(query_len: int, ref_len: int, is_global: bool):
+        bias = cache.get(("pbias", query_len, ref_len, is_global))
+        if bias is None:
+            bias = _get_position_bias(
+                st_layer.SelfAttention,
+                1,
+                query_len,
+                ref_len,
+                device,
+                RefDistance=RefDistance if is_global else -RefDistance,
             )
-            cache[("pbias", "query", i)] = pbias
-        new_query = encode_query_block(block, query, all_ref, pbias)
-        assert_eq(new_query.shape, query.shape)
-        new_query_states.append(new_query)
+            cache[("pbias", query_len, ref_len, is_global)] = bias
+        return bias
 
-        def encode_refs(refs: Sequence[Tensor]):
-            cache_key = tuple(x.size(0) for x in refs)
-            ref, ref_mask = stack_pad_tensors(refs)
+    for (query, refs) in zip(query_states, ref_states):
+        all_states = [*refs, query]
+        hidden_states = torch.cat(all_states, dim=1)
+        block_lens = [x.size(1) for x in all_states]
 
-            pbias = cache.get(("pbias", "refs", i, cache_key))
-            if pbias is None:
-                pbias = _get_position_bias(
-                    attention_layer,
-                    ref,
-                    query,
-                    query_mask=ref_mask,
-                    ref_mask=None,
-                    RefDistance=-RefDistance,
-                )
-                cache[("pbias", "refs", i, cache_key)] = pbias
-
-            query_view = query.expand(ref.size(0), -1, -1)
-            new_ref = encode_query_block(block, ref, query_view, pbias)
-            assert_eq(new_ref.shape, ref.shape)
-            new_refs = [new_ref[i, : x.size(0)] for i, x in enumerate(refs)]
-            return new_refs
-
-        new_refs = batched_map(
-            [r.squeeze(0) for r in refs],
-            lambda x: x.size(0),
-            encode_refs,
+        normed_hidden_states = st_layer.layer_norm(hidden_states)
+        atten_out = t5_sparse_attention(
+            st_layer.SelfAttention,
+            normed_hidden_states,
+            block_lens,
+            get_bias,
         )
-        new_ref_states.append(new_refs)
+        hidden_states = hidden_states + st_layer.dropout(atten_out)
+        hidden_states = run_t5_ff(ff_layer, hidden_states)
+        hidden_blocks = torch.split(hidden_states, block_lens, dim=1)
+        for old, new in zip(all_states, hidden_blocks):
+            assert_eq(new.shape, old.shape)
+        new_ref_states.append(hidden_blocks[:-1])
+        new_query_states.append(hidden_blocks[-1])
 
     new_query_states = [q.squeeze(0) for q in new_query_states]
     new_ref_states = [[r.squeeze(0) for r in refs] for refs in new_ref_states]
@@ -1439,8 +1582,10 @@ def encode_query_stack(
 
     position_bias = _get_position_bias(
         attention_layer,
-        inputs_embeds,
-        ref_hidden_states[0],
+        inputs_embeds.size(0),
+        inputs_embeds.size(1),
+        ref_hidden_states[0].size(1),
+        inputs_embeds.device,
         query_mask=cast(BoolTensor, input_ids.ne(PAD_id)),
         ref_mask=ref_attention_mask,
         RefDistance=RefDistance,
@@ -1536,7 +1681,7 @@ class BatchArgs:
     @classmethod
     def eval_default(cls) -> Self:
         return BatchArgs(
-            max_total_ref_tks=BatchArgs.max_total_ref_tks * 2,
+            max_total_ref_tks=512 * 32,
             max_queries=32,
             max_ref_dropout=0.0,
             shuffle_extra_ids=False,
