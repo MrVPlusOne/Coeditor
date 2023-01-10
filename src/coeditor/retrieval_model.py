@@ -417,7 +417,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         input_ids = batch["input_ids"]
         if not isinstance(input_ids, torch.LongTensor):
             input_ids = torch.LongTensor(input_ids)
-        with timed("model.generate"):
+        with timed("model.generate"), tqdm(total=dec_args.max_output_tks) as pbar:
             gen_out = self.generate(
                 input_ids.to(self.device),
                 references=batch["references"],
@@ -426,6 +426,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 return_dict_in_generate=True,
                 output_scores=True,
                 **gen_args,
+                tqdm=pbar,
             )
         assert not isinstance(gen_out, torch.LongTensor)
         out_tks = gen_out["sequences"]
@@ -539,6 +540,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        tqdm=None,
     ) -> Seq2SeqLMOutput:
         """
         Shapes
@@ -776,6 +778,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         # TODO: reduce cost using particle weights
 
         # auto-regressive generation
+        t = 0
         while True:
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -820,8 +823,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
                     model_kwargs["past"], subset_ids
                 )
 
+            if (pbar := model_kwargs.get("tqdm")) is not None:
+                pbar = cast(tqdm, pbar)
+                pbar.set_postfix({"unfinished": len(unfinished_ids)})
+                pbar.update()
             # stop when each sentence is finished, or if we exceed the maximum length
-            fake_input = torch.LongTensor([sequences[0]]).to(device)
+            fake_input = torch.LongTensor([[1] * t]).to(device)
+            t += 1
             if len(unfinished_ids) == 0 or stopping_criteria(fake_input, None):  # type: ignore
                 break
 
@@ -877,6 +885,7 @@ class RetrivalEncoder:
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        tqdm=None,
     ) -> RetrivalEncoderOutputs:
         """
         Shapes

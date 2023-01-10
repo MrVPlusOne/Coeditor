@@ -1,8 +1,0 @@
- create mode 100644 src/coeditor/__init__.py
- create mode 100644 src/coeditor/common.py
- create mode 100644 src/coeditor/history.py
- create mode 100644 tests/coeditor/test_edits.py
- rename tests/{ => spot}/test_func_decoding.py (100%)
- rename tests/{ => spot}/test_model_creation.py (100%)
- rename tests/{ => spot}/test_static_analysis.py (100%)
- rename tests/{ => spot}/test_type_env.py (100%)
