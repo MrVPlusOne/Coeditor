@@ -56,7 +56,9 @@ from spot.static_analysis import (
     PythonModule,
     PythonProject,
     remove_comments,
+    show_element,
 )
+from spot.utils import add_line_numbers
 
 import textwrap
 
@@ -254,7 +256,7 @@ class EditPredictionService:
         self,
         file: Path,
         line: int,
-        log_file: Path | None = Path("coeditor-log.txt"),
+        log_dir: Path | None = Path("coeditor_logs"),
     ) -> ServiceResponse:
         """Make the suggestion in-place at the given location."""
         timed = self.tlogger.timed
@@ -300,9 +302,13 @@ class EditPredictionService:
             case [Added(PythonFunction()) as mf]:
                 elem_change = cast(Added[PythonFunction], mf)
             case _:
-                trans_elem = copy.copy(now_elem)
                 if self.config.drop_comments:
-                    trans_elem.tree = remove_comments(trans_elem.tree)
+                    trans_tree = remove_comments(now_elem.tree)
+                    trans_elem = PythonFunction(
+                        now_elem.name, now_elem.path, now_elem.parent_class, trans_tree
+                    )
+                else:
+                    trans_elem = now_elem
                 elem_change = Modified(trans_elem, trans_elem)
 
         with timed("encode edits"):
@@ -334,31 +340,27 @@ class EditPredictionService:
             predictions = predictions[0]
             assert predictions
 
-        # for i, (pred_change, _, score) in enumerate(predictions):
-        #     print("=" * 10, f"Sugeestion {i}", "=" * 10)
-        #     print(f"score: {score:.4g}")
-        #     print(show_change(pred_change))
-
-        best_output = predictions[0].out_tks
-        best_score = predictions[0].score
-
-        if log_file is not None:
-            with log_file.open("w") as f:
-                input_tks = batch["input_ids"][0]
-                references = batch["references"]
-                output_truth = batch["labels"][0]
-                print(f"{respect_lines = }", file=f)
-                print(f"{len(input_tks) = }", file=f)
-                print(f"{len(references) = }", file=f)
-                print(f"Solution score: {best_score:.3g}", file=f)
-                pred = RetrievalModelPrediction(
-                    input_ids=input_tks,
-                    output_ids=best_output,
-                    labels=output_truth,
-                    references=references,
-                )
-                pred_str = RetrievalDecodingResult.show_prediction(None, pred)
-                print(pred_str, file=f)
+        if log_dir is not None:
+            log_dir.mkdir(exist_ok=True)
+            input_tks = batch["input_ids"][0]
+            references = batch["references"]
+            output_truth = batch["labels"][0]
+            for i, pred in enumerate(predictions):
+                with (log_dir / f"solution-{i}.txt").open("w") as f:
+                    pred_tks = pred.out_tks
+                    score = pred.score
+                    print(f"{respect_lines = }", file=f)
+                    print(f"{len(input_tks) = }", file=f)
+                    print(f"{len(references) = }", file=f)
+                    print(f"Solution score: {score:.3g}", file=f)
+                    pred = RetrievalModelPrediction(
+                        input_ids=input_tks,
+                        output_ids=pred_tks,
+                        labels=output_truth,
+                        references=references,
+                    )
+                    pred_str = RetrievalDecodingResult.show_prediction(None, pred)
+                    print(pred_str, file=f)
 
         now_span = now_mod.location_map[now_elem.tree]
         # old_elem_code = get_span(now_code, now_span)
@@ -369,20 +371,17 @@ class EditPredictionService:
 
         suggestions = list[EditSuggestion]()
         for pred in predictions:
-            new_elem_code = self.apply_edit_to_elem(
+            suggested_change, preview = self.apply_edit_to_elem(
                 file,
                 now_mod,
                 now_elem,
                 line,
                 pred.out_tks,
             )
-            preview = self.preview_changes(
-                Modified(old_elem_code, new_elem_code), respect_lines
-            )
             suggestion = EditSuggestion(
                 score=pred.score,
                 change_preview=preview,
-                new_code=new_elem_code,
+                new_code=suggested_change.after,
             )
             suggestions.append(suggestion)
 
@@ -391,7 +390,7 @@ class EditPredictionService:
 
         return ServiceResponse(
             target_file=file.relative_to(project).as_posix(),
-            edit_start=as_tuple(now_span.start),
+            edit_start=(now_span.start.line, 0),
             edit_end=as_tuple(now_span.end),
             old_code=old_elem_code,
             suggestions=suggestions,
@@ -428,14 +427,9 @@ class EditPredictionService:
         (input_tks, output_tks), _ = change_tks_to_query_context(
             change_tks, respect_lines
         )
-
-        ctx_start = max(0, respect_lines - self.preview_ctx_lines)
-        ctx_code = "\n".join(change.before.split("\n")[ctx_start:respect_lines])
-        if ctx_code:
-            ctx_code = textwrap.indent(ctx_code, "  ") + "\nfocus>\n"
         new_change = tokens_to_change(inline_output_tokens(input_tks, output_tks))
         change_str = default_show_diff(new_change.before, new_change.after)
-        return ctx_code + change_str
+        return change_str
 
     def apply_edit_to_elem(
         self,
@@ -444,7 +438,7 @@ class EditPredictionService:
         now_elem: PythonElem,
         cursor_line: int,
         out_tks: TokenSeq,
-    ) -> str:
+    ) -> tuple[Modified[str], str]:
         mname = now_elem.path.module
         path_s = file.relative_to(self.project).as_posix()
         prev_mod = self.prev_parse_cache.cached(
@@ -472,10 +466,13 @@ class EditPredictionService:
         logging.info("Now respect lines:", lines_with_comment)
         if self.config.drop_comments:
             # map the changes to the original code locations with comments
-            remover = CommentRemover(now_mod.location_map)
-            elem1 = now_elem.tree.visit(remover)
-            assert isinstance(elem1, cst.CSTNode)
-            line_map = remover.line_map(elem1)
+            remover = CommentRemover(prev_mod.location_map)
+            if prev_elem is not None:
+                elem1 = prev_elem.tree.visit(remover)
+                assert isinstance(elem1, cst.CSTNode)
+                line_map = remover.line_map(elem1)
+            else:
+                line_map = {0: 0, 1: 1}
             n_lines = len(line_map)
             line_map[n_lines] = line_map[n_lines - 1] + 1
             lines_no_comment = (
@@ -486,8 +483,19 @@ class EditPredictionService:
             for k, seg in output_ids_as_seqs(out_tks).items():
                 rel_line = extra_id_to_number(k) + lines_no_comment
                 if rel_line not in line_map:
-                    logging.warning(f"predicted relative line {rel_line} is out of range.")
-                    continue
+                    messages = []
+                    messages.append(
+                        f"predicted relative line {rel_line} (extra_id_{extra_id_to_number(k)}) is out of range."
+                    )
+                    messages.append(
+                        f"{n_lines = }, {lines_no_comment = }, {lines_with_comment = }"
+                    )
+                    messages.append(f"{line_map = }")
+                    if isinstance(code_change, Modified):
+                        messages.append("Prev element:")
+                        messages.append(add_line_numbers(code_change.before))
+                    e = ValueError("\n".join(messages))
+                    raise e
                 line = line_map[rel_line]
                 k1 = get_extra_id(line - lines_with_comment)
                 new_out_tks.append(k1)
@@ -496,7 +504,10 @@ class EditPredictionService:
 
         change_tks = change_to_tokens(code_change)
         new_change = apply_output_tks_to_change(change_tks, lines_with_comment, out_tks)
-        return new_change.after.strip("\n")
+        new_change.before = new_change.before.strip("\n")
+        new_change.after = new_change.after.strip("\n")
+        preview = self.preview_changes(new_change, lines_with_comment)
+        return new_change, preview
 
 
 def replace_lines(text: str, span: CodeRange, replacement: str):

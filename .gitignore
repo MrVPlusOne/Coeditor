@@ -7,7 +7,7 @@ checkpoints
 caches
 lightning_logs/
 output/
-coeditor-log.txt
+coeditor_logs/
 
 build/
 __pycache__

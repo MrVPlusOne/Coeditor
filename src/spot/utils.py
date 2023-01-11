@@ -744,6 +744,9 @@ def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
                 i = j
         return new_lines
 
+    if str1 == str2:
+        return "... (no change) ..."
+
     diffs = compute_line_diffs(
         textwrap.indent(str1, " ").split("\n"),
         textwrap.indent(str2, " ").split("\n"),
