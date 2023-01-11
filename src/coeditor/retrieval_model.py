@@ -195,7 +195,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        self.attention_mode: AttentionMode = AttentionMode.query2ref
+        self.attention_mode: AttentionMode = AttentionMode.bidirectional
         self.tlogger = TimeLogger()
 
     def train_on_data(
@@ -851,7 +851,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     @staticmethod
     def from_code_t5(
         size: Literal["small", "base", "large"],
-        attention_mode: AttentionMode = AttentionMode.query2ref,
+        attention_mode: AttentionMode = AttentionMode.bidirectional,
         reuse_embed: bool = False,
         reinit_weights: bool = False,
     ) -> "RetrievalEditorModel":

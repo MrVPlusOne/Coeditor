@@ -65,7 +65,6 @@ def train_model(
         model = RetrievalEditorModel.from_code_t5(
             "base", reuse_embed=True, reinit_weights=train_args.reinit_weights
         )
-        model.attention_mode = AttentionMode.query2ref
     else:
         model = RetrievalEditorModel.load(get_model_dir() / model_name)
 
@@ -131,10 +130,10 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_retrieval_model.py"):
         train_model(
-            dataset_name="large",
-            model_variant="-request-stub-v4",
+            dataset_name="xl",
+            model_variant="-bi-request-stub-v4",
             train_args=TrainingArgs(
-                max_train_epochs=3,
+                max_train_epochs=1,
                 quicktest=False,
             ),
             encoder=QueryRefEditEncoder(),  # (ast_mask_prob=0.06),
