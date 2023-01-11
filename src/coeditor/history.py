@@ -66,16 +66,18 @@ class Modified(Generic[E1]):
 Change = Added[E1] | Deleted[E1] | Modified[E1]
 
 
-def default_show_diff(before: Any | None, after: Any | None) -> str:
+def default_show_diff(
+    before: Any | None, after: Any | None, max_ctx: int | None = 6
+) -> str:
     def show_elem(elem: Any) -> str:
         match elem:
             case PythonVariable() | PythonFunction():
                 return elem.code
             case _:
-                return str(elem).strip()
+                return str(elem)
 
     def drop_last_line(s: str) -> str:
-        return "\n".join(s.splitlines()[:-1])
+        return "\n".join(s.split("\n")[:-1])
 
     match before, after:
         case PythonFunction(tree=tree1) as before, PythonFunction(tree=tree2) as after:
@@ -104,7 +106,7 @@ def default_show_diff(before: Any | None, after: Any | None) -> str:
         case _:
             s1 = show_elem(before) if before is not None else ""
             s2 = show_elem(after) if after is not None else ""
-            return show_string_diff(s1, s2)
+            return show_string_diff(s1, s2, max_ctx=max_ctx)
 
 
 def show_change(
@@ -118,6 +120,8 @@ def show_change(
     elif isinstance(change, Deleted):
         return f"* Deleted: {name}\n{indent(show_diff(change.before, None), tab)}"
     elif isinstance(change, Modified):
+        if change.before == change.after:
+            return f"* Unchanged: {name}"
         diff = show_diff(change.before, change.after)
         return f"* Modified: {name}\n{indent(diff, tab)}"
 

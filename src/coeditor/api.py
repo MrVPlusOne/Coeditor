@@ -1,7 +1,9 @@
 # End-user API as an editing suggestion tool.
 
 import copy
+import io
 import logging
+import sys
 import torch
 from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
@@ -20,7 +22,9 @@ from coeditor.encoding import (
     extra_id_to_number,
     extract_edit_change,
     get_extra_id,
+    inline_output_tokens,
     is_extra_id,
+    tokens_to_change,
 )
 
 from coeditor.history import (
@@ -28,6 +32,7 @@ from coeditor.history import (
     Modified,
     ModuleEdit,
     ProjectEdit,
+    default_show_diff,
     file_content_from_commit,
     get_change_path,
     get_commit_history,
@@ -167,6 +172,58 @@ class ChangeDetectionConfig:
 
 
 @dataclass
+class EditSuggestion:
+    score: float
+    change_preview: str
+    new_code: str
+
+    def to_json(self):
+        return {
+            "score": self.score,
+            "change_preview": self.change_preview,
+            "new_code": self.new_code,
+        }
+
+
+@dataclass
+class ServiceResponse:
+    target_file: str
+    edit_start: tuple[int, int]
+    edit_end: tuple[int, int]
+    old_code: str
+    suggestions: list[EditSuggestion]
+
+    def to_json(self):
+        return {
+            "target_file": self.target_file,
+            "edit_start": self.edit_start,
+            "edit_end": self.edit_end,
+            "old_code": self.old_code,
+            "suggestions": [s.to_json() for s in self.suggestions],
+        }
+
+    def print(self, file=sys.stdout):
+        print(f"Target file: {self.target_file}", file=file)
+        print(f"Edit range: {self.edit_start} - {self.edit_end}", file=file)
+        for i, s in enumerate(self.suggestions):
+            print(
+                f"\t--------------- Suggestion {i} (score: {s.score:.2f}) ---------------",
+                file=file,
+            )
+            print(textwrap.indent(s.change_preview, "\t"), file=file)
+        print(f"original code:", file=file)
+
+    def __str__(self) -> str:
+        # use the print above
+        s = io.StringIO()
+        self.print(s)
+        return s.getvalue()
+
+
+ErrorStr = str
+
+
+@dataclass
 class EditPredictionService:
     def __init__(
         self,
@@ -184,6 +241,7 @@ class EditPredictionService:
         self.dec_args = dec_args
         self.config = config
         self.show_max_solutions = 3
+        self.preview_ctx_lines = 3
 
         self.prev_cache = TimedCache[ModuleName, PythonModule, str]()
         self.now_cache = TimedCache[ModuleName, PythonModule, float]()
@@ -197,9 +255,7 @@ class EditPredictionService:
         file: Path,
         line: int,
         log_file: Path | None = Path("coeditor-log.txt"),
-        apply_edit: bool = False,
-        apply_prob_threshold: float = 0.3,
-    ) -> str:
+    ) -> ServiceResponse:
         """Make the suggestion in-place at the given location."""
         timed = self.tlogger.timed
         project = self.project
@@ -278,13 +334,12 @@ class EditPredictionService:
             predictions = predictions[0]
             assert predictions
 
-        for i, (pred_change, _, score) in enumerate(predictions):
-            print("=" * 10, f"Sugeestion {i}", "=" * 10)
-            print(f"score: {score:.4g}")
-            print(show_change(pred_change))
+        # for i, (pred_change, _, score) in enumerate(predictions):
+        #     print("=" * 10, f"Sugeestion {i}", "=" * 10)
+        #     print(f"score: {score:.4g}")
+        #     print(show_change(pred_change))
 
         best_output = predictions[0].out_tks
-        best_score = predictions[0].score
 
         if log_file is not None:
             with log_file.open("w") as f:
@@ -303,27 +358,42 @@ class EditPredictionService:
                 pred_str = RetrievalDecodingResult.show_prediction(None, pred)
                 print(pred_str, file=f)
 
-        if not apply_edit:
-            return "Edit suggested but not applied. (apply_edit=False)"
+        now_span = now_mod.location_map[now_elem.tree]
+        # old_elem_code = get_span(now_code, now_span)
+        old_elem_code = now_elem.code
+        respect_lines = (
+            self.compute_offset(now_mod, now_elem, line, drop_comments=False) + 1
+        )
 
-        with timed("apply edit"):
-            if best_score < apply_prob_threshold:
-                return f"Suggestion not applied due to low confidence (score {best_score:.3g} < {apply_prob_threshold})."
+        suggestions = list[EditSuggestion]()
+        for pred in predictions:
             new_elem_code = self.apply_edit_to_elem(
                 file,
                 now_mod,
                 now_elem,
                 line,
-                best_output,
+                pred.out_tks,
             )
-            now_span = now_mod.location_map[now_elem.tree]
-            new_code = replace_lines(now_code, now_span, new_elem_code)
-            changed = new_code != now_code
-            if changed:
-                file.write_text(new_code)
-                return f"Top suggestion applied. (confidence: {best_score:.3g})"
-            else:
-                return "Top suggestion is same as the current state."
+            preview = self.preview_changes(
+                Modified(old_elem_code, new_elem_code), respect_lines
+            )
+            suggestion = EditSuggestion(
+                score=pred.score,
+                change_preview=preview,
+                new_code=new_elem_code,
+            )
+            suggestions.append(suggestion)
+
+        def as_tuple(x: CodePosition):
+            return (x.line, x.column)
+
+        return ServiceResponse(
+            target_file=file.relative_to(project).as_posix(),
+            edit_start=as_tuple(now_span.start),
+            edit_end=as_tuple(now_span.end),
+            old_code=old_elem_code,
+            suggestions=suggestions,
+        )
 
     def compute_offset(
         self,
@@ -346,6 +416,24 @@ class EditPredictionService:
                 if span.end.line < line:
                     removed_lines += span.end.line - span.start.line + 1
             return origin_offset - removed_lines
+
+    def preview_changes(
+        self,
+        change: Modified[str],
+        respect_lines: int,
+    ) -> str:
+        change_tks = change_to_tokens(change)
+        (input_tks, output_tks), _ = change_tks_to_query_context(
+            change_tks, respect_lines
+        )
+
+        ctx_start = max(0, respect_lines - self.preview_ctx_lines)
+        ctx_code = "\n".join(change.before.split("\n")[ctx_start:respect_lines])
+        if ctx_code:
+            ctx_code = textwrap.indent(ctx_code, "  ") + "\nfocus>\n"
+        new_change = tokens_to_change(inline_output_tokens(input_tks, output_tks))
+        change_str = default_show_diff(new_change.before, new_change.after)
+        return ctx_code + change_str
 
     def apply_edit_to_elem(
         self,
@@ -402,7 +490,7 @@ class EditPredictionService:
 
         change_tks = change_to_tokens(code_change)
         new_change = apply_output_tks_to_change(change_tks, lines_with_comment, out_tks)
-        return new_change.after
+        return new_change.after.strip("\n")
 
 
 def replace_lines(text: str, span: CodeRange, replacement: str):
@@ -410,6 +498,15 @@ def replace_lines(text: str, span: CodeRange, replacement: str):
     replacemnet = textwrap.indent(textwrap.dedent(replacement), " " * span.start.column)
     old_lines = text.split("\n")
     new_lines = old_lines[:start_ln] + [replacemnet] + old_lines[end_ln + 1 :]
+    return "\n".join(new_lines)
+
+
+def get_span(text: str, span: CodeRange):
+    start_ln, end_ln = span.start.line - 1, span.end.line
+    old_lines = text.split("\n")
+    new_lines = old_lines[start_ln : end_ln + 1]
+    new_lines[0] = new_lines[0][span.start.column :]
+    new_lines[-1] = new_lines[-1][: span.end.column]
     return "\n".join(new_lines)
 
 
