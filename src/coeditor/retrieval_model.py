@@ -389,8 +389,11 @@ class RetrievalEditorModel(T5PreTrainedModel):
         def marginalize_preds(
             preds: Sequence[Modified[str]],
             out_tks: Sequence[TokenSeq],
+            weights: Sequence[float],
             scores: Sequence[float],
         ) -> list[PredictedChange]:
+            """For sampling techniques, all sample should have equal weights 1/N. For
+            search-based techniques, the `weights` should equal to the solutions' probabilities."""
             assert preds
             groups = groupby(
                 range(len(preds)),
@@ -400,19 +403,25 @@ class RetrievalEditorModel(T5PreTrainedModel):
             for group in groups:
                 # within each group, sort by score
                 group.sort(key=lambda i: scores[i], reverse=True)
-            groups.sort(key=lambda g: (len(g), scores[g[0]]), reverse=True)
-            n = len(preds)
+            groups.sort(
+                key=lambda g: (sum(weights[i] for i in g), scores[g[0]]), reverse=True
+            )
             return [
-                PredictedChange(preds[g[0]], out_tks[g[0]], len(g) / n) for g in groups
+                PredictedChange(
+                    preds[g[0]],
+                    out_tks[g[0]],
+                    sum(weights[i] for i in g),
+                )
+                for g in groups
             ]
 
-        use_marginalization = dec_args.marginalize_samples > 1
-        if use_marginalization:
+        use_sampling = dec_args.marginalize_samples > 1
+        if use_sampling:
             assert_eq(dec_args.do_sample, True)
             assert_eq(dec_args.num_beams, 1)
             N = dec_args.marginalize_samples
         else:
-            N = n_solutions
+            N = dec_args.num_beams or 1
         gen_args = dec_args.to_model_args()
         input_ids = batch["input_ids"]
         if not isinstance(input_ids, torch.LongTensor):
@@ -435,10 +444,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
         assert isinstance(out_tks, list)
         logging.debug("Max out length:", max(len(x) for x in out_tks))
         assert_eq(len(out_tks), len(requests) * N)
-        if N > 1:
-            requests = join_list([[r] * N for r in requests])
+        requests = join_list([[r] * N for r in requests])
         if (pred_scores := gen_out.get("sequences_scores", None)) is None:
             pred_scores = [0.0] * len(out_tks)
+        if use_sampling:
+            pred_weights = [1.0 / N] * len(out_tks)
+        else:
+            pred_weights = [math.exp(x) for x in pred_scores]
         with timed("assemble changes"):
             pred_changes = list[Modified[str]]()
             for req, out in zip(requests, out_tks):
@@ -450,15 +462,12 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
         solutions = list[list[PredictedChange]]()
         for i in range(0, len(pred_changes), N):
-            if use_marginalization:
-                sols = marginalize_preds(pred_changes[i : i + N], out_tks, pred_scores)
-            else:
-                sols = [
-                    PredictedChange(
-                        pred_changes[j], out_tks[j], math.exp(pred_scores[j])
-                    )
-                    for j in range(i, i + N)
-                ]
+            sols = marginalize_preds(
+                pred_changes[i : i + N],
+                out_tks[i : i + N],
+                pred_weights[i : i + N],
+                pred_scores[i : i + N],
+            )
             solutions.append(sols[:n_solutions])
         return solutions
 

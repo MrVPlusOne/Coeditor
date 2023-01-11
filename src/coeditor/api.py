@@ -207,7 +207,7 @@ class ServiceResponse:
         print(f"Edit range: {self.edit_start} - {self.edit_end}", file=file)
         for i, s in enumerate(self.suggestions):
             print(
-                f"\t--------------- Suggestion {i} (score: {s.score:.2f}) ---------------",
+                f"\t--------------- Suggestion {i} (score: {s.score:.3g}) ---------------",
                 file=file,
             )
             print(textwrap.indent(s.change_preview, "\t"), file=file)
@@ -340,6 +340,7 @@ class EditPredictionService:
         #     print(show_change(pred_change))
 
         best_output = predictions[0].out_tks
+        best_score = predictions[0].score
 
         if log_file is not None:
             with log_file.open("w") as f:
@@ -349,6 +350,7 @@ class EditPredictionService:
                 print(f"{respect_lines = }", file=f)
                 print(f"{len(input_tks) = }", file=f)
                 print(f"{len(references) = }", file=f)
+                print(f"Solution score: {best_score:.3g}", file=f)
                 pred = RetrievalModelPrediction(
                     input_ids=input_tks,
                     output_ids=best_output,
@@ -482,7 +484,11 @@ class EditPredictionService:
             )
             new_out_tks = TokenSeq()
             for k, seg in output_ids_as_seqs(out_tks).items():
-                line = line_map[extra_id_to_number(k) + lines_no_comment]
+                rel_line = extra_id_to_number(k) + lines_no_comment
+                if rel_line not in line_map:
+                    logging.warning(f"predicted relative line {rel_line} is out of range.")
+                    continue
+                line = line_map[rel_line]
                 k1 = get_extra_id(line - lines_with_comment)
                 new_out_tks.append(k1)
                 new_out_tks.extend(seg)
