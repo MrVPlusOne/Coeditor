@@ -75,6 +75,9 @@ class ChangeDetectionConfig:
     def get_prev_content(self, project: Path, path_s: str):
         return file_content_from_commit(project, self.prev_commit, path_s)
 
+    def get_prev_stamp(self, project_root: Path):
+        return run_command(["git", "log", "-1", "--format=%ci"], cwd=project_root)
+
     def get_pedit(
         self,
         project_root: Path,
@@ -96,10 +99,6 @@ class ChangeDetectionConfig:
             src_map[mname] = path
             return mname
 
-        # get the previous commit timestamp
-        commit_stamp = run_command(
-            ["git", "log", "-1", "--format=%ci"], cwd=project_root
-        )
         assert (
             self.prev_commit == "HEAD"
         ), "Currently only prev_commit=HEAD is supported."
@@ -137,6 +136,7 @@ class ChangeDetectionConfig:
         if target_mname not in prev_module2file:
             prev_module2file[target_mname] = target_file.as_posix()
 
+        commit_stamp = self.get_prev_stamp(project_root)
         prev_modules = dict[ModuleName, PythonModule]()
         for mname, file_prev in prev_module2file.items():
             prev_modules[mname] = prev_cache.cached(
@@ -443,7 +443,7 @@ class EditPredictionService:
         path_s = file.relative_to(self.project).as_posix()
         prev_mod = self.prev_parse_cache.cached(
             path_s,
-            self.config.prev_commit,
+            self.config.get_prev_stamp(self.project),
             lambda: PythonModule.from_cst(
                 cst.parse_module(
                     file_content_from_commit(
