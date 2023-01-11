@@ -62,6 +62,7 @@ Del_id = get_tk_id(Del)
 Newline_id = get_tk_id("\n")
 BOS_id = get_tk_id("<s>")
 EOS_id = get_tk_id("</s>")
+PAD_id = get_tk_id("<pad>")
 
 N_Extra_Ids = 100
 

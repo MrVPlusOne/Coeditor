@@ -44,6 +44,7 @@ from coeditor.encoding import (
     Del_id,
     EOS_id,
     Newline_id,
+    PAD_id,
     change_to_tokens,
     decode_tokens,
     encode_basic,
@@ -73,8 +74,11 @@ from transformers.trainer import EvalLoopOutput
 from datasets.arrow_dataset import Dataset
 from torch.utils.checkpoint import checkpoint
 
-PAD_id = 0
 CheckNaN: bool = False
+
+
+def remove_pad_ids(ids: TokenSeq) -> TokenSeq:
+    return [tk for tk in ids if tk != PAD_id and tk >= 0]
 
 
 def check_nan(name: str, x: Tensor, inputs: dict):
@@ -332,9 +336,6 @@ class RetrievalEditorModel(T5PreTrainedModel):
         batch_args: "BatchArgs",
         dec_args: DecodingArgs,
     ):
-        def remove_pad_ids(ids: TokenSeq) -> TokenSeq:
-            return [tk for tk in ids if tk != PAD_id and tk >= 0]
-
         if batch_args.shuffle_extra_ids:
             warnings.warn(
                 "Shuffling extra ids during eval can lead to incorrect results."
@@ -356,13 +357,12 @@ class RetrievalEditorModel(T5PreTrainedModel):
             input_ids = batch["input_ids"].tolist()
             labels = batch["labels"].tolist()
             query_ref_list = batch["query_ref_list"]
-            output_ids = [remove_pad_ids(out_tk) for out_tk in out_tks]
             for i in range(len(input_ids)):
                 all_refs = batch["references"]
                 references = [all_refs[j] for j in query_ref_list[i]]
                 e = RetrievalModelPrediction(
-                    input_ids=input_ids[i],
-                    output_ids=output_ids[i],
+                    input_ids=remove_pad_ids(input_ids[i]),
+                    output_ids=remove_pad_ids(out_tks[i]),
                     labels=labels[i],
                     references=references,
                 )
@@ -441,6 +441,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         out_tks = gen_out["sequences"]
         if isinstance(out_tks, torch.Tensor):
             out_tks = out_tks.tolist()
+        out_tks = [remove_pad_ids(x) for x in out_tks]
         assert isinstance(out_tks, list)
         logging.debug("Max out length:", max(len(x) for x in out_tks))
         assert_eq(len(out_tks), len(requests) * N)
