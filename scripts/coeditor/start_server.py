@@ -10,10 +10,8 @@ from coeditor.api import (
 from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
 
 
-def start_server(device, port: int = 5042):
-    model_path = (
-        get_model_dir(False) / "coeditor-large-bi-request-stub-v4/checkpoint-107850"
-    )
+def start_server(device, port: int = 5042, print_stats: bool = True):
+    model_path = get_model_dir(True) / "coeditor-large-bi-request-stub-v4"
     model = RetrievalEditorModel.load(model_path)
     model.attention_mode = AttentionMode.bidirectional
     model.to(device)
@@ -48,6 +46,9 @@ def start_server(device, port: int = 5042):
             path = target_dir / path
         try:
             response = service.suggest_edit(path, line)
+            if print_stats:
+                print("Runtime stats:")
+                display(service.tlogger.as_dataframe())
             return Success(response.to_json())
         except Exception as e:
             print(e)

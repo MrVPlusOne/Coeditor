@@ -79,12 +79,12 @@ def train_model(
     if not eval_only:
         with timed_action("Warm-up Training"):
             warmup_bargs = copy.deepcopy(batch_args)
-            warmup_bargs.max_total_ref_tks //= 3
-            warmup_bargs.min_queires *= 3
+            warmup_bargs.max_total_ref_tks //= 4
+            warmup_bargs.min_queires *= 4
             warmup_bargs.max_queries *= 2
 
             warmup_targs = copy.deepcopy(train_args)
-            warmup_targs.learning_rate *= 3
+            warmup_targs.learning_rate *= 4
             warmup_targs.max_train_epochs = 1
             model.train_on_data(
                 model_name,

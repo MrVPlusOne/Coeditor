@@ -452,6 +452,7 @@ def compute_loss_metrics(
     bsize = logits.size(0)
     label_tks = (labels != -100).sum().item()
     return {
+        "loss": WeightedSum(loss / label_tks, 1),
         "loss_per_tk": WeightedSum(loss, label_tks),
         "loss_per_ex": WeightedSum(loss, bsize),
         "prob_per_ex": WeightedSum(ex_prob, bsize),
