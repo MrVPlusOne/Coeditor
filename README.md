@@ -11,6 +11,8 @@ pipenv sync
 
 To add new dependences into the virtual environment, you can manually install them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). Note that pipenv records pacakage requirements in the `Pipfile` and also manages additional environment variables in the `.env` file.
 
+We also provide a generated Python `requirements.txt` file in case you cannot use `pipenv` for some reasone.
+
 ## Running Trained Model
 #### Downloading the pre-trained model
 
