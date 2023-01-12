@@ -20,7 +20,6 @@ from .utils import *
 
 from io import StringIO
 from IPython.display import HTML
-from ipywidgets.embed import embed_minimal_html
 
 
 def display_persist(widget) -> None:
@@ -29,6 +28,8 @@ def display_persist(widget) -> None:
     it in the notebook. This helps keeping the content accessable after the
     kernel is restarted.
     """
+    from ipywidgets.embed import embed_minimal_html
+
     if isinstance(widget, widgets.Widget):
         try:
             page = StringIO()
@@ -394,6 +395,31 @@ def visualize_conf_matrix(results: dict[str, DatasetPredResult], top_k: int = 15
         tabs.append(out)
 
     return visualize_sequence_tabs(tabs, titles=list(results.keys()))
+
+
+def confusion_matrix_top_k(y_preds, y_true, k):
+    from sklearn.metrics import confusion_matrix
+
+    labels_counts = Counter(y_true).most_common(k)
+    labels = [l[0] for l in labels_counts]
+    counts = [l[1] for l in labels_counts]
+    cm = confusion_matrix(y_true, y_preds, labels=labels, normalize=None)
+    cm = cm / np.array([counts]).T
+    return {"labels": labels, "matrix": cm}
+
+
+def display_conf_matrix(conf_matrix: dict):
+    from sklearn.metrics import ConfusionMatrixDisplay
+    import matplotlib.pyplot as plt
+
+    cm = conf_matrix["matrix"]
+    labels = conf_matrix["labels"]
+    n_labels = len(labels)
+    fig, ax = plt.subplots(figsize=(n_labels, n_labels))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    disp.plot(cmap="Reds", values_format=".2f", ax=ax, colorbar=False)
+    plt.title("Normalized confusion matrix")
+    plt.show()
 
 
 def code_inline_type_masks(code: str, preds: list, label_color: Optional[str] = None):

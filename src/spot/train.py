@@ -96,9 +96,9 @@ def train_spot_model(
     use_early_stop=False,
     use_small_model=False,
 ) -> ModelWrapper:
-    import pytorch_lightning as pl
-    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-    from pytorch_lightning.loggers import WandbLogger
+    import pytorch_lightning as pl  # type: ignore
+    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint # type: ignore
+    from pytorch_lightning.loggers import WandbLogger # type: ignore
 
     class TrainModelWrapper(pl.LightningModule):
         "A pytorch lightening module that handles training and evaluation of the SPOT model."
