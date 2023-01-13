@@ -86,8 +86,11 @@ def extra_id_to_number(tk: int) -> int:
     return _max_extra_id - tk
 
 
-def decode_tokens(tokens: TokenSeq) -> str:
-    return _Tokenizer.decode(tokens, add_special_tokens=False)
+def decode_tokens(tokens: TokenSeq, prettify: bool = False) -> str:
+    text = _Tokenizer.decode(tokens, add_special_tokens=False)
+    if prettify:
+        text = text.replace("<extra_id_", "<mask_")
+    return text
 
 
 def encode_basic(text: str, add_special_tokens=False) -> TokenSeq:

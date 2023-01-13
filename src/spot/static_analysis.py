@@ -212,6 +212,10 @@ class PythonFunction:
         # both tests and fixtures can use other fixtures
         return self.is_test_func or self.is_fixture
 
+    def remove_comments(self) -> Self:
+        new_tree = remove_comments(self.tree)
+        return PythonFunction(self.name, self.path, self.parent_class, new_tree)
+
 
 @dataclass
 class PythonVariable:
@@ -264,6 +268,18 @@ class PythonVariable:
                 yield a.value
             elif isinstance(a, cst.Assign) and a.value:
                 yield a.value
+
+    def remove_comments(self) -> Self:
+        new_assignments = [remove_comments(a) for a in self.assignments]
+        new_wrapped_assignments = [remove_comments(a) for a in self.wrapped_assignments]
+        return PythonVariable(
+            self.name,
+            self.path,
+            self.parent_class,
+            self.tree,
+            new_assignments,
+            new_wrapped_assignments,
+        )
 
 
 PythonElem = PythonFunction | PythonVariable
