@@ -1,6 +1,5 @@
 # End-user API as an editing suggestion tool.
 
-import copy
 import io
 import logging
 import sys
@@ -16,11 +15,8 @@ from coeditor.encoders import (
 from coeditor.encoding import (
     Add_id,
     Del_id,
-    Newline_id,
     change_to_tokens,
-    decode_tokens,
     extra_id_to_number,
-    extract_edit_change,
     get_extra_id,
     inline_output_tokens,
     is_extra_id,
@@ -35,11 +31,8 @@ from coeditor.history import (
     default_show_diff,
     file_content_from_commit,
     get_change_path,
-    get_commit_history,
-    parse_cst_module,
-    show_change,
 )
-from coeditor.model import CoeditorModel, DecodingArgs
+from coeditor.model import DecodingArgs
 from coeditor.retrieval_model import (
     BatchArgs,
     RetrievalDecodingResult,
@@ -56,11 +49,12 @@ from spot.static_analysis import (
     PythonModule,
     PythonProject,
     remove_comments,
-    show_element,
 )
 from spot.utils import add_line_numbers
 
 import textwrap
+
+DropComment = bool
 
 
 @dataclass
@@ -69,21 +63,23 @@ class ChangeDetectionConfig:
     ignore_dirs: Collection[str] = field(
         default_factory=lambda: PythonProject.DefaultIgnoreDirs
     )
-    prev_commit: str = "HEAD"
-    drop_comments: bool = True
+    drop_comments: DropComment = True
 
-    def get_prev_content(self, project: Path, path_s: str):
-        return file_content_from_commit(project, self.prev_commit, path_s)
+    def get_index_content(self, project: Path, path_s: str):
+        return file_content_from_commit(project, "", path_s)
 
-    def get_prev_stamp(self, project_root: Path):
-        return run_command(["git", "log", "-1", "--format=%ci"], cwd=project_root)
+    def get_index_stamp(self, project_root: Path, path_s: str):
+        out = run_command(["git", "ls-files", "-s", path_s], cwd=project_root)
+        hash = out.split(" ")[1]
+        assert_eq(len(hash), 40)
+        return hash
 
     def get_pedit(
         self,
         project_root: Path,
         target_file: Path,
-        prev_cache: TimedCache[ModuleName, PythonModule, str],
-        now_cache: TimedCache,
+        prev_cache: TimedCache[tuple[ModuleName, DropComment], PythonModule, str],
+        now_cache: TimedCache[tuple[ModuleName, DropComment], PythonModule, float],
     ) -> ProjectEdit:
         def is_src(path_s: str) -> bool:
             path = Path(path_s)
@@ -99,10 +95,6 @@ class ChangeDetectionConfig:
             src_map[mname] = path
             return mname
 
-        assert (
-            self.prev_commit == "HEAD"
-        ), "Currently only prev_commit=HEAD is supported."
-
         changed_files = run_command(
             ["git", "status", "--porcelain"], cwd=project_root
         ).splitlines()
@@ -111,39 +103,43 @@ class ChangeDetectionConfig:
         current_module2file = dict[ModuleName, str | None]()
 
         for line in changed_files:
-            segs = line.strip().split(" ")
-            match segs:
-                case ["D", path] if is_src(path):
-                    epath = get_module_path(path)
-                    prev_module2file[epath] = path
-                    current_module2file[epath] = None
-                case [("M" | "A" | "??") as tag, path] if is_src(path):
+            if not line:
+                continue
+            if line[2] == " ":
+                tag = line[:2]
+                path = line[3:]
+                if not is_src(path):
+                    continue
+                if tag.endswith("M") or tag.endswith("A") or tag == "??":
                     if tag == "??" and not self.untracked_as_additions:
                         continue
                     epath = get_module_path(path)
-                    if tag == "M":
+                    if tag.endswith("M"):
                         prev_module2file[epath] = path
                     current_module2file[epath] = path
-                case [tag, path1, path2] if (
-                    tag.startswith("R") and is_src(path1) and is_src(path2)
-                ):
-                    current_module2file[get_module_path(path2)] = path2
-                    current_module2file[get_module_path(path1)] = None
-                    prev_module2file[get_module_path(path1)] = path1
+            else:
+                tag, path1, path2 = line.split(" ")
+                assert tag.startswith("R")
+                if not is_src(path1) or not is_src(path2):
+                    continue
+                current_module2file[get_module_path(path2)] = path2
+                current_module2file[get_module_path(path1)] = None
+                prev_module2file[get_module_path(path1)] = path1
+
         if target_file.is_absolute():
             target_file = target_file.relative_to(project_root)
         target_mname = get_module_path(target_file.as_posix())
         if target_mname not in prev_module2file:
             prev_module2file[target_mname] = target_file.as_posix()
 
-        commit_stamp = self.get_prev_stamp(project_root)
         prev_modules = dict[ModuleName, PythonModule]()
         for mname, file_prev in prev_module2file.items():
+            stamp = self.get_index_stamp(project_root, file_prev)
             prev_modules[mname] = prev_cache.cached(
-                mname,
-                commit_stamp,
+                (mname, self.drop_comments),
+                stamp,
                 lambda: PythonModule.from_cst(
-                    cst.parse_module(self.get_prev_content(project_root, file_prev)),
+                    cst.parse_module(self.get_index_content(project_root, file_prev)),
                     mname,
                     self.drop_comments,
                 ),
@@ -154,10 +150,10 @@ class ChangeDetectionConfig:
             if file_now is None:
                 continue
             path_now = project_root / file_now
-            mtime = str(os.stat(path_now).st_mtime)
+            mtime = os.stat(path_now).st_mtime
             (project_root / path_now).read_text()
             now_modules[mname] = now_cache.cached(
-                mname,
+                (mname, self.drop_comments),
                 mtime,
                 lambda: PythonModule.from_cst(
                     cst.parse_module(path_now.read_text()), mname, self.drop_comments
@@ -245,10 +241,14 @@ class EditPredictionService:
         self.show_max_solutions = 3
         self.preview_ctx_lines = 3
 
-        self.prev_cache = TimedCache[ModuleName, PythonModule, str]()
-        self.now_cache = TimedCache[ModuleName, PythonModule, float]()
-        self.parse_cache = TimedCache[ModuleName, PythonModule, float]()
-        self.prev_parse_cache = TimedCache[ModuleName, PythonModule, str]()
+        # caches file contents from the index using its sha1 hash
+        self.prev_cache = TimedCache[
+            tuple[ModuleName, DropComment], PythonModule, str
+        ]()
+        # caches file contents from the working tree using its mtime
+        self.now_cache = TimedCache[
+            tuple[ModuleName, DropComment], PythonModule, float
+        ]()
         self.stub_cache = TimedCache[ModuleName, list[TokenSeq], int]()
         self.tlogger = model.tlogger
 
@@ -269,8 +269,8 @@ class EditPredictionService:
             mname = PythonProject.rel_path_to_module_name(file.relative_to(project))
             stamp = os.stat(file).st_mtime
             now_code = file.read_text()
-            now_mod = self.parse_cache.cached(
-                mname,
+            now_mod = self.now_cache.cached(
+                (mname, False),
                 stamp,
                 lambda: PythonModule.from_cst(
                     cst.parse_module(now_code), mname, drop_comments=False
@@ -441,15 +441,11 @@ class EditPredictionService:
     ) -> tuple[Modified[str], str]:
         mname = now_elem.path.module
         path_s = file.relative_to(self.project).as_posix()
-        prev_mod = self.prev_parse_cache.cached(
-            path_s,
-            self.config.get_prev_stamp(self.project),
+        prev_mod = self.prev_cache.cached(
+            (path_s, False),
+            self.config.get_index_stamp(self.project, path_s),
             lambda: PythonModule.from_cst(
-                cst.parse_module(
-                    file_content_from_commit(
-                        self.project, self.config.prev_commit, path_s
-                    )
-                ),
+                cst.parse_module(file_content_from_commit(self.project, "", path_s)),
                 mname,
                 drop_comments=False,
             ),
