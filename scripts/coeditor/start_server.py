@@ -12,7 +12,9 @@ import traceback
 from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
 
 
-def start_server(device, port: int = 5042, print_stats: bool = True):
+def start_server(
+    device, port: int, drop_comments: bool = False, print_stats: bool = True
+):
     model_path = get_model_dir(True) / "coeditor-large-bi-request-stub-v4"
     model = RetrievalEditorModel.load(model_path)
     model.attention_mode = AttentionMode.bidirectional
@@ -38,7 +40,7 @@ def start_server(device, port: int = 5042, print_stats: bool = True):
                 # dec_args=DecodingArgs(
                 #     do_sample=True, top_p=0.95, marginalize_samples=20
                 # ),
-                # config=ChangeDetectionConfig(drop_comments=False),
+                config=ChangeDetectionConfig(drop_comments=drop_comments),
             )
             print(f"Service created for project: {target_dir}")
             services[target_dir] = service
@@ -60,9 +62,9 @@ def start_server(device, port: int = 5042, print_stats: bool = True):
             traceback.print_exception(e)
             return Error(code=1, message=repr(e))
 
-    print(f"Starting suggestion server at localhost:{port}")
+    print(f"Starting suggestion server ({drop_comments=}) at localhost:{port}")
     serve("localhost", port)
 
 
 if __name__ == "__main__":
-    start_server("cuda:2")
+    start_server("cuda", port=5042, drop_comments=True)
