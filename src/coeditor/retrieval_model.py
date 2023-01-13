@@ -599,7 +599,10 @@ class RetrievalEditorModel(T5PreTrainedModel):
             if encoder_outputs is None:
                 assert input_ids is not None
                 encoder = self.get_encoder()
-                encoder_outputs = encoder.forward(input_ids, references, query_ref_list)
+                with self.tlogger.timed("encoder.forward"):
+                    encoder_outputs = encoder.forward(
+                        input_ids, references, query_ref_list
+                    )
 
             if labels is not None and decoder_input_ids is None:
                 # get decoder inputs from shifting lm labels to the right
@@ -616,26 +619,28 @@ class RetrievalEditorModel(T5PreTrainedModel):
                     }
                     for i in range(last_hidden.size(0))
                 ]
-                dec_hidden_states = batched_map(
-                    last_states,
-                    group_key=decode_group,
-                    f=run_decoder,
-                )
-                decoder_outputs = BaseModelOutputWithPastAndCrossAttentions(
-                    cast(FloatTensor, stack_pad_tensors(dec_hidden_states)[0])
-                )
+                with self.tlogger.timed("decoder.forward"):
+                    dec_hidden_states = batched_map(
+                        last_states,
+                        group_key=decode_group,
+                        f=run_decoder,
+                    )
+                    decoder_outputs = BaseModelOutputWithPastAndCrossAttentions(
+                        cast(FloatTensor, stack_pad_tensors(dec_hidden_states)[0])
+                    )
             else:
                 # use simple batching for decoding
-                decoder_outputs = self.decoder.forward(
-                    input_ids=decoder_input_ids,
-                    inputs_embeds=decoder_inputs_embeds,
-                    attention_mask=decoder_attention_mask,
-                    encoder_hidden_states=encoder_outputs.last_hidden_state,
-                    encoder_attention_mask=encoder_outputs.hidden_state_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    return_dict=True,
-                )
+                with self.tlogger.timed("decoder.forward"):
+                    decoder_outputs = self.decoder.forward(
+                        input_ids=decoder_input_ids,
+                        inputs_embeds=decoder_inputs_embeds,
+                        attention_mask=decoder_attention_mask,
+                        encoder_hidden_states=encoder_outputs.last_hidden_state,
+                        encoder_attention_mask=encoder_outputs.hidden_state_mask,
+                        past_key_values=past_key_values,
+                        use_cache=use_cache,
+                        return_dict=True,
+                    )
 
             assert isinstance(
                 decoder_outputs, BaseModelOutputWithPastAndCrossAttentions
@@ -1702,7 +1707,7 @@ def query_edits_to_batches(
         # sample references for each query
         current_batch = []
         current_cost = 0
-        for edit in edits:
+        for edit in tqdm(edits, desc="edits_to_batches", disable=silent):
             pedit = edit.tk_pedit
             key_stubs = list[TokenSeq]()
             rest_stubs = list[TokenSeq]()
@@ -1799,7 +1804,7 @@ class _BatchSampler:
         return self._len_est
 
     def estimate_n_batches(self) -> int:
-        batches = query_edits_to_batches(self.all_edits, self.batch_args)
+        batches = query_edits_to_batches(self.all_edits, self.batch_args, silent=True)
         return len(batches)
 
     def __iter__(self) -> Iterable[Mapping]:
