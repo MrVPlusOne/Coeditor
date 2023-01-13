@@ -15,11 +15,10 @@ from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
 def start_server(
     device, port: int, drop_comments: bool = False, print_stats: bool = True
 ):
-    model_path = get_model_dir(True) / "coeditor-large-bi-request-stub-v4"
+    model_path = "MrVPlusOne/coeditor-xl-bi-request-stub-v4"
     model = RetrievalEditorModel.load(model_path)
-    model.attention_mode = AttentionMode.bidirectional
     model.to(device)
-    print(f"Model '{model_path.name}' loaded on device:", device)
+    print(f"Model '{model_path}' loaded on device:", device)
     batch_args = BatchArgs.service_default()
     services = dict[Path, EditPredictionService]()
 

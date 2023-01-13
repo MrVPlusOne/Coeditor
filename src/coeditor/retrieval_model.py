@@ -195,8 +195,18 @@ class RetrievalEditorModel(T5PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        self.attention_mode: AttentionMode = AttentionMode.bidirectional
+        amode = getattr(config, "attention_mode", AttentionMode.bidirectional.name)
+        self.attention_mode = AttentionMode[amode]
         self.tlogger = TimeLogger()
+
+    @property
+    def attention_mode(self):
+        return self._attention_mode
+
+    @attention_mode.setter
+    def attention_mode(self, mode: AttentionMode):
+        self._attention_mode = mode
+        self.config.attention_mode = mode.name
 
     def train_on_data(
         self,
@@ -474,22 +484,17 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
     def save(self, save_dir: Path, *args, **kwargs):
         super().save_pretrained(save_dir, *args, **kwargs)
-        extra_args = {
-            "attention_mode": self.attention_mode,
-        }
-        pickle_dump(save_dir / "extra_args.pkl", extra_args)
 
     @staticmethod
-    def load(save_dir: Path) -> "RetrievalEditorModel":
+    def load(save_dir: Path | str) -> "RetrievalEditorModel":
         model = RetrievalEditorModel.from_pretrained(save_dir)
         assert isinstance(model, RetrievalEditorModel)
-        if (save_dir / "extra_args.pkl").exists():
+        # for loading model in legacy format
+        if isinstance(save_dir, Path) and (save_dir / "extra_args.pkl").exists():
             extra_args = pickle_load(save_dir / "extra_args.pkl")
             model.attention_mode = extra_args.get(
                 "attention_mode", AttentionMode.query2ref
             )
-        else:
-            warnings.warn("No extra args found, using default model setting.")
         return model
 
     def encode_token_seqs(
