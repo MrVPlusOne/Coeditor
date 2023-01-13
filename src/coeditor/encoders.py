@@ -538,9 +538,8 @@ def change_tks_to_query_context(change_tks: TokenSeq, respect_lines: int):
             pass
         else:
             result_lines += 1
-        if result_lines == respect_lines:
+        if result_lines <= respect_lines:
             spliter = i + 1
-            break
 
     context = join_list(lines[:spliter], Newline_id)
     query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
