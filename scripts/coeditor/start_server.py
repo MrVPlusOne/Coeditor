@@ -23,7 +23,7 @@ def start_server(
     services = dict[Path, EditPredictionService]()
 
     @method
-    def suggestEdits(project: str, file: str, line: int):
+    def suggestEdits(project: str, file: str, line: int, writeLogs: bool):
         target_dir = Path(project).resolve()
         if (service := services.get(target_dir)) is None:
             service = EditPredictionService(
@@ -51,7 +51,8 @@ def start_server(
         try:
             service.tlogger.clear()
             model.tlogger = service.tlogger
-            response = service.suggest_edit(path, line)
+            log_dir = service.project / ".coeditor_logs" if writeLogs else None
+            response = service.suggest_edit(path, line, log_dir)
             if print_stats:
                 print("Runtime stats:")
                 display(service.tlogger.as_dataframe())

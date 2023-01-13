@@ -256,7 +256,7 @@ class EditPredictionService:
         self,
         file: Path,
         line: int,
-        log_dir: Path | None = Path("coeditor_logs"),
+        log_dir: Path | None = Path(".coeditor_logs"),
     ) -> ServiceResponse:
         """Make the suggestion in-place at the given location."""
         timed = self.tlogger.timed
@@ -345,6 +345,7 @@ class EditPredictionService:
             input_tks = batch["input_ids"][0]
             references = batch["references"]
             output_truth = batch["labels"][0]
+            print(f"Writing logs to: {log_dir}")
             for i, pred in enumerate(predictions):
                 with (log_dir / f"solution-{i}.txt").open("w") as f:
                     pred_tks = pred.out_tks
@@ -353,6 +354,7 @@ class EditPredictionService:
                     print(f"{len(input_tks) = }", file=f)
                     print(f"{len(references) = }", file=f)
                     print(f"Solution score: {score:.3g}", file=f)
+                    print(f"Marginalized samples:", pred.n_samples, file=f)
                     pred = RetrievalModelPrediction(
                         input_ids=input_tks,
                         output_ids=pred_tks,
@@ -389,7 +391,7 @@ class EditPredictionService:
             return (x.line, x.column)
 
         return ServiceResponse(
-            target_file=file.relative_to(project).as_posix(),
+            target_file=file.as_posix(),
             edit_start=(now_span.start.line, 0),
             edit_end=as_tuple(now_span.end),
             old_code=old_elem_code,

@@ -94,6 +94,7 @@ class PredictedChange(NamedTuple):
     change: Modified[str]
     out_tks: TokenSeq
     score: float
+    n_samples: int
 
 
 class RetrievalModelPrediction(ModelPrediction):
@@ -421,6 +422,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
                     preds[g[0]],
                     out_tks[g[0]],
                     sum(weights[i] for i in g),
+                    len(g)
                 )
                 for g in groups
             ]

@@ -8,6 +8,7 @@ caches
 lightning_logs/
 output/
 coeditor_logs/
+*.coeditor_logs
 
 build/
 __pycache__
