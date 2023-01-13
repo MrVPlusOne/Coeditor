@@ -1,11 +1,13 @@
 from coeditor.common import *
 from coeditor.retrieval_model import RetrievalEditorModel, AttentionMode
 from coeditor.api import (
+    ChangeDetectionConfig,
     EditPredictionService,
     QueryRefEditEncoder,
     BatchArgs,
     DecodingArgs,
 )
+import traceback
 
 from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
 
@@ -36,6 +38,7 @@ def start_server(device, port: int = 5042, print_stats: bool = True):
                 # dec_args=DecodingArgs(
                 #     do_sample=True, top_p=0.95, marginalize_samples=20
                 # ),
+                # config=ChangeDetectionConfig(drop_comments=False),
             )
             print(f"Service created for project: {target_dir}")
             services[target_dir] = service
@@ -45,14 +48,17 @@ def start_server(device, port: int = 5042, print_stats: bool = True):
         if not Path.is_absolute(path):
             path = target_dir / path
         try:
+            service.tlogger.clear()
+            model.tlogger = service.tlogger
             response = service.suggest_edit(path, line)
             if print_stats:
                 print("Runtime stats:")
                 display(service.tlogger.as_dataframe())
             return Success(response.to_json())
         except Exception as e:
-            print(e)
-            return Error(code=1, message=str(e))
+            print("Failed with exception:")
+            traceback.print_exception(e)
+            return Error(code=1, message=repr(e))
 
     print(f"Starting suggestion server at localhost:{port}")
     serve("localhost", port)
