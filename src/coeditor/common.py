@@ -256,7 +256,9 @@ class WeightedSum(Generic[V, W]):
 CountedSum = WeightedSum[int, int]
 
 
-def normalize_code_by_ast(code: str, sort_keyargs: bool = True) -> str:
+def normalize_code_by_ast(
+    code: str, sort_keyargs: bool = True, remove_doc_string: bool = True
+) -> str:
     """Normalize the code by parsing and unparsing it using the AST module.
     If parsing fails, return the original code."""
 
@@ -266,8 +268,24 @@ def normalize_code_by_ast(code: str, sort_keyargs: bool = True) -> str:
                 node.keywords.sort(key=lambda x: x.arg or "None")
             return node
 
+    class DocStringremover(ast.NodeTransformer):
+        def visit_FunctionDef(self, node: ast.FunctionDef):
+            match node.body:
+                case [ast.Expr(value=ast.Constant(value=str())), *body]:
+                    node.body = body
+            return node
+
+        def visit_ClassDef(self, node: ast.ClassDef):
+            node = cast(ast.ClassDef, self.generic_visit(node))
+            match node.body:
+                case [ast.Expr(value=ast.Constant(value=str())), *body]:
+                    node.body = body
+            return node
+
     try:
         tree = ast.parse(dedent(code))
+        if remove_doc_string:
+            tree = DocStringremover().visit(tree)
         if sort_keyargs:
             tree = KeyargSorter().visit(tree)
         return ast.unparse(tree)
