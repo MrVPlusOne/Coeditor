@@ -494,7 +494,7 @@ class PythonModule:
 
     @staticmethod
     def from_cst(module: cst.Module, name: str, drop_comments: bool) -> "PythonModule":
-        wrapper = MetadataWrapper(module)
+        wrapper = MetadataWrapper(module, unsafe_skip_copy=True)
         src_map = dict(wrapper.resolve(PositionProvider))
         module = wrapper.module
         removed_comments = []
