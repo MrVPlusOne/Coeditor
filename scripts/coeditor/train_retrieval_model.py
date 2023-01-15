@@ -22,6 +22,7 @@ def train_model(
     dataset_name="medium",
     model_variant="-sig-analysis-post_usees",
     encoder: QueryRefEditEncoder = QueryRefEditEncoder(),
+    drop_comments: bool = True,
     batch_args=BatchArgs.train_default(),
     test_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
@@ -39,7 +40,9 @@ def train_model(
     if not eval_only:
         check_save_dir(model_name)
 
-    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=recreate_data)
+    datasets = make_or_load_datasets(
+        dataset_name, encoder, drop_comments=drop_comments, recreate_data=recreate_data
+    )
 
     config_dict = {
         k: get_modified_args(v)
@@ -85,9 +88,11 @@ def train_model(
             warmup_targs = copy.deepcopy(train_args)
             warmup_targs.learning_rate *= 4
             warmup_targs.max_train_epochs = 1
+            all_edits = datasets["train"].all_edits()
+            warmup_edits = random_subset(all_edits, len(all_edits) // 4)
             model.train_on_data(
                 model_name,
-                datasets["train"],
+                TokenizedEditDataset.from_edits(warmup_edits),
                 datasets["valid"],
                 warmup_targs,
                 batch_args=warmup_bargs,
@@ -109,7 +114,7 @@ def train_model(
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
 
-    max_saved_samples = 200
+    max_saved_samples = 300
 
     with timed_action("Accuracy Evaluation"):
         dec_result = model.predict_on_data(datasets["test"], test_batch_args, dec_args)
@@ -131,7 +136,8 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="xl",
-            model_variant="-bi-request-stub-v4",
+            model_variant="-bi-request-stub-comments-v4",
+            drop_comments=False,
             train_args=TrainingArgs(
                 max_train_epochs=1,
                 quicktest=False,

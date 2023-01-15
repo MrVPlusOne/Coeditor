@@ -38,6 +38,7 @@ def train_model(
     encoder: EditEncoder = AnalysisBasedEditEncoder(
         extra_ctx_names=("usees", "post-usees")
     ),
+    drop_comments: bool = True,
     data_args=DataTransformArgs(shuffle_extra_ids=True),
     max_batch_tokens: int = 4100,
     recreate_data: bool = False,
@@ -66,6 +67,7 @@ def train_model(
     datasets = make_or_load_datasets(
         dataset_name,
         encoder,
+        drop_comments=drop_comments,
         recreate_data=recreate_data,
     )
 

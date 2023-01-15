@@ -11,17 +11,26 @@ from spot.utils import pretty_print_dict
 def make_or_load_datasets(
     dataset_name: str,
     encoder: EditEncoder[TEdit],
+    drop_comments: bool,
     recreate_data: bool = False,
 ) -> dict[str, TokenizedEditDataset[TEdit]]:
-    save_dir = get_dataset_dir(dataset_name) / (repr_modified_args(encoder))
+    config_str = repr_modified_args(encoder)
+    if not drop_comments:
+        config_str += "+comments"
+    save_dir = get_dataset_dir(dataset_name) / config_str
 
     if recreate_data or not save_dir.exists():
         if dataset_name == "SPOT":
-            datasets = {"test": dataset_from_projects([proj_root()], encoder, [False])}
+            datasets = {
+                "test": dataset_from_projects(
+                    [proj_root()], encoder, [False], drop_comments=drop_comments
+                )
+            }
         else:
             datasets = datasets_from_repos(
                 get_dataset_dir(dataset_name) / "repos",
                 encoder,
+                drop_comments=drop_comments,
             )
         with timed_action("Saving datasets to disk"):
             save_datasets(datasets, save_dir)

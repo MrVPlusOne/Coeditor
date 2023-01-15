@@ -88,11 +88,14 @@ class TokenizedEditDataset(Generic[TEdit]):
 def _process_commits(
     root: Path,
     commits: Sequence[CommitInfo],
-    encoder: EditEncoder[T1],
     training: bool,
+    encoder: EditEncoder[T1],
+    drop_comments: bool,
 ) -> list[T1]:
     try:
-        edits = list(edits_from_commit_history(root, commits))
+        edits = list(
+            edits_from_commit_history(root, commits, drop_comments=drop_comments)
+        )
     except UnicodeDecodeError as e:
         # this might happen in rare cases
         warnings.warn(f"Unable to process project: {root}\nError: {e}")
@@ -112,6 +115,7 @@ def dataset_from_projects(
     project_roots: Sequence[Path],
     encoder: EditEncoder[TEdit],
     repo_training: Sequence[bool],
+    drop_comments: bool,
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
 ) -> "TokenizedEditDataset[TEdit]":
@@ -145,8 +149,8 @@ def dataset_from_projects(
         _process_commits,
         roots,
         chunked_histories,
-        [encoder] * len(roots),
         chunk_training,
+        key_args={"encoder": encoder, "drop_comments": drop_comments},
         desc="Create tokenized edits",
         max_workers=workers,
         tqdm_args={"unit": "chunk"},
@@ -165,6 +169,7 @@ def dataset_from_projects(
 def datasets_from_repos(
     repos_root: Path,
     encoder: EditEncoder[TEdit],
+    drop_comments: bool,
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
 ) -> dict[str, TokenizedEditDataset[TEdit]]:
@@ -185,6 +190,7 @@ def datasets_from_repos(
     dataset = dataset_from_projects(
         join_list(projects.values()),
         encoder=encoder,
+        drop_comments=drop_comments,
         repo_training=join_list(split_is_training.values()),
         max_history_per_repo=max_history_per_repo,
         workers=workers,
