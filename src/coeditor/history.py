@@ -26,12 +26,24 @@ from multiprocessing import current_process
 E1 = TypeVar("E1", covariant=True)
 
 
+class _ChangeBase:
+    def show(self, name: str = "") -> str:
+        return show_change(cast("Change", self), name=name)
+
+
 @dataclass
-class Added(Generic[E1]):
+class Added(Generic[E1], _ChangeBase):
     after: E1
 
     def map(self, f: Callable[[E1], T2]) -> "Added[T2]":
         return Added(f(self.after))
+
+    def get_any(self) -> E1:
+        return self.after
+
+    @staticmethod
+    def new_value(v: T1) -> "Added[T1]":
+        return Added(v)
 
     @staticmethod
     def as_char():
@@ -39,11 +51,18 @@ class Added(Generic[E1]):
 
 
 @dataclass
-class Deleted(Generic[E1]):
+class Deleted(Generic[E1], _ChangeBase):
     before: E1
 
     def map(self, f: Callable[[E1], T2]) -> "Deleted[T2]":
         return Deleted(f(self.before))
+
+    def get_any(self) -> E1:
+        return self.before
+
+    @staticmethod
+    def new_value(v: T1) -> "Deleted[T1]":
+        return Deleted(v)
 
     @staticmethod
     def as_char():
@@ -51,12 +70,15 @@ class Deleted(Generic[E1]):
 
 
 @dataclass
-class Modified(Generic[E1]):
+class Modified(Generic[E1], _ChangeBase):
     before: E1
     after: E1
 
     def map(self, f: Callable[[E1], T2]) -> "Modified[T2]":
         return Modified(f(self.before), f(self.after))
+
+    def get_any(self) -> E1:
+        return self.before
 
     @staticmethod
     def as_char():
@@ -114,16 +136,37 @@ def show_change(
     name: str = "",
     show_diff: Callable[[T1 | None, T1 | None], str] = default_show_diff,
 ) -> str:
-    tab = "    "
+    tab = "  "
     if isinstance(change, Added):
-        return f"* Added: {name}\n{indent(show_diff(None, change.after), tab)}"
+        return f"Added: {name}\n{indent(show_diff(None, change.after), tab)}"
     elif isinstance(change, Deleted):
-        return f"* Deleted: {name}\n{indent(show_diff(change.before, None), tab)}"
+        return f"Deleted: {name}\n{indent(show_diff(change.before, None), tab)}"
     elif isinstance(change, Modified):
         if change.before == change.after:
-            return f"* Unchanged: {name}"
+            return f"Unchanged: {name}"
         diff = show_diff(change.before, change.after)
-        return f"* Modified: {name}\n{indent(diff, tab)}"
+        return f"Modified: {name}\n{indent(diff, tab)}"
+    else:
+        raise TypeError(f"Not a change type: {type(change)}")
+
+
+def get_named_changes(
+    old_map: Mapping[T1, T2], new_map: Mapping[T1, T2]
+) -> Mapping[T1, Change[T2]]:
+    "Compute the changes between two maps of named elements."
+    old_names = set(old_map)
+    new_names = set(new_map)
+    deleted_names = old_names - new_names
+    added_names = new_names - old_names
+    modified_names = old_names & new_names
+    changes = {}
+    for name in deleted_names:
+        changes[name] = Deleted(old_map[name])
+    for name in added_names:
+        changes[name] = Added(new_map[name])
+    for name in modified_names:
+        changes[name] = Modified(old_map[name], new_map[name])
+    return changes
 
 
 def empty_module(mname: ModuleName) -> PythonModule:
