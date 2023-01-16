@@ -1,5 +1,6 @@
 # utils for computing editing history from git commits
 
+from abc import abstractmethod
 from spot.static_analysis import (
     ElemPath,
     ModuleAnalysis,
@@ -26,19 +27,30 @@ from multiprocessing import current_process
 E1 = TypeVar("E1", covariant=True)
 
 
-class _ChangeBase:
+class _ChangeBase(Generic[E1]):
     def show(self, name: str = "") -> str:
         return show_change(cast("Change", self), name=name)
 
+    @abstractmethod
+    def get_first(self) -> E1:
+        ...
+
+    @abstractmethod
+    def get_second(self) -> E1:
+        ...
+
 
 @dataclass
-class Added(Generic[E1], _ChangeBase):
+class Added(_ChangeBase[E1]):
     after: E1
 
     def map(self, f: Callable[[E1], T2]) -> "Added[T2]":
         return Added(f(self.after))
 
-    def get_any(self) -> E1:
+    def get_first(self) -> E1:
+        return self.after
+
+    def get_second(self) -> E1:
         return self.after
 
     @staticmethod
@@ -51,13 +63,16 @@ class Added(Generic[E1], _ChangeBase):
 
 
 @dataclass
-class Deleted(Generic[E1], _ChangeBase):
+class Deleted(_ChangeBase[E1]):
     before: E1
 
     def map(self, f: Callable[[E1], T2]) -> "Deleted[T2]":
         return Deleted(f(self.before))
 
-    def get_any(self) -> E1:
+    def get_first(self) -> E1:
+        return self.before
+
+    def get_second(self) -> E1:
         return self.before
 
     @staticmethod
@@ -70,15 +85,18 @@ class Deleted(Generic[E1], _ChangeBase):
 
 
 @dataclass
-class Modified(Generic[E1], _ChangeBase):
+class Modified(_ChangeBase[E1]):
     before: E1
     after: E1
 
     def map(self, f: Callable[[E1], T2]) -> "Modified[T2]":
         return Modified(f(self.before), f(self.after))
 
-    def get_any(self) -> E1:
+    def get_first(self) -> E1:
         return self.before
+
+    def get_second(self) -> E1:
+        return self.after
 
     @staticmethod
     def as_char():

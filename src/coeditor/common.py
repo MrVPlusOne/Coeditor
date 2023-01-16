@@ -48,6 +48,8 @@ T2 = TypeVar("T2")
 Token = int
 TokenSeq = list[Token]
 
+RelPath = NewType("RelPath", Path)
+
 
 def proj_root() -> Path:
     return Path(__file__).parent.parent.parent

@@ -3,6 +3,7 @@ import copy
 from functools import cached_property
 from os import PathLike
 import shutil
+import sys
 from coeditor.encoders import BasicTkQueryEdit
 from spot.static_analysis import ModuleName, ProjectPath, PythonProject
 from .common import *
@@ -22,6 +23,7 @@ from parso.tree import NodeOrLeaf
 import parso
 from jedi.inference.references import recurse_find_python_files
 from jedi.file_io import FileIO, FolderIO
+from jedi.inference.context import ModuleContext
 
 ScopeTree = ptree.Module | ptree.Function | ptree.Class
 
@@ -101,6 +103,20 @@ class JModule:
     def _to_scope(self) -> ChangeScope:
         return ChangeScope.from_tree(ProjectPath(self.mname, ""), self.tree)
 
+    @cached_property
+    def imported_names(self):
+        names = set[ptree.Name]()
+        for stmt in self.tree.iter_imports():
+            if isinstance(stmt, ptree.ImportFrom):
+                for n in stmt.get_from_names():
+                    assert isinstance(n, ptree.Name)
+                    names.add(n)
+            elif isinstance(stmt, ptree.ImportName):
+                for n in stmt.get_defined_names():
+                    assert isinstance(n, ptree.Name)
+                    names.add(n)
+        return names
+
 
 @dataclass
 class JModuleChange:
@@ -122,14 +138,12 @@ class JModuleChange:
             return JModuleChange(module_change, changed)
 
 
-def get_python_src_map(project: Path) -> dict[ModuleName, Path]:
-    src_map = dict[ModuleName, Path]()
+def get_python_files(project: Path):
+    files = list[Path]()
     for f in recurse_find_python_files(FolderIO(str(project))):
         f: FileIO
-        rel_path = Path(f.path).relative_to(project)
-        mname = PythonProject.rel_path_to_module_name(rel_path)
-        src_map[mname] = Path(f.path)
-    return src_map
+        files.append(Path(f.path).relative_to(project))
+    return files
 
 
 DefaultIgnoreDirs = {".venv", ".mypy_cache", ".git", "venv", "build"}
@@ -146,12 +160,24 @@ class CtxEditEncoder:
     def encode_pedit(
         self,
         pchange: "JProjectChange",
+        project: "JProject",
         queries: Sequence[EditTarget] | None = None,
     ) -> Iterable[BasicTkQueryEdit]:
         pass
 
 
 TEnc = TypeVar("TEnc", covariant=True)
+
+
+@dataclass
+class JProject:
+    module_scripts: dict[RelPath, tuple[JModule, jedi.Script]]
+
+
+def no_change_encoder(
+    pchange: "JProjectChange", project: "JProject"
+) -> Iterable["JProjectChange"]:
+    yield pchange
 
 
 @dataclass
@@ -169,8 +195,10 @@ class JProjectChange:
     def edits_from_commit_history(
         project_dir: Path,
         history: Sequence[CommitInfo],
-        change_encoder: Callable[["JProjectChange"], Iterable[TEnc]],
         tempdir: Path,
+        change_encoder: Callable[
+            ["JProjectChange", JProject], Iterable[TEnc]
+        ] = no_change_encoder,
         ignore_dirs=DefaultIgnoreDirs,
         silent: bool = False,
     ) -> list[TEnc]:
@@ -201,7 +229,7 @@ class JProjectChange:
 def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
-    change_encoder: Callable[[JProjectChange], Iterable[TEnc]],
+    change_encoder: Callable[[JProjectChange, JProject], Iterable[TEnc]],
     ignore_dirs: set[str],
     silent: bool,
 ) -> list[TEnc]:
@@ -213,20 +241,21 @@ def _edits_from_commit_history(
         A list of edits to the project, from past to present.
     """
 
-    def get_module_path(file_s: PathLike | str) -> ModuleName:
-        path = Path(file_s)
-        if path.is_absolute():
-            path = path.relative_to(project)
-        mname = PythonProject.rel_path_to_module_name(path)
-        return mname
-
     def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
-            mname = get_module_path(path)
-            proj.get_environment().version_info
-            m = jedi.Script(path=path, project=proj)._module_node
+            s = jedi.Script(path=path, project=proj)
+            mcontext = s._get_module_context()
+            assert isinstance(mcontext, ModuleContext)
+            mname = cast(str, mcontext.py__name__())
+            if mname.startswith("src."):
+                e = ValueError(f"Bad module name: {mname}")
+                files = list(project.iterdir())
+                print(f"project: {proj}", file=sys.stderr)
+                print(f"files in root: {files}", file=sys.stderr)
+                raise e
+            m = s._module_node
             assert isinstance(m, ptree.Module)
-            return JModule(mname, m)
+            return JModule(mname, m), s
 
     # turn this off so we don't have to deep copy the Modules
     jedi.settings.fast_parser = False
@@ -240,12 +269,13 @@ def _edits_from_commit_history(
             capture_output=True,
             check=True,
         )
-    proj = jedi.Project(path=project)
+    proj = jedi.Project(path=project, added_sys_path=[project / "src"])
 
     # now we can get the first project state, although this not needed for now
     # but we'll use it later for pre-edit analysis
-    src_map = get_python_src_map(project)
-    modules = {m: parse_module(f) for m, f in src_map.items()}
+    module_scripts = {
+        RelPath(f): parse_module(project / f) for f in get_python_files(project)
+    }
 
     def is_src(path_s: str) -> bool:
         path = Path(path_s)
@@ -269,7 +299,7 @@ def _edits_from_commit_history(
                 capture_output=True,
                 check=True,
             )
-        proj = jedi.Project(path=project)
+        proj = jedi.Project(path=project, added_sys_path=[project / "src"])
 
         path_changes = list[Change[str]]()
 
@@ -295,26 +325,26 @@ def _edits_from_commit_history(
 
         changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
-            path = path_change.get_first()
-            mname = get_module_path(path)
+            path = project / path_change.get_first()
+            rel_path = RelPath(path.relative_to(project))
             match path_change:
                 case Added():
-                    mod = parse_module(project / path)
-                    modules[mod.mname] = mod
-                    changed[mod.mname] = JModuleChange.from_modules(Added(mod))
+                    ms = parse_module(path)
+                    module_scripts[rel_path] = ms
+                    changed[ms[0].mname] = JModuleChange.from_modules(Added(ms[0]))
                 case Deleted():
-                    mod = modules.pop(mname)
-                    changed[mname] = JModuleChange.from_modules(Deleted(mod))
+                    ms = module_scripts.pop(rel_path)
+                    changed[ms[0].mname] = JModuleChange.from_modules(Deleted(ms[0]))
                 case Modified(path1, path2):
                     assert path1 == path2
-                    mod_old = modules[mname]
-                    modules[mname] = mod_new = parse_module(project / path1)
-                    changed[mname] = JModuleChange.from_modules(
-                        Modified(mod_old, mod_new)
+                    ms_old = module_scripts[rel_path]
+                    module_scripts[rel_path] = ms_new = parse_module(path)
+                    changed[ms_new[0].mname] = JModuleChange.from_modules(
+                        Modified(ms_old[0], ms_new[0])
                     )
 
         pchange = JProjectChange(changed, commit_info=commit_next)
-        results.extend(change_encoder(pchange))
+        results.extend(change_encoder(pchange, JProject(module_scripts)))
         commit_now = commit_next
 
     return results
