@@ -987,6 +987,7 @@ class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
 class CtxEncoder:
     pedit: ProjectEdit
     collapse_unchanged: bool
+    collapse_simple_changes: bool = False
     compress_ctx: int | None = 6
     indent_in_class: bool = True
     elem_size_limit: int = 8000
@@ -1015,7 +1016,7 @@ class CtxEncoder:
             mod = medit.all_changes[path]
             elem = mod.before if isinstance(mod, Deleted) else mod.after
             if (
-                self.collapse_unchanged
+                self.collapse_simple_changes
                 and (isinstance(mod, Deleted) or isinstance(mod, Added))
                 and isinstance(elem, PythonFunction)
             ):
