@@ -489,6 +489,9 @@ class CommitInfo:
     parents: tuple[str, ...]
     msg: str
 
+    def summary(self) -> str:
+        return f"[{self.hash[:10]} {short_str(self.msg)}]"
+
 
 def get_commit_history(
     project_dir: Path,

@@ -1,3 +1,6 @@
+import copy
+from functools import cached_property
+from os import PathLike
 import shutil
 from spot.static_analysis import ModuleName, ProjectPath, PythonProject
 from .common import *
@@ -11,6 +14,7 @@ from .history import (
     get_commit_history,
 )
 import jedi
+import jedi.settings
 from parso.python import tree as ptree
 from parso.tree import NodeOrLeaf
 import parso
@@ -18,6 +22,8 @@ from jedi.inference.references import recurse_find_python_files
 from jedi.file_io import FileIO, FolderIO
 
 ScopeTree = ptree.Module | ptree.Function | ptree.Class
+
+_tlogger = TimeLogger()
 
 
 @dataclass
@@ -31,6 +37,10 @@ class ChangeScope:
     tree: ScopeTree
     statements: Sequence[ptree.PythonBaseNode | ptree.PythonNode]
     subscopes: Mapping[ProjectPath, Self]
+
+    @cached_property
+    def statements_code(self) -> str:
+        return "".join(s.get_code() for s in self.statements).strip("\n")
 
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
@@ -68,16 +78,13 @@ class ChangeTarget:
     scope: ChangeScope
     statements: Sequence[ptree.PythonBaseNode | ptree.PythonNode]
 
-    def __post_init__(self):
-        if not self.statements:
-            raise ValueError("Change target must have at least one statement")
-
+    @cached_property
     def code(self) -> str:
         return "".join(s.get_code() for s in self.statements)
 
     def __repr__(self):
         code_range = (self.statements[0].start_pos, self.statements[-1].end_pos)
-        code = self.code()
+        code = self.code
         if len(code) > 30:
             code = code[:30] + "..."
         return f"ChangeTarget(scope={self.scope.path}, range={code_range}, code={repr(code)})"
@@ -98,21 +105,27 @@ class JModuleChange:
     module_change: Change[JModule]
     changed: Mapping[ProjectPath, Change[ChangeTarget]]
 
+    def __repr__(self) -> str:
+        change_dict = {k.path: v.as_char() for k, v in self.changed.items()}
+        return f"JModuleChange({change_dict})"
+
     @staticmethod
     def from_modules(module_change: Change[JModule]):
         "Compute the change targets from two versions of the same module."
-        changed = dict[ProjectPath, Change[ChangeTarget]]()
-        for c in _get_change_targets(module_change.map(lambda m: m._to_scope())):
-            path = c.get_any().scope.path
-            changed[path] = c
-        return JModuleChange(module_change, changed)
+        with _tlogger.timed("JModuleChange.from_modules"):
+            changed = dict[ProjectPath, Change[ChangeTarget]]()
+            for c in _get_change_targets(module_change.map(lambda m: m._to_scope())):
+                path = c.get_any().scope.path
+                changed[path] = c
+            return JModuleChange(module_change, changed)
 
 
 def get_python_src_map(project: Path) -> dict[ModuleName, Path]:
     src_map = dict[ModuleName, Path]()
     for f in recurse_find_python_files(FolderIO(str(project))):
         f: FileIO
-        mname = PythonProject.rel_path_to_module_name(Path(f.path))
+        rel_path = Path(f.path).relative_to(project)
+        mname = PythonProject.rel_path_to_module_name(rel_path)
         src_map[mname] = Path(f.path)
     return src_map
 
@@ -122,103 +135,161 @@ class JProjectChange:
     changed: Mapping[ModuleName, JModuleChange]
     commit_info: "CommitInfo | None"
 
+    def __repr__(self) -> str:
+        commit = (
+            f"commit={repr(self.commit_info.summary())}, " if self.commit_info else ""
+        )
+        return f"JProjectChange({commit}{self.changed})"
+
     @staticmethod
     def edits_from_commit_history(
         project_dir: Path,
         history: Sequence[CommitInfo],
-        workdir: Path,
+        tempdir: Path,
         ignore_dirs=PythonProject.DefaultIgnoreDirs,
-    ) -> "Iterable[JProjectChange]":
+        silent: bool = False,
+    ) -> "list[JProjectChange]":
         """Incrementally compute the edits to a project from the git history.
 
         Returns:
             A list of edits to the project, from past to present.
         """
-
-        src_map = dict[ModuleName, Path]()
-
-        def get_module_path(file_s: str) -> ModuleName:
-            path = Path(file_s)
-            mname = PythonProject.rel_path_to_module_name(Path(path))
-            src_map[mname] = workdir / path
-            return mname
-
-        # first copy into the workdir
-        shutil.copytree(project_dir / ".git", workdir, dirs_exist_ok=False)
-        project_dir = workdir
-
-        # then checkout to the first commit
-        commit_now = history[-1]
-        run_command(["git", "checkout", "-f", commit_now.hash], cwd=workdir)
-
-        # now we can get the first project state, although this not needed for now
-        # but we'll use it later for pre-edit analysis
-        src_map.update(get_python_src_map(workdir))
-        scripts = {m: jedi.Script(path=f) for m, f in src_map.items()}
-
-        def is_src(path_s: str) -> bool:
-            path = Path(path_s)
-            return path.suffix == ".py" and all(
-                p not in ignore_dirs for p in path.parts
+        tempdir = tempdir.resolve()
+        if tempdir.exists():
+            raise FileExistsError(f"Workdir '{tempdir}' already exists.")
+        tempdir.mkdir(parents=True, exist_ok=False)
+        use_fast_parser = jedi.settings.fast_parser
+        try:
+            run_command(
+                ["cp", "-r", str(project_dir / ".git"), str(tempdir)],
+                cwd=project_dir.parent,
             )
 
-        for commit_next in reversed(history):
-            # get changed files
-            changed_files = run_command(
-                ["git", "diff", commit_now.hash, commit_next.hash, "--name-status"],
-                cwd=workdir,
-            ).splitlines()
+            return _edits_from_commit_history(tempdir, history, ignore_dirs, silent)
+        finally:
+            run_command(["rm", "-rf", str(tempdir)], cwd=tempdir.parent)
+            jedi.settings.fast_parser = use_fast_parser
 
-            path_changes = list[Change[str]]()
 
-            for line in changed_files:
-                if not line:
+def _edits_from_commit_history(
+    project: Path,
+    history: Sequence[CommitInfo],
+    ignore_dirs=PythonProject.DefaultIgnoreDirs,
+    silent: bool = False,
+) -> "list[JProjectChange]":
+    """Incrementally compute the edits to a project from the git history.
+    Note that this will change the file states in the project directory, so
+    you should make a copy of the project before calling this function.
+
+    Returns:
+        A list of edits to the project, from past to present.
+    """
+
+    def get_module_path(file_s: PathLike | str) -> ModuleName:
+        path = Path(file_s)
+        if path.is_absolute():
+            path = path.relative_to(project)
+        mname = PythonProject.rel_path_to_module_name(path)
+        return mname
+
+    def parse_module(path: Path):
+        with _tlogger.timed("parse_module"):
+            mname = get_module_path(path)
+            proj.get_environment().version_info
+            m = jedi.Script(path=path, project=proj)._module_node
+            assert isinstance(m, ptree.Module)
+            return JModule(mname, m)
+
+    # turn this off so we don't have to deep copy the Modules
+    jedi.settings.fast_parser = False
+
+    # checkout to the first commit
+    commit_now = history[-1]
+    with _tlogger.timed("checkout"):
+        subprocess.run(
+            ["git", "checkout", "-f", commit_now.hash],
+            cwd=project,
+            capture_output=True,
+            check=True,
+        )
+    proj = jedi.Project(path=project)
+
+    # now we can get the first project state, although this not needed for now
+    # but we'll use it later for pre-edit analysis
+    src_map = get_python_src_map(project)
+    modules = {m: parse_module(f) for m, f in src_map.items()}
+
+    def is_src(path_s: str) -> bool:
+        path = Path(path_s)
+        return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
+
+    future_commits = list(reversed(history[:-1]))
+    results = list[JProjectChange]()
+    for commit_next in tqdm(
+        future_commits, smoothing=0, desc="processing commits", disable=silent
+    ):
+        # get changed files
+        changed_files = run_command(
+            ["git", "diff", commit_now.hash, commit_next.hash, "--name-status"],
+            cwd=project,
+        ).splitlines()
+        # check out commit_next
+        with _tlogger.timed("checkout"):
+            subprocess.run(
+                ["git", "checkout", commit_next.hash],
+                cwd=project,
+                capture_output=True,
+                check=True,
+            )
+        proj = jedi.Project(path=project)
+
+        path_changes = list[Change[str]]()
+
+        for line in changed_files:
+            segs = line.split("\t")
+            if len(segs) == 2:
+                tag, path = segs
+                if not is_src(path):
                     continue
-                if line[2] == " ":
-                    tag = line[:2]
-                    path = line[3:]
-                    if not is_src(path):
-                        continue
-                    if tag.endswith("A"):
-                        path_changes.append(Added(path))
-                    elif tag.endswith("D"):
-                        path_changes.append(Deleted(path))
-                    if tag.endswith("M"):
-                        path_changes.append(Modified(path, path))
-                else:
-                    tag, path1, path2 = line.split(" ")
-                    assert tag.startswith("R")
-                    if not is_src(path1) or not is_src(path2):
-                        continue
-                    path_changes.append(Deleted(path1))
-                    path_changes.append(Added(path2))
+                if tag.endswith("A"):
+                    path_changes.append(Added(path))
+                elif tag.endswith("D"):
+                    path_changes.append(Deleted(path))
+                if tag.endswith("M"):
+                    path_changes.append(Modified(path, path))
+            elif len(segs) == 3:
+                tag, path1, path2 = segs
+                assert tag.startswith("R")
+                if not is_src(path1) or not is_src(path2):
+                    continue
+                path_changes.append(Deleted(path1))
+                path_changes.append(Added(path2))
 
-            changed = dict[ModuleName, JModuleChange]()
-            for path_change in changed_files:
-                match path_change:
-                    case Added(path):
-                        mname = get_module_path(path)
-                        scripts[mname] = script = jedi.Script(path=workdir / path)
-                        mod = JModule(mname, script._module_node)
-                        changed[mname] = JModuleChange.from_modules(Added(mod))
-                    case Deleted(path):
-                        mname = get_module_path(path)
-                        script = scripts.pop(mname)
-                        mod = JModule(mname, script._module_node)
-                        changed[mname] = JModuleChange.from_modules(Deleted(mod))
-                    case Modified(path1, path2):
-                        assert path1 == path2
-                        mname = get_module_path(path1)
-                        mod_old = scripts.pop(mname)._module_node
-                        scripts[mname] = script = jedi.Script(path=workdir / path1)
-                        mod_new = script._module_node
-                        changed[mname] = JModuleChange.from_modules(
-                            Modified(mod_old, mod_new)
-                        )
+        changed = dict[ModuleName, JModuleChange]()
+        for path_change in path_changes:
+            path = path_change.get_any()
+            mname = get_module_path(path)
+            match path_change:
+                case Added():
+                    mod = parse_module(project / path)
+                    modules[mod.mname] = mod
+                    changed[mod.mname] = JModuleChange.from_modules(Added(mod))
+                case Deleted():
+                    mod = modules.pop(mname)
+                    changed[mname] = JModuleChange.from_modules(Deleted(mod))
+                case Modified(path1, path2):
+                    assert path1 == path2
+                    mod_old = modules[mname]
+                    modules[mname] = mod_new = parse_module(project / path1)
+                    changed[mname] = JModuleChange.from_modules(
+                        Modified(mod_old, mod_new)
+                    )
 
-            pchange = JProjectChange(changed, commit_info=commit_next)
-            commit_now = commit_next
-            yield pchange
+        pchange = JProjectChange(changed, commit_info=commit_next)
+        commit_now = commit_next
+        results.append(pchange)
+
+    return results
 
 
 def _get_change_targets(
@@ -236,7 +307,7 @@ def _get_change_targets(
         case Modified(old_scope, new_scope):
             # compute statement differences
             assert type(old_scope.statements) == type(new_scope.statements)
-            if old_scope.statements != new_scope.statements:
+            if not code_equal(old_scope.statements_code, new_scope.statements_code):
                 old_target = ChangeTarget(old_scope, old_scope.statements)
                 new_target = ChangeTarget(new_scope, new_scope.statements)
                 yield Modified(old_target, new_target)

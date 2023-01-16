@@ -146,6 +146,13 @@ def join_list(
 HtmlCode = str
 
 
+def short_str(text: str, limit: int = 27) -> str:
+    if len(text) <= limit:
+        return text
+    else:
+        return text[:limit] + "..."
+
+
 def display_html(html: HtmlCode, show_code=False) -> None:
     code = dedent(
         f"""\
@@ -298,6 +305,8 @@ def code_equal(code1: str | cst.CSTNode, code2: str | cst.CSTNode) -> bool:
         code1 = show_expr(code1)
     if isinstance(code2, cst.CSTNode):
         code2 = show_expr(code2)
+    if code1 == code2:
+        return True
     code1 = normalize_code_by_ast(code1)
     code2 = normalize_code_by_ast(code2)
     return code1 == code2
