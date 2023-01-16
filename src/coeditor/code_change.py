@@ -1,7 +1,9 @@
+from abc import abstractmethod
 import copy
 from functools import cached_property
 from os import PathLike
 import shutil
+from coeditor.encoders import BasicTkQueryEdit
 from spot.static_analysis import ModuleName, ProjectPath, PythonProject
 from .common import *
 from .history import (
@@ -65,14 +67,14 @@ class ChangeScope:
 
 
 @dataclass
-class ChangeTarget:
+class ChangeSpan:
     """
-    A change target is a set of lines inside the same change scope. It is the basic unit of code changes handled by our model.
-        - For a modified function, the target is the function itself.
-        - For a modified module, the targets are the regions between the functions and classes plus
-        the targets recursively generated.
-        - For a modified class, the targets are the regions between methods plus
-        the targets recursively generated.
+    A change span is a set of lines inside the same change scope. It is the basic unit of code changes handled by our model.
+        - For a modified function, the span is the function itself.
+        - For a modified module, the spans are the regions between the functions and classes plus
+        the spans recursively generated.
+        - For a modified class, the spans are the regions between methods plus
+        the spans recursively generated.
     """
 
     scope: ChangeScope
@@ -103,7 +105,7 @@ class JModule:
 @dataclass
 class JModuleChange:
     module_change: Change[JModule]
-    changed: Mapping[ProjectPath, Change[ChangeTarget]]
+    changed: Mapping[ProjectPath, Change[ChangeSpan]]
 
     def __repr__(self) -> str:
         change_dict = {k.path: v.as_char() for k, v in self.changed.items()}
@@ -111,11 +113,11 @@ class JModuleChange:
 
     @staticmethod
     def from_modules(module_change: Change[JModule]):
-        "Compute the change targets from two versions of the same module."
+        "Compute the change spans from two versions of the same module."
         with _tlogger.timed("JModuleChange.from_modules"):
-            changed = dict[ProjectPath, Change[ChangeTarget]]()
-            for c in _get_change_targets(module_change.map(lambda m: m._to_scope())):
-                path = c.get_any().scope.path
+            changed = dict[ProjectPath, Change[ChangeSpan]]()
+            for c in _get_change_spans(module_change.map(lambda m: m._to_scope())):
+                path = c.get_first().scope.path
                 changed[path] = c
             return JModuleChange(module_change, changed)
 
@@ -128,6 +130,28 @@ def get_python_src_map(project: Path) -> dict[ModuleName, Path]:
         mname = PythonProject.rel_path_to_module_name(rel_path)
         src_map[mname] = Path(f.path)
     return src_map
+
+
+DefaultIgnoreDirs = {".venv", ".mypy_cache", ".git", "venv", "build"}
+
+
+@dataclass
+class EditTarget:
+    lines: tuple[int, int]
+
+
+@dataclass
+class CtxEditEncoder:
+    @abstractmethod
+    def encode_pedit(
+        self,
+        pchange: "JProjectChange",
+        queries: Sequence[EditTarget] | None = None,
+    ) -> Iterable[BasicTkQueryEdit]:
+        pass
+
+
+TEnc = TypeVar("TEnc", covariant=True)
 
 
 @dataclass
@@ -145,10 +169,11 @@ class JProjectChange:
     def edits_from_commit_history(
         project_dir: Path,
         history: Sequence[CommitInfo],
+        change_encoder: Callable[["JProjectChange"], Iterable[TEnc]],
         tempdir: Path,
-        ignore_dirs=PythonProject.DefaultIgnoreDirs,
+        ignore_dirs=DefaultIgnoreDirs,
         silent: bool = False,
-    ) -> "list[JProjectChange]":
+    ) -> list[TEnc]:
         """Incrementally compute the edits to a project from the git history.
 
         Returns:
@@ -165,7 +190,9 @@ class JProjectChange:
                 cwd=project_dir.parent,
             )
 
-            return _edits_from_commit_history(tempdir, history, ignore_dirs, silent)
+            return _edits_from_commit_history(
+                tempdir, history, change_encoder, ignore_dirs, silent
+            )
         finally:
             run_command(["rm", "-rf", str(tempdir)], cwd=tempdir.parent)
             jedi.settings.fast_parser = use_fast_parser
@@ -174,9 +201,10 @@ class JProjectChange:
 def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
-    ignore_dirs=PythonProject.DefaultIgnoreDirs,
-    silent: bool = False,
-) -> "list[JProjectChange]":
+    change_encoder: Callable[[JProjectChange], Iterable[TEnc]],
+    ignore_dirs: set[str],
+    silent: bool,
+) -> list[TEnc]:
     """Incrementally compute the edits to a project from the git history.
     Note that this will change the file states in the project directory, so
     you should make a copy of the project before calling this function.
@@ -224,7 +252,7 @@ def _edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     future_commits = list(reversed(history[:-1]))
-    results = list[JProjectChange]()
+    results = list[TEnc]()
     for commit_next in tqdm(
         future_commits, smoothing=0, desc="processing commits", disable=silent
     ):
@@ -267,7 +295,7 @@ def _edits_from_commit_history(
 
         changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
-            path = path_change.get_any()
+            path = path_change.get_first()
             mname = get_module_path(path)
             match path_change:
                 case Added():
@@ -286,21 +314,21 @@ def _edits_from_commit_history(
                     )
 
         pchange = JProjectChange(changed, commit_info=commit_next)
+        results.extend(change_encoder(pchange))
         commit_now = commit_next
-        results.append(pchange)
 
     return results
 
 
-def _get_change_targets(
+def _get_change_spans(
     scope_change: Change[ChangeScope],
-) -> Iterable[Change[ChangeTarget]]:
+) -> Iterable[Change[ChangeSpan]]:
     """
-    Extract the change targets from scope change.
+    Extract the change spans from scope change.
         - We need a tree differencing algorithm that are robust to element movements.
         - To compute the changes to each statement region, we can compute the differences
         by concatenating all the regions before and after the edit
-        (and hiding all the sub targets such as class methods), then map the changes
+        (and hiding all the sub spans such as class methods), then map the changes
         to each line back to the original regions.
     """
     match scope_change:
@@ -308,20 +336,20 @@ def _get_change_targets(
             # compute statement differences
             assert type(old_scope.statements) == type(new_scope.statements)
             if not code_equal(old_scope.statements_code, new_scope.statements_code):
-                old_target = ChangeTarget(old_scope, old_scope.statements)
-                new_target = ChangeTarget(new_scope, new_scope.statements)
-                yield Modified(old_target, new_target)
+                old_span = ChangeSpan(old_scope, old_scope.statements)
+                new_span = ChangeSpan(new_scope, new_scope.statements)
+                yield Modified(old_span, new_span)
             for sub_change in get_named_changes(
                 old_scope.subscopes, new_scope.subscopes
             ).values():
-                yield from _get_change_targets(sub_change)
+                yield from _get_change_spans(sub_change)
         case Added(scope) | Deleted(scope):
             if scope.statements:
-                target = ChangeTarget(scope, scope.statements)
-                yield scope_change.new_value(target)
+                span = ChangeSpan(scope, scope.statements)
+                yield scope_change.new_value(span)
             for s in scope.subscopes.values():
                 s_change = scope_change.new_value(s)
-                yield from _get_change_targets(s_change)
+                yield from _get_change_spans(s_change)
 
 
 def _search_in_scope(
