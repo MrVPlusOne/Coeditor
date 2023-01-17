@@ -98,7 +98,7 @@ def encode_basic(text: str, add_special_tokens=False) -> TokenSeq:
     return _BaseTokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
-def change_to_tokens(change: Change[str]) -> TokenSeq:
+def change_to_line_diffs(change: Change[str]) -> list[str]:
     "Encode a change as a token sequence."
     match change:
         case Modified(before, after):
@@ -113,6 +113,70 @@ def change_to_tokens(change: Change[str]) -> TokenSeq:
             diffs = ["-" + l for l in splitlines(before)]
         case _:
             raise ValueError(f"Invalid change type: {change}.")
+    return diffs
+
+
+@dataclass
+class StrDelta:
+    """Maps each modified line to a delta list. The delta list is a list of added lines
+    (starting with a '+') followed by optionally a `-` line
+    (for deleting the current line)."""
+
+    line2delta: dict[int, tuple[str, ...]]
+
+    def apply_to_input(self, input: str):
+        lines = input.split("\n")
+        new_lines = list[str]()
+        for i, line in enumerate(lines):
+            deleted = False
+            if line_delta := self.line2delta.get(i):
+                for action in line_delta:
+                    if action[0] == "+":
+                        new_lines.append(action[1:])
+                    elif action[0] == "-":
+                        deleted = True
+            if not deleted:
+                new_lines.append(line)
+        if line_delta := self.line2delta.get(len(lines)):
+            for action in line_delta:
+                if action[0] == "+":
+                    new_lines.append(action[1:])
+        return "\n".join(new_lines)
+
+    def __repr__(self):
+        line_diffs = "\n".join(f"  {l}: {a}" for l, a in self.line2delta.items())
+        return f"StrDelta(\n{line_diffs}\n)"
+
+
+def line_diffs_to_original_delta(diff: list[str]) -> tuple[str, StrDelta]:
+    input_lines: list[str] = []
+    line_delta: list[str] = []
+    delta = StrDelta(dict())
+
+    for diff_line in diff:
+        assert diff_line
+        if diff_line[0] == "+":
+            line_delta.append(diff_line)
+        elif diff_line[0] == "-":
+            line_delta.append("-")
+            delta.line2delta[len(input_lines)] = tuple(line_delta)
+            input_lines.append(diff_line[1:])
+            line_delta = []
+        else:
+            assert diff_line[0] == " ", f"unexpected diff_line: {diff_line}"
+            if line_delta:
+                delta.line2delta[len(input_lines)] = tuple(line_delta)
+                line_delta = []
+            input_lines.append(diff_line[1:])
+    if line_delta:
+        delta.line2delta[len(input_lines)] = tuple(line_delta)
+
+    input = "\n".join(input_lines)
+    return input, delta
+
+
+def change_to_tokens(change: Change[str]) -> TokenSeq:
+    diffs = change_to_line_diffs(change)
     return encode_diffs(diffs)
 
 

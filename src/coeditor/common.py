@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 import os
 import random
+import sys
 from typing import *
 
 import libcst as cst
@@ -385,3 +386,15 @@ class TimedCache(Generic[T1, T2, TStamp]):
     def set(self, key: T1, value: T2, stamp: TStamp) -> None:
         self.cache.pop(key, None)
         self.cache[key] = (stamp, value)
+
+
+def print_err(*args, **kwargs) -> None:
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def assert_str_match(actual: str, expect: str):
+    if actual != expect:
+        print_err("String difference:")
+        diff = show_string_diff(expect, actual)
+        print_err(diff)
+        raise AssertionError("Strings didn't match.")

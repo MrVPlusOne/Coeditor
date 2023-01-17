@@ -180,7 +180,7 @@ def test_project_edit_creation2():
 from coeditor.encoding import *
 
 
-def test_encoding_decoding_identity():
+class TestChangeIdentities:
     cases = {
         "empty": Modified("", ""),
         "generation": Modified("", "123"),
@@ -271,33 +271,50 @@ def test_encoding_decoding_identity():
         ),
     }
 
-    for name, c in cases.items():
-        # print(show_change(c))
-        c_tokens = change_to_tokens(c)
-        print("c_tokens\n------\n", decode_tokens(c_tokens))
-        c_rec = tokens_to_change(c_tokens)
-        assert_change_eq(
-            c_rec, c, "change_to_tokens |> tokens_to_change = identity: " + name
-        )
+    def test_str_encodings(self):
+        for name, c in self.cases.items():
+            try:
+                line_diffs = change_to_line_diffs(c)
+                print("line_diffs\n------\n" + "\n".join(line_diffs))
+                before, delta = line_diffs_to_original_delta(line_diffs)
+                print("delta:", delta)
+                assert_str_match(before, c.before)
+                after = delta.apply_to_input(before)
+                assert_str_match(after, c.after)
+            except Exception:
+                print_err(f"Failed for case: {name}")
+                raise
 
-        in_seq, out_seq = change_to_input_output(c)
-        print("in_seq\n------\n", decode_tokens(in_seq))
-        print("out_seq\n------\n", decode_tokens(out_seq))
-
-        assert_tks_eq(
-            in_seq,
-            code_to_input(_BaseTokenizer.encode(c.before, add_special_tokens=False)),
-            "change_to_input_output mathese code_to_input: " + name,
-        )
-
-        if len(c.before.split("\n")) < N_Extra_Ids:
-            inlined = inline_output_tokens(in_seq, out_seq)
-            assert inlined[-1] == Newline_id
-            assert_tks_eq(
-                inlined[:-1], change_to_tokens(c), "inline_output_tokens: " + name
+    def test_tk_encodings(self):
+        for name, c in self.cases.items():
+            # print(show_change(c))
+            c_tokens = change_to_tokens(c)
+            print("c_tokens\n------\n", decode_tokens(c_tokens))
+            c_rec = tokens_to_change(c_tokens)
+            assert_change_eq(
+                c_rec, c, "change_to_tokens |> tokens_to_change = identity: " + name
             )
-            c_rec2 = tokens_to_change(inlined[:-1])
-            assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)
+
+            in_seq, out_seq = change_to_input_output(c)
+            print("in_seq\n------\n", decode_tokens(in_seq))
+            print("out_seq\n------\n", decode_tokens(out_seq))
+
+            assert_tks_eq(
+                in_seq,
+                code_to_input(
+                    _BaseTokenizer.encode(c.before, add_special_tokens=False)
+                ),
+                "change_to_input_output mathese code_to_input: " + name,
+            )
+
+            if len(c.before.split("\n")) < N_Extra_Ids:
+                inlined = inline_output_tokens(in_seq, out_seq)
+                assert inlined[-1] == Newline_id
+                assert_tks_eq(
+                    inlined[:-1], change_to_tokens(c), "inline_output_tokens: " + name
+                )
+                c_rec2 = tokens_to_change(inlined[:-1])
+                assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)
 
 
 def test_code_normalization():
