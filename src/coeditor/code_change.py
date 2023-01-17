@@ -5,6 +5,7 @@ from os import PathLike
 import shutil
 import sys
 from coeditor.encoders import BasicTkQueryEdit
+from coeditor.encoding import change_to_line_diffs, line_diffs_to_original_delta
 from spot.static_analysis import ModuleName, ProjectPath, PythonProject
 from .common import *
 from .history import (
@@ -26,6 +27,7 @@ from jedi.file_io import FileIO, FolderIO
 from jedi.inference.context import ModuleContext
 
 ScopeTree = ptree.Module | ptree.Function | ptree.Class
+PyNode = ptree.PythonBaseNode | ptree.PythonNode
 
 _tlogger = TimeLogger()
 
@@ -39,39 +41,57 @@ class ChangeScope:
 
     path: ProjectPath
     tree: ScopeTree
-    statements: Sequence[ptree.PythonBaseNode | ptree.PythonNode]
+    spans: Sequence["StatementSpan"]
     subscopes: Mapping[ProjectPath, Self]
 
     @cached_property
-    def statements_code(self) -> str:
-        return "".join(s.get_code() for s in self.statements).strip("\n")
+    def spans_code(self) -> str:
+        return "\n".join(s.code for s in self.spans)
 
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
+        spans = []
+        subscopes = dict()
+        scope = ChangeScope(path, tree, spans, subscopes)
         if isinstance(tree, ptree.Function):
-            stmts = [_to_decorated(tree)]
-            subscopes = dict()
+            span = StatementSpan([_to_decorated(tree)])
+            spans.append(span)
         else:
-            stmts = [
-                s
-                for s in tree._search_in_scope("simple_stmt")
-                if s.children[0].type not in ptree._IMPORTS
-            ]
-            subscopes = dict()
+            current_stmts = []
+            for s in tree.children:
+                if _is_scope_statement(as_any(s)):
+                    current_stmts.append(s)
+                else:
+                    if current_stmts:
+                        spans.append(StatementSpan(current_stmts))
+                        current_stmts = []
+            if current_stmts:
+                spans.append(StatementSpan(current_stmts))
+
             for stree in tree._search_in_scope(ptree.Function.type, ptree.Class.type):
                 stree: ptree.Function | ptree.Class
                 spath = path.append(cast(ptree.Name, stree.name).value)
                 subscopes[spath] = ChangeScope.from_tree(spath, stree)
-        return ChangeScope(path, tree, stmts, subscopes)
+        return scope
 
     def __repr__(self):
         return f"ChangeScope(path={self.path}, type={self.tree.type})"
 
 
+def _is_scope_statement(stmt: PyNode) -> bool:
+    match stmt:
+        case ptree.PythonNode():
+            return stmt.children[0].type not in ptree._IMPORTS
+        case ptree.Flow():
+            return True
+        case _:
+            return False
+
+
 @dataclass
-class ChangeSpan:
+class StatementSpan:
     """
-    A change span is a set of lines inside the same change scope. It is the basic unit of code changes handled by our model.
+    A statement span is a set of lines inside the same change scope. It is the basic unit of code changes handled by our model.
         - For a modified function, the span is the function itself.
         - For a modified module, the spans are the regions between the functions and classes plus
         the spans recursively generated.
@@ -79,19 +99,32 @@ class ChangeSpan:
         the spans recursively generated.
     """
 
-    scope: ChangeScope
-    statements: Sequence[ptree.PythonBaseNode | ptree.PythonNode]
+    statements: Sequence[PyNode]
 
-    @cached_property
-    def code(self) -> str:
-        return "".join(s.get_code() for s in self.statements)
+    def __post_init__(self):
+        assert self.statements
+        code = "".join(s.get_code() for s in self.statements)
+        n_lines_0 = count_lines(code)
+        code = code.lstrip("\n")
+        prefix_empty_lines = n_lines_0 - count_lines(code)
+        start = self.statements[0].start_pos[0]
+        start += prefix_empty_lines
+        end = self.statements[-1].end_pos[0]
+
+        self._prefix_empty_lines: int = prefix_empty_lines
+        self.code: str = code
+        self.line_range: tuple[int, int] = (start, end)
+
+
+@dataclass
+class ChangedSpan:
+    "Represents the changes made to a statement span."
+    change: Change[str]
+    scope_change: Change[ChangeScope]
+    line_range: tuple[int, int]
 
     def __repr__(self):
-        code_range = (self.statements[0].start_pos, self.statements[-1].end_pos)
-        code = self.code
-        if len(code) > 30:
-            code = code[:30] + "..."
-        return f"ChangeTarget(scope={self.scope.path}, range={code_range}, code={repr(code)})"
+        return f"ChangeSpan(scope={self.scope_change.earlier().path}, range={self.line_range}, type={self.change.as_char()})"
 
 
 @dataclass
@@ -121,20 +154,20 @@ class JModule:
 @dataclass
 class JModuleChange:
     module_change: Change[JModule]
-    changed: Mapping[ProjectPath, Change[ChangeSpan]]
+    changed: Mapping[ProjectPath, ChangedSpan]
 
     def __repr__(self) -> str:
-        change_dict = {k.path: v.as_char() for k, v in self.changed.items()}
+        change_dict = {k.path: v.change.as_char() for k, v in self.changed.items()}
         return f"JModuleChange({change_dict})"
 
     @staticmethod
     def from_modules(module_change: Change[JModule]):
         "Compute the change spans from two versions of the same module."
         with _tlogger.timed("JModuleChange.from_modules"):
-            changed = dict[ProjectPath, Change[ChangeSpan]]()
-            for c in _get_change_spans(module_change.map(lambda m: m._to_scope())):
-                path = c.get_first().scope.path
-                changed[path] = c
+            changed = dict[ProjectPath, ChangedSpan]()
+            for cspan in get_changed_spans(module_change.map(lambda m: m._to_scope())):
+                path = cspan.scope_change.earlier().path
+                changed[path] = cspan
             return JModuleChange(module_change, changed)
 
 
@@ -325,7 +358,7 @@ def _edits_from_commit_history(
 
         changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
-            path = project / path_change.get_first()
+            path = project / path_change.earlier()
             rel_path = RelPath(path.relative_to(project))
             match path_change:
                 case Added():
@@ -344,15 +377,16 @@ def _edits_from_commit_history(
                     )
 
         pchange = JProjectChange(changed, commit_info=commit_next)
-        results.extend(change_encoder(pchange, JProject(module_scripts)))
+        with _tlogger.timed("change_encoder"):
+            results.extend(change_encoder(pchange, JProject(module_scripts)))
         commit_now = commit_next
 
     return results
 
 
-def _get_change_spans(
+def get_changed_spans(
     scope_change: Change[ChangeScope],
-) -> Iterable[Change[ChangeSpan]]:
+) -> list[ChangedSpan]:
     """
     Extract the change spans from scope change.
         - We need a tree differencing algorithm that are robust to element movements.
@@ -361,25 +395,53 @@ def _get_change_spans(
         (and hiding all the sub spans such as class methods), then map the changes
         to each line back to the original regions.
     """
-    match scope_change:
-        case Modified(old_scope, new_scope):
-            # compute statement differences
-            assert type(old_scope.statements) == type(new_scope.statements)
-            if not code_equal(old_scope.statements_code, new_scope.statements_code):
-                old_span = ChangeSpan(old_scope, old_scope.statements)
-                new_span = ChangeSpan(new_scope, new_scope.statements)
-                yield Modified(old_span, new_span)
-            for sub_change in get_named_changes(
-                old_scope.subscopes, new_scope.subscopes
-            ).values():
-                yield from _get_change_spans(sub_change)
-        case Added(scope) | Deleted(scope):
-            if scope.statements:
-                span = ChangeSpan(scope, scope.statements)
-                yield scope_change.new_value(span)
-            for s in scope.subscopes.values():
-                s_change = scope_change.new_value(s)
-                yield from _get_change_spans(s_change)
+
+    def get_modified_spans(
+        old_scope: ChangeScope, new_scope: ChangeScope
+    ) -> Iterable[ChangedSpan]:
+        if code_equal(old_scope.spans_code, new_scope.spans_code):
+            return
+        diffs = change_to_line_diffs(
+            Modified(old_scope.spans_code, new_scope.spans_code)
+        )
+        original, delta = line_diffs_to_original_delta(diffs)
+        line = 0
+        for span in old_scope.spans:
+            code = span.code
+            line_range = (line, line + len(code.split("\n")))
+            if subdelta := delta.delta_for_input_range(line_range):
+                new_code = subdelta.apply_to_input(code)
+                change = Modified(code, new_code)
+                scope_change = Modified(old_scope, new_scope)
+                yield ChangedSpan(change, scope_change, span.line_range)
+            line = line_range[1]
+
+    def recurse(scope_change) -> Iterable[ChangedSpan]:
+        match scope_change:
+            case Modified(old_scope, new_scope):
+                # compute statement differences
+                yield from get_modified_spans(old_scope, new_scope)
+                for sub_change in get_named_changes(
+                    old_scope.subscopes, new_scope.subscopes
+                ).values():
+                    yield from recurse(sub_change)
+            case Added(scope) | Deleted(scope):
+                for span in scope.spans:
+                    code_change = scope_change.new_value(span.code)
+                    yield ChangedSpan(code_change, scope_change, span.line_range)
+                for s in scope.subscopes.values():
+                    s_change = scope_change.new_value(s)
+                    yield from recurse(s_change)
+
+    spans = list(recurse(scope_change))
+    spans.sort(key=lambda s: s.line_range[0])
+    return spans
+
+
+def code_to_module(code: str) -> ptree.Module:
+    m = jedi.Script(code)._module_node
+    assert isinstance(m, ptree.Module)
+    return m
 
 
 def _search_in_scope(

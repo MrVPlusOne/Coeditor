@@ -112,7 +112,7 @@ def splitlines(text: str) -> list[str]:
 
 
 def count_lines(text: str) -> int:
-    return len(text.split("\n"))
+    return text.count("\n") + 1
 
 
 def split_list(
@@ -392,8 +392,10 @@ def print_err(*args, **kwargs) -> None:
     print(*args, file=sys.stderr, **kwargs)
 
 
-def assert_str_match(actual: str, expect: str):
+def assert_str_equal(actual: str, expect: str):
     if actual != expect:
+        print_err(f"{expect = }")
+        print_err(f"{actual = }")
         print_err("String difference:")
         diff = show_string_diff(expect, actual)
         print_err(diff)

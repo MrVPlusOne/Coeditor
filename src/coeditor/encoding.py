@@ -147,13 +147,28 @@ class StrDelta:
         line_diffs = "\n".join(f"  {l}: {a}" for l, a in self.line2delta.items())
         return f"StrDelta(\n{line_diffs}\n)"
 
+    def delta_for_input_range(self, line_range: tuple[int, int]) -> Self:
+        """Compute the delta for the given line range. Note that the line numbers
+        are also offset by `line_range[0]`."""
+        new_delta = dict[int, tuple[str, ...]]()
+        for line, actions in self.line2delta.items():
+            if line < line_range[0]:
+                continue
+            if line >= line_range[1]:
+                break
+            new_delta[line - line_range[0]] = actions
+        return StrDelta(new_delta)
 
-def line_diffs_to_original_delta(diff: list[str]) -> tuple[str, StrDelta]:
+    def __bool__(self) -> bool:
+        return bool(self.line2delta)
+
+
+def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
     input_lines: list[str] = []
     line_delta: list[str] = []
     delta = StrDelta(dict())
 
-    for diff_line in diff:
+    for diff_line in diffs:
         assert diff_line
         if diff_line[0] == "+":
             line_delta.append(diff_line)

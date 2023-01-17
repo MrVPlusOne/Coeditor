@@ -278,9 +278,9 @@ class TestChangeIdentities:
                 print("line_diffs\n------\n" + "\n".join(line_diffs))
                 before, delta = line_diffs_to_original_delta(line_diffs)
                 print("delta:", delta)
-                assert_str_match(before, c.before)
+                assert_str_equal(before, c.before)
                 after = delta.apply_to_input(before)
-                assert_str_match(after, c.after)
+                assert_str_equal(after, c.after)
             except Exception:
                 print_err(f"Failed for case: {name}")
                 raise
