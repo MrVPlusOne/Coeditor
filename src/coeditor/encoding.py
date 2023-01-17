@@ -118,55 +118,50 @@ def change_to_line_diffs(change: Change[str]) -> list[str]:
 
 @dataclass
 class StrDelta:
-    """Maps each modified line to a delta list. The delta list is a list of added lines
+    """Stores the line deltas for each line. A delta delta is a list of added lines
     (starting with a '+') followed by optionally a `-` line
     (for deleting the current line)."""
 
-    line2delta: dict[int, tuple[str, ...]]
+    deltas: list[tuple[str, ...]]
 
     def apply_to_input(self, input: str):
         lines = input.split("\n")
+        assert_eq(len(lines) + 1, len(self.deltas))
         new_lines = list[str]()
-        for i, line in enumerate(lines):
+        for line, delta in zip(lines, self.deltas):
             deleted = False
-            if line_delta := self.line2delta.get(i):
-                for action in line_delta:
+            if delta:
+                for action in delta:
                     if action[0] == "+":
                         new_lines.append(action[1:])
                     elif action[0] == "-":
                         deleted = True
             if not deleted:
                 new_lines.append(line)
-        if line_delta := self.line2delta.get(len(lines)):
-            for action in line_delta:
+        if delta := self.deltas[-1]:
+            for action in delta:
                 if action[0] == "+":
                     new_lines.append(action[1:])
         return "\n".join(new_lines)
 
     def __repr__(self):
-        line_diffs = "\n".join(f"  {l}: {a}" for l, a in self.line2delta.items())
+        line_diffs = "\n".join(f"  {l}: {a}" for l, a in enumerate(self.deltas) if a)
         return f"StrDelta(\n{line_diffs}\n)"
 
     def delta_for_input_range(self, line_range: tuple[int, int]) -> Self:
-        """Compute the delta for the given line range. Note that the line numbers
-        are also offset by `line_range[0]`."""
-        new_delta = dict[int, tuple[str, ...]]()
-        for line, actions in self.line2delta.items():
-            if line < line_range[0]:
-                continue
-            if line >= line_range[1]:
-                break
-            new_delta[line - line_range[0]] = actions
+        """Compute the delta for the given line range."""
+        new_delta = self.deltas[line_range[0] : line_range[1]]
+        new_delta.append(tuple())
         return StrDelta(new_delta)
 
     def __bool__(self) -> bool:
-        return bool(self.line2delta)
+        return any(bool(a) for a in self.deltas)
 
 
 def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
     input_lines: list[str] = []
     line_delta: list[str] = []
-    delta = StrDelta(dict())
+    deltas = dict[int, tuple[str, ...]]()
 
     for diff_line in diffs:
         assert diff_line
@@ -174,20 +169,22 @@ def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
             line_delta.append(diff_line)
         elif diff_line[0] == "-":
             line_delta.append("-")
-            delta.line2delta[len(input_lines)] = tuple(line_delta)
+            deltas[len(input_lines)] = tuple(line_delta)
             input_lines.append(diff_line[1:])
             line_delta = []
         else:
             assert diff_line[0] == " ", f"unexpected diff_line: {diff_line}"
             if line_delta:
-                delta.line2delta[len(input_lines)] = tuple(line_delta)
+                deltas[len(input_lines)] = tuple(line_delta)
                 line_delta = []
             input_lines.append(diff_line[1:])
     if line_delta:
-        delta.line2delta[len(input_lines)] = tuple(line_delta)
+        deltas[len(input_lines)] = tuple(line_delta)
+
+    str_delta = StrDelta([deltas.get(i, ()) for i in range(len(input_lines) + 1)])
 
     input = "\n".join(input_lines)
-    return input, delta
+    return input, str_delta
 
 
 def change_to_tokens(change: Change[str]) -> TokenSeq:
