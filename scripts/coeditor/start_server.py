@@ -15,7 +15,8 @@ from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
 def start_server(
     device, port: int, drop_comments: bool = False, print_stats: bool = True
 ):
-    model_path = "MrVPlusOne/coeditor-xl-bi-request-stub-v4"
+    # this newer model is trained with comments
+    model_path = "MrVPlusOne/coeditor-xl-bi-request-stub-comments-v4"
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)
@@ -67,4 +68,4 @@ def start_server(
 
 
 if __name__ == "__main__":
-    start_server("cuda", port=5042, drop_comments=True)
+    start_server("cuda", port=5042)
