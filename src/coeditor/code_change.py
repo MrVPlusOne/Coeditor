@@ -43,22 +43,49 @@ class ChangeScope:
     tree: ScopeTree
     spans: Sequence["StatementSpan"]
     subscopes: Mapping[ProjectPath, Self]
+    parent_scope: Optional["ChangeScope"]
 
     @cached_property
     def spans_code(self) -> str:
         return "\n".join(s.code for s in self.spans)
 
+    @cached_property
+    def header_code(self) -> str:
+        if self.parent_scope is None:
+            return f"# module: {self.path.module}"
+        # get the first non-empty line of self.tree
+        first_line = "#" if isinstance(self.tree, ptree.Function) else ""
+        for i, c in enumerate(self.tree.children):
+            snippet = cast(str, c.get_code())
+            if i == 0:
+                # remove leading newlines
+                snippet = snippet.lstrip("\n")
+            assert isinstance(snippet, str)
+            if count_lines(snippet) == 1:
+                first_line += snippet
+            else:
+                first_line += snippet.splitlines()[0]
+                break
+        parent_header = self.parent_scope.header_code
+        return f"{parent_header}\n{first_line}"
+
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
         spans = []
         subscopes = dict()
-        scope = ChangeScope(path, tree, spans, subscopes)
+        scope = ChangeScope(path, tree, spans, subscopes, parent_scope=None)
         if isinstance(tree, ptree.Function):
             span = StatementSpan([_to_decorated(tree)])
             spans.append(span)
         else:
+            assert isinstance(tree, (ptree.Module, ptree.Class))
             current_stmts = []
-            for s in tree.children:
+            content = (
+                tree.children
+                if isinstance(tree, ptree.Module)
+                else cast(ptree.PythonNode, tree.get_suite()).children
+            )
+            for s in content:
                 if _is_scope_statement(as_any(s)):
                     current_stmts.append(s)
                 else:
@@ -71,16 +98,21 @@ class ChangeScope:
             for stree in tree._search_in_scope(ptree.Function.type, ptree.Class.type):
                 stree: ptree.Function | ptree.Class
                 spath = path.append(cast(ptree.Name, stree.name).value)
-                subscopes[spath] = ChangeScope.from_tree(spath, stree)
+                subscope = ChangeScope.from_tree(spath, stree)
+                subscope.parent_scope = scope
+                subscopes[spath] = subscope
         return scope
 
     def __repr__(self):
         return f"ChangeScope(path={self.path}, type={self.tree.type})"
 
 
+_non_scope_stmt_types = {"decorated", "async_stmt"}
+
+
 def _is_scope_statement(stmt: PyNode) -> bool:
     match stmt:
-        case ptree.PythonNode():
+        case ptree.PythonNode(type=node_type) if node_type not in _non_scope_stmt_types:
             return stmt.children[0].type not in ptree._IMPORTS
         case ptree.Flow():
             return True
@@ -409,7 +441,7 @@ def get_changed_spans(
         for span in old_scope.spans:
             code = span.code
             line_range = (line, line + len(code.split("\n")))
-            if subdelta := delta.delta_for_input_range(line_range):
+            if subdelta := delta.for_input_range(line_range):
                 new_code = subdelta.apply_to_input(code)
                 change = Modified(code, new_code)
                 scope_change = Modified(old_scope, new_scope)

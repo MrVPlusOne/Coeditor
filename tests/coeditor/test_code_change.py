@@ -1,26 +1,41 @@
+from textwrap import indent
 from coeditor.code_change import *
 from coeditor.encoding import _BaseTokenizer
 import pytest
 
-code1 = dedent(
-    """\
-    import os
-    
-    x = 1
-    y = x + 1
-    
-    def f1():
-        global x
-        x *= 5
-        return x
-        
-    if __name__ == "__main__":
-        print(f1() + x)
-    """
-)
-
 
 def test_change_scope():
+    code1 = dedent(
+        """\
+        import os
+        
+        x = 1
+        y = x + 1
+        
+        def f1():
+            global x
+            x *= 5
+            return x
+            
+        if __name__ == "__main__":
+            print(f1() + x)
+                
+        @annotated
+        def f2():
+            return 1
+            
+        @dataclass
+        class A:
+            attr1: int
+            
+            @staticmethod
+            def method1():
+                return 1
+                
+            class B:
+                inner_attr1: int
+        """
+    )
     mod_tree = code_to_module(code1)
     scope = ChangeScope.from_tree(ProjectPath("code1", ""), mod_tree)
     global_spans = [
@@ -40,7 +55,7 @@ def test_change_scope():
     for i, code in enumerate(global_spans):
         assert_str_equal(scope.spans[i].code, code)
 
-    inner_code = dedent(
+    f1_expect = dedent(
         """\
         def f1():
             global x
@@ -49,10 +64,72 @@ def test_change_scope():
         """
     )
     f1_code = scope.subscopes[ProjectPath("code1", "f1")].spans_code
-    assert_str_equal(f1_code, inner_code)
+    assert_str_equal(f1_code, f1_expect)
+
+    f2_expect = dedent(
+        """\
+        @annotated
+        def f2():
+            return 1
+        """
+    )
+    f2_code = scope.subscopes[ProjectPath("code1", "f2")].spans_code
+    assert_str_equal(f2_code, f2_expect)
+
+    attr1_expect = dedent(
+        """\
+        attr1: int
+        """
+    )
+    attr1_code = scope.subscopes[ProjectPath("code1", "A")].spans_code
+    assert_str_equal(attr1_code, indent(attr1_expect, " " * 4))
+
+    method1_expect = dedent(
+        """\
+        @staticmethod
+        def method1():
+            return 1
+        """
+    )
+    method1_code = (
+        scope.subscopes[ProjectPath("code1", "A")]
+        .subscopes[ProjectPath("code1", "A.method1")]
+        .spans_code
+    )
+    assert_str_equal(method1_code, indent(method1_expect, " " * 4))
+
+    inner_attr1_expect = dedent(
+        """\
+        inner_attr1: int
+        """
+    )
+    inner_attr1_code = (
+        scope.subscopes[ProjectPath("code1", "A")]
+        .subscopes[ProjectPath("code1", "A.B")]
+        .spans_code
+    )
+    assert_str_equal(inner_attr1_code, indent(inner_attr1_expect, " " * 8))
 
 
 class TestChangedSpan:
+    code1 = dedent(
+        """\
+        import os
+        
+        x = 1
+        y = x + 1
+        
+        def f1():
+            global x
+            x *= 5
+            return x
+            
+        if __name__ == "__main__":
+            print(f1() + x)
+        """
+    )
+    scope1 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code1))
+
     @staticmethod
     def check_changed_spans(
         changed_spans: Sequence[ChangedSpan], *expects: tuple[type, int]
@@ -70,7 +147,7 @@ class TestChangedSpan:
             assert_eq(line_change, n)
 
     def test_same_size_update(self):
-        same_size_update = dedent(
+        code2 = dedent(
             """\
             import os
             
@@ -87,19 +164,16 @@ class TestChangedSpan:
             """
         )
 
-        scope1 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code1))
-        scope2 = ChangeScope.from_tree(
-            ProjectPath("code1", ""), code_to_module(same_size_update)
-        )
+        scope2 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code2))
         self.check_changed_spans(
-            get_changed_spans(Modified(scope1, scope2)),
+            get_changed_spans(Modified(self.scope1, scope2)),
             (Modified, 0),
             (Modified, 0),
             (Modified, 0),
         )
 
     def test_diff_size_update(self):
-        diff_size_update = dedent(
+        code2 = dedent(
             """\
             import os
             
@@ -115,18 +189,15 @@ class TestChangedSpan:
             print(f1() + x)
             """
         )
-        scope1 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code1))
-        scope2 = ChangeScope.from_tree(
-            ProjectPath("code1", ""), code_to_module(diff_size_update)
-        )
+        scope2 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code2))
         self.check_changed_spans(
-            get_changed_spans(Modified(scope1, scope2)),
+            get_changed_spans(Modified(self.scope1, scope2)),
             (Modified, 1),
             (Modified, -1),
         )
 
     def test_fun_deletion(self):
-        fun_deletion_update = dedent(
+        code2 = dedent(
             """\
             import os
             
@@ -137,20 +208,102 @@ class TestChangedSpan:
                 print("doc")
             """
         )
-        scope1 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code1))
-        scope2 = ChangeScope.from_tree(
-            ProjectPath("code1", ""), code_to_module(fun_deletion_update)
-        )
+        scope2 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code2))
         self.check_changed_spans(
-            get_changed_spans(Modified(scope1, scope2)),
+            get_changed_spans(Modified(self.scope1, scope2)),
             (Modified, -1),
             (Deleted, 0),
             (Modified, 1),
         )
 
+    def test_fun_addition(self):
+        code2 = dedent(
+            """\
+            import os
+            
+            x = 1
+            @wrapped
+            def new_f():
+                pass
+            y = x + 1
+            
+            def f1():
+                global x
+                x *= 5
+                return x
+                
+            if __name__ == "__main__":
+                print(f1() + x)
+            """
+        )
+        scope2 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code2))
+        self.check_changed_spans(
+            get_changed_spans(Modified(self.scope1, scope2)),
+            (Added, 0),
+        )
+
+    def test_class_addition(self):
+        code1 = dedent(
+            """\
+            import os
+            
+            x = 1
+            y = x + 1
+                
+            if __name__ == "__main__":
+                print(f1() + x)
+            """
+        )
+
+        code2 = dedent(
+            """\
+            import os
+            
+            x = 1
+            y = x + 1
+            
+            @dataclass
+            class Foo():
+                "new class"
+                x: int = 1
+                y: int = 2
+                
+            if __name__ == "__main__":
+                print(f1() + x)
+            """
+        )
+        scope1 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code1))
+        scope2 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code2))
+        self.check_changed_spans(
+            get_changed_spans(Modified(scope1, scope2)),
+            (Added, 0),
+        )
+
+    def test_statement_move(self):
+        code2 = dedent(
+            """\
+            import os
+            
+            x = 1
+            
+            def f1():
+                global x
+                x *= 5
+                return x
+                
+            y = x + 1
+            if __name__ == "__main__":
+                print(f1() + x)
+            """
+        )
+        scope2 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code2))
+        self.check_changed_spans(
+            get_changed_spans(Modified(self.scope1, scope2)),
+        )
+
     def test_comments_change(self):
         # have to update code as well for the changes to count
-        comment_update = dedent(
+        code2 = dedent(
             """\
             import os
             
@@ -168,12 +321,9 @@ class TestChangedSpan:
                 print(f1() + x + 1)  # belongs to print
             """
         )
-        scope1 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code1))
-        scope2 = ChangeScope.from_tree(
-            ProjectPath("code1", ""), code_to_module(comment_update)
-        )
+        scope2 = ChangeScope.from_tree(ProjectPath("code1", ""), code_to_module(code2))
         self.check_changed_spans(
-            get_changed_spans(Modified(scope1, scope2)),
+            get_changed_spans(Modified(self.scope1, scope2)),
             (Modified, -1),
             (Modified, 3),
             (Modified, 1),

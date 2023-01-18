@@ -316,6 +316,29 @@ class TestChangeIdentities:
                 c_rec2 = tokens_to_change(inlined[:-1])
                 assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)
 
+    def test_str_tk_conversion(self):
+        for name, c in self.cases.items():
+            line_diffs = change_to_line_diffs(c)
+            print("line_diffs\n------\n" + "\n".join(line_diffs))
+            before, delta = line_diffs_to_original_delta(line_diffs)
+            print("delta:", delta)
+
+            tk_delta = delta.to_tk_delta()
+            tk_before = encode_basic(before)
+            tk_after = tk_delta.apply_to_input(tk_before)
+            if tk_after != encode_basic(c.after):
+                print("after diff:\n")
+                print(show_string_diff(c.after, decode_tokens(tk_after)))
+
+            c_tokens = tk_delta.to_change_tks(tk_before)
+            if c_tokens != change_to_tokens(c):
+                print("c_tokens diff:\n")
+                print(
+                    show_string_diff(
+                        decode_tokens(c_tokens), decode_tokens(change_to_tokens(c))
+                    )
+                )
+
 
 def test_code_normalization():
     def check_code_equal(code1: str, code2: str):

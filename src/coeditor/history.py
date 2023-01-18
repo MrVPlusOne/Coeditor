@@ -32,11 +32,11 @@ class _ChangeBase(Generic[E1]):
         return show_change(cast("Change", self), name=name)
 
     @abstractmethod
-    def get_first(self) -> E1:
+    def earlier(self) -> E1:
         ...
 
     @abstractmethod
-    def get_second(self) -> E1:
+    def later(self) -> E1:
         ...
 
 
@@ -47,10 +47,10 @@ class Added(_ChangeBase[E1]):
     def map(self, f: Callable[[E1], T2]) -> "Added[T2]":
         return Added(f(self.after))
 
-    def get_first(self) -> E1:
+    def earlier(self) -> E1:
         return self.after
 
-    def get_second(self) -> E1:
+    def later(self) -> E1:
         return self.after
 
     @staticmethod
@@ -69,10 +69,10 @@ class Deleted(_ChangeBase[E1]):
     def map(self, f: Callable[[E1], T2]) -> "Deleted[T2]":
         return Deleted(f(self.before))
 
-    def get_first(self) -> E1:
+    def earlier(self) -> E1:
         return self.before
 
-    def get_second(self) -> E1:
+    def later(self) -> E1:
         return self.before
 
     @staticmethod
@@ -92,10 +92,10 @@ class Modified(_ChangeBase[E1]):
     def map(self, f: Callable[[E1], T2]) -> "Modified[T2]":
         return Modified(f(self.before), f(self.after))
 
-    def get_first(self) -> E1:
+    def earlier(self) -> E1:
         return self.before
 
-    def get_second(self) -> E1:
+    def later(self) -> E1:
         return self.after
 
     @staticmethod
@@ -378,7 +378,7 @@ class ProjectEdit:
         before: PythonProject,
         code_changes: Mapping[ModuleName, str | None],
         symlinks: Mapping[ModuleName, ModuleName] = {},
-        remove_comments: bool = True,
+        drop_comments: bool = True,
         commit_info: "CommitInfo | None" = None,
     ) -> "ProjectEdit":
         mod_changes = dict[ModuleName, PythonModule | None]()
@@ -388,9 +388,7 @@ class ProjectEdit:
             else:
                 try:
                     m = cst.parse_module(new_code)
-                    mod_changes[mname] = PythonModule.from_cst(
-                        m, mname, remove_comments
-                    )
+                    mod_changes[mname] = PythonModule.from_cst(m, mname, drop_comments)
                 except (cst.ParserSyntaxError, cst.CSTValidationError):
                     continue
         return ProjectEdit.from_module_changes(
@@ -598,7 +596,7 @@ def edits_from_commit_history(
             project,
             code_changes,
             commit_info=commit_next,
-            remove_comments=drop_comments,
+            drop_comments=drop_comments,
         )
         project = edit.after
         commit_now = commit_next
