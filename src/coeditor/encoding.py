@@ -714,6 +714,7 @@ def break_into_chunks(
     overlap: int,
     right_to_left: bool = False,
     add_bos: bool = True,
+    max_return_chunks: int | None = None,
 ) -> list[TokenSeq]:
     """
     Break the token sequence into chunks with max size `chunk_size`.
@@ -729,6 +730,8 @@ def break_into_chunks(
     chunks should be created by going from the right to left
     - `add_bos` (bool, optional, default=True): a flag indicating whether the beginning
     and end of each chunk should be marked with special tokens (BOS and EOS)
+    - `max_return_chunks` (int, optional, default=None): the maximum number of chunks
+    to return. If None, all chunks will be returned.
     """
     chunks = list[TokenSeq]()
     i = 0
@@ -760,6 +763,8 @@ def break_into_chunks(
         chunk = header + body
         assert len(chunk) <= chunk_size
         chunks.append(chunk)
+        if max_return_chunks is not None and len(chunks) >= max_return_chunks:
+            break
         i += progress
     return chunks
 

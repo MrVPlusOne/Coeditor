@@ -785,7 +785,7 @@ class ModuleHierarchy:
 
 
 def sort_modules_by_imports(
-    imports: dict[ModuleName, set[ModuleName]]
+    imports: Mapping[ModuleName, set[ModuleName]]
 ) -> list[ModuleName]:
     "Sort modules topologically according to imports"
     sorted_modules = list[str]()

@@ -36,6 +36,7 @@ from .code_change import (
     BasicTkQueryEdit,
 )
 from parso.python import tree as ptree
+from cachetools import FIFOCache
 
 
 @dataclass
@@ -84,7 +85,11 @@ class TkCtxCodeChangeProblem(TokenizedEdit):
     path: ProjectPath
     change_type: Change[None]
     # most relevant to least relevant
-    references: Sequence[TokenSeq]
+    named_references: Sequence[tuple[str, TokenSeq]]
+
+    @property
+    def references(self) -> Sequence[TokenSeq]:
+        return [ref for name, ref in self.named_references]
 
     def __repr__(self):
         return f"TkCtxCodeChangeProblem(path={self.path}, type={self.change_type.as_char()}, stats={self.stats()})"
@@ -97,7 +102,7 @@ class TkCtxCodeChangeProblem(TokenizedEdit):
         return self.show_prediction(None)
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
-        return {f"reference {i}": ref for i, ref in enumerate(self.references)}
+        return {name: ref for name, ref in self.named_references}
 
     def meta_data_lines(self) -> list[str]:
         return [
@@ -115,6 +120,10 @@ class TkCtxCodeChangeProblem(TokenizedEdit):
         }
 
 
+_ObjId = NewType("_ObjId", int)
+
+
+@dataclass
 class CtxCodeChangeEncoder(CtxEditEncoder):
     VERSION = "0.0"
     max_ref_tks: int = 512
@@ -126,17 +135,22 @@ class CtxCodeChangeEncoder(CtxEditEncoder):
     max_lines_per_function: int = 500
     skip_unchanged_problems: bool = True
 
+    def __post_init__(self):
+        self._id_cache = FIFOCache[_ObjId, Sequence[TokenSeq]](maxsize=1000)
+
     def encode_problem(
         self,
         problem: CtxCodeChangeProblem,
     ) -> Iterable[TkCtxCodeChangeProblem]:
         span = problem.span
-        references = list[TokenSeq]()
+        named_references = list[tuple[str, TokenSeq]]()
         # compute the references that are relevant to this span
         for ref_span in problem.relevant_changes:
-            references.extend(self._encode_changed_ref(ref_span))
+            for i, ref in enumerate(self._encode_changed_ref(ref_span)):
+                named_references.append((f"changed ref {i}", ref))
         for path, unchanged in problem.relevant_unchanged:
-            references.extend(self._encode_unchanged_ref(path, unchanged))
+            for i, ref in enumerate(self._encode_unchanged_ref(path, unchanged)):
+                named_references.append((f"unchanged ref {i}", ref))
 
         diffs = change_to_line_diffs(span.change)
         original, delta = line_diffs_to_original_delta(diffs)
@@ -182,12 +196,18 @@ class CtxCodeChangeEncoder(CtxEditEncoder):
                     chunk_size=self.max_ref_tks,
                     overlap=self.ref_chunk_overlap,
                 )
+            above_chunks = [
+                (f"above chunk {i}", chunk) for i, chunk in enumerate(above_chunks)
+            ]
+            below_chunks = [
+                (f"below chunk {i}", chunk) for i, chunk in enumerate(below_chunks)
+            ]
             return TkCtxCodeChangeProblem(
                 scope_tks + chunk_input,
                 chunk_output,
                 path=span.scope_change.earlier().path,
                 change_type=span.change.map(lambda _: None),
-                references=above_chunks + below_chunks + references,
+                named_references=above_chunks + below_chunks + named_references,
             )
 
         for l in range(len(tk_delta.deltas) + 1):
@@ -267,11 +287,24 @@ class CtxCodeChangeEncoder(CtxEditEncoder):
             input = truncated_above + input + truncated_below
         return input, above_ctx, below_ctx
 
-    def _encode_unchanged_ref(self, path, unchanged) -> Iterable[TokenSeq]:
-        return ()  # FIXME
+    def _encode_unchanged_ref(
+        self, path: ProjectPath, unchanged: str
+    ) -> Iterable[TokenSeq]:
+        return ()
 
-    def _encode_changed_ref(self, changed: ChangedSpan) -> Iterable[TokenSeq]:
-        return ()  # FIXME
+    def _encode_changed_ref(self, changed: ChangedSpan) -> Sequence[TokenSeq]:
+        if (key := _ObjId(id(changed))) in self._id_cache:
+            return self._id_cache[key]
+        change_tks = change_to_tokens(changed.change)
+        ref_chunks = break_into_chunks(
+            change_tks,
+            lambda i: self._encode_scope(changed.scope_change, i),
+            self.max_ref_tks,
+            overlap=self.ref_chunk_overlap,
+            max_return_chunks=self.max_chunks_per_ref,
+        )
+        self._id_cache[key] = ref_chunks
+        return ref_chunks
 
 
 @dataclass
