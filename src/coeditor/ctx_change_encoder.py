@@ -61,8 +61,12 @@ class LineUsageAnalysis:
     line2usages: dict[int, set[PyFullName]]
 
 
-@dataclass
 class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]):
+    def __init__(self, analysis: "JediUsageAnalysis | None"):
+        if analysis is None:
+            analysis = JediUsageAnalysis()
+        self.analysis = analysis
+
     def pre_edit_analysis(
         self,
         project: jedi.Project,
@@ -70,7 +74,6 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
         file_changes: Sequence[Change[str]],
     ) -> Mapping[ModuleName, LineUsageAnalysis]:
         "Return the definition usages of each line."
-        analysis = JediUsageAnalysis(project)
         # proot = Path(project._path)
         result = dict[ModuleName, LineUsageAnalysis]()
         for change in file_changes:
@@ -80,7 +83,9 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             jmod = modules[mod_path]
             assert (project.path / mod_path).exists()
             script = jedi.Script(path=project.path / mod_path, project=project)
-            line_usages, script = analysis.get_module_usages(script, silent=True)
+            line_usages = self.analysis.get_module_usages(
+                script, project.path, silent=True
+            )
             result[jmod.mname] = line_usages
         return result
 
@@ -119,7 +124,8 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             path = span.scope_change.earlier().path
             line_usages = mod2usages[path.module]
             all_used = set[PyFullName]()
-            for l in range(*span.line_range):
+            l_start, l_end = span.line_range
+            for l in range(l_start, l_end + 1):
                 all_used.update(line_usages.line2usages.get(l, tuple()))
 
             result = list[tuple[ProjectPath, str]]()
@@ -209,12 +215,12 @@ class TkCtxCodeChangeEncoder:
         span = problem.span
         named_references = list[tuple[str, TokenSeq]]()
         # compute the references that are relevant to this span
-        for ref_span in problem.relevant_changes:
-            for i, ref in enumerate(self._encode_changed_ref(ref_span)):
-                named_references.append((f"changed ref {i}", ref))
-        for path, unchanged in problem.relevant_unchanged:
-            for i, ref in enumerate(self._encode_unchanged_ref(path, unchanged)):
-                named_references.append((f"unchanged ref {i}", ref))
+        for i, ref_span in enumerate(problem.relevant_changes):
+            for j, ref in enumerate(self._encode_changed_ref(ref_span)):
+                named_references.append((f"changed ref {i}-{j}", ref))
+        for i, (path, unchanged) in enumerate(problem.relevant_unchanged):
+            for j, ref in enumerate(self._encode_unchanged_ref(path, unchanged)):
+                named_references.append((f"unchanged ref {i}-{j}", ref))
 
         diffs = change_to_line_diffs(span.change)
         original, delta = line_diffs_to_original_delta(diffs)
@@ -378,28 +384,27 @@ class TkCtxCodeChangeEncoder:
 
 @dataclass
 class JediUsageAnalysis:
-    jproj: jedi.Project
     follow_imports: bool = True
     only_same_project_usages: bool = True
 
     def __post_init__(self):
-        self.errors = dict[str, int]()
+        self.error_counts = dict[str, int]()
         self.tlogger: TimeLogger = TimeLogger()
-        self.proj_root = self.jproj._path
-        assert isinstance(self.proj_root, Path)
 
-    def get_module_usages(self, script: jedi.Script, silent: bool = False):
+    def get_module_usages(
+        self, script: jedi.Script, proj_root: Path, silent: bool = False
+    ):
         jmod: tree.Module = script._module_node
-        line_usages = dict[int, set[PyFullName]]()
+        line2usages = dict[int, set[PyFullName]]()
         all_names = [
             name for k, names in jmod.get_used_names()._dict.items() for name in names
         ]
         all_names.sort(key=lambda x: x.start_pos)
-        errors = self.errors
+        errors = self.error_counts
         for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
             line = name.start_pos[0]
-            line_usages.setdefault(line, set())
+            usages = line2usages.setdefault(line, set())
             try:
                 defs = fast_goto(
                     script,
@@ -413,14 +418,20 @@ class JediUsageAnalysis:
                         and d.full_name
                         and (
                             not self.only_same_project_usages
-                            or (self.proj_root in d.module_path.parents)
+                            or (proj_root in d.module_path.parents)
                         )
                     ):
-                        line_usages[line].add(PyFullName(d.full_name))
+                        usages.add(PyFullName(d.full_name))
             except (AttributeError, AssertionError) as e:
                 text = str(e)
                 errors[text] = errors.setdefault(text, 0) + 1
-        return LineUsageAnalysis(line_usages), script
+            except ValueError as e:
+                # if the message is "not enough values to unpack"
+                if "not enough values to unpack (expected 2" in str(e):
+                    errors[str(e)] = errors.setdefault(str(e), 0) + 1
+                else:
+                    raise
+        return LineUsageAnalysis(line2usages)
 
 
 def fast_goto(
