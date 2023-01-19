@@ -56,9 +56,37 @@ class CtxCodeChangeProblem:
 PyFullName = NewType("PyPathStr", str)
 
 
+@dataclass(unsafe_hash=True)
+class PyDefinition:
+    full_name: PyFullName
+    module: ModuleName
+    file: Path
+    start_pos: tuple[int, int]
+    end_pos: tuple[int, int]
+
+    @staticmethod
+    def from_signatures(
+        name: classes.BaseName, project: Path | None = None
+    ) -> Iterable["PyDefinition"]:
+        if name.in_builtin_module():
+            return
+        for sig in name.get_signatures():
+            if (
+                not sig.in_builtin_module()
+                and (full_name := sig.full_name)
+                and (file := sig.module_path)
+                and (project in file.parents)
+                and (module := sig.module_name)
+                and (start_pos := sig.get_definition_start_position())
+                and (end_pos := sig.get_definition_end_position())
+            ):
+                full_name = PyFullName(full_name)
+                yield PyDefinition(full_name, module, file, start_pos, end_pos)
+
+
 @dataclass
 class LineUsageAnalysis:
-    line2usages: dict[int, set[PyFullName]]
+    line2usages: Mapping[int, set[PyDefinition]]
 
 
 class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]):
@@ -123,14 +151,22 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                 return []
             path = span.parent_scopes[-1].earlier().path
             line_usages = mod2usages[path.module]
-            all_used = set[PyFullName]()
+            all_used = set[PyDefinition]()
             l_start, l_end = span.line_range
             for l in range(l_start, l_end + 1):
-                all_used.update(line_usages.line2usages.get(l, tuple()))
+                for pydef in line_usages.line2usages.get(l, set()):
+                    if (
+                        pydef.module == path.module
+                        and l_start <= pydef.start_pos[0] <= l_end
+                    ):
+                        # skip self references
+                        print(f"Skip: {pydef}")
+                        continue
+                    all_used.add(pydef)
 
             result = list[tuple[ProjectPath, str]]()
             for used in all_used:
-                result.append((ProjectPath("?", used), used))
+                result.append((ProjectPath(used.full_name, ""), str(used)))
             return result
 
         sorted_cspans = list[ChangedSpan]()
@@ -434,7 +470,7 @@ class TkCtxCodeChangeEncoder:
 @dataclass
 class JediUsageAnalysis:
     follow_imports: bool = True
-    only_same_project_usages: bool = True
+    only_same_project_usages: bool = False
 
     def __post_init__(self):
         self.error_counts = dict[str, int]()
@@ -444,12 +480,13 @@ class JediUsageAnalysis:
         self, script: jedi.Script, proj_root: Path, silent: bool = False
     ):
         jmod: tree.Module = script._module_node
-        line2usages = dict[int, set[PyFullName]]()
+        line2usages = dict[int, set[PyDefinition]]()
         all_names = [
             name for k, names in jmod.get_used_names()._dict.items() for name in names
         ]
         all_names.sort(key=lambda x: x.start_pos)
         errors = self.error_counts
+        resolve_cache = dict[_ObjId, set[PyDefinition]]()
         for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
             line = name.start_pos[0]
@@ -462,22 +499,19 @@ class JediUsageAnalysis:
                     follow_builtin_imports=False,
                 )
                 for d in defs:
-                    if (
-                        d.module_path
-                        and d.full_name
-                        and (
-                            not self.only_same_project_usages
-                            or (proj_root in d.module_path.parents)
-                        )
-                    ):
-                        usages.add(PyFullName(d.full_name))
+                    key = _ObjId(id(d))
+                    if (defs := resolve_cache.get(key)) is None:
+                        defs = set(PyDefinition.from_signatures(d, proj_root))
+                        resolve_cache[key] = defs
+                    usages.update(defs)
+
             except (AttributeError, AssertionError) as e:
-                text = str(e)
+                text = repr(e)
                 errors[text] = errors.setdefault(text, 0) + 1
             except ValueError as e:
                 # if the message is "not enough values to unpack"
                 if "not enough values to unpack (expected 2" in str(e):
-                    errors[str(e)] = errors.setdefault(str(e), 0) + 1
+                    errors[repr(e)] = errors.setdefault(str(e), 0) + 1
                 else:
                     raise
         return LineUsageAnalysis(line2usages)
