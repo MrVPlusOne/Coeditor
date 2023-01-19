@@ -121,7 +121,7 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             if isinstance(span.change, Added):
                 # nothing to analyze
                 return []
-            path = span.scope_change.earlier().path
+            path = span.parent_scopes[-1].earlier().path
             line_usages = mod2usages[path.module]
             all_used = set[PyFullName]()
             l_start, l_end = span.line_range
@@ -198,6 +198,7 @@ class TkCtxCodeChangeEncoder:
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
+    max_scope_tks: int = 50
     max_lines_to_edit: int = 20
     ref_chunk_overlap: int = 32
     max_chunks_per_ref: int = 4
@@ -206,6 +207,7 @@ class TkCtxCodeChangeEncoder:
 
     def __post_init__(self):
         self._id_cache = FIFOCache[_ObjId, Sequence[TokenSeq]](maxsize=1000)
+        self._scope_cache = FIFOCache[_ObjId, TokenSeq](maxsize=1000)
         self._value_cache = FIFOCache[Any, Sequence[TokenSeq]](maxsize=1000)
 
     def encode_problem(
@@ -228,7 +230,7 @@ class TkCtxCodeChangeEncoder:
         tk_delta = delta.to_tk_delta()
         chunk_id = 0
         chunk_start_l = 0
-        scope_tks = self._encode_scope(span.scope_change, 0)
+        scope_tks = self._encode_scopes(span.parent_scopes, 0)
         chunk_input = TokenSeq()
         input_limit = self.max_query_tks - len(scope_tks)
         chunk_lines = 0
@@ -252,7 +254,7 @@ class TkCtxCodeChangeEncoder:
 
             above_chunks = break_into_chunks(
                 above_tks,
-                lambda i: self._encode_scope(span.scope_change, -1 - i),
+                lambda i: self._encode_scopes(span.parent_scopes, -1 - i),
                 chunk_size=self.max_ref_tks,
                 overlap=self.ref_chunk_overlap,
                 right_to_left=True,
@@ -262,7 +264,7 @@ class TkCtxCodeChangeEncoder:
             else:
                 below_chunks = break_into_chunks(
                     below_tks,
-                    lambda i: self._encode_scope(span.scope_change, i + 1),
+                    lambda i: self._encode_scopes(span.parent_scopes, i + 1),
                     chunk_size=self.max_ref_tks,
                     overlap=self.ref_chunk_overlap,
                 )
@@ -275,7 +277,7 @@ class TkCtxCodeChangeEncoder:
             return TkCtxCodeChangeProblem(
                 scope_tks + chunk_input,
                 chunk_output,
-                path=span.scope_change.earlier().path,
+                path=span.parent_scopes[-1].earlier().path,
                 change_type=span.change.map(lambda _: None),
                 named_references=above_chunks + below_chunks + named_references,
             )
@@ -316,13 +318,27 @@ class TkCtxCodeChangeEncoder:
                 chunk_output.append(Newline_id)
             chunk_lines += 1
 
-    def _encode_scope(self, scope_change: Change[ChangeScope], offset: int) -> TokenSeq:
-        hchange = scope_change.map(lambda s: s.header_code)
+    def _encode_scope_change(self, c: Change[ChangeScope]) -> TokenSeq:
+        if (key := _ObjId(id(c))) in self._scope_cache:
+            return self._scope_cache[key]
+        hchange = c.map(lambda s: s.header_code)
+        tks = truncate_section(
+            change_to_tokens(hchange), TruncateAt.Left, self.max_scope_tks
+        )
+        self._scope_cache[key] = tks
+        return tks
+
+    def _encode_scopes(
+        self, scope_changes: Sequence[Change[ChangeScope]], offset: int
+    ) -> TokenSeq:
+        scope_tks = join_list(
+            (self._encode_scope_change(c) for c in scope_changes), sep=Newline_id
+        )
         if offset != 0:
             ending = encode_basic(f"\n# offset: {offset}\n")
         else:
             ending = [Newline_id]
-        return change_to_tokens(hchange) + ending
+        return scope_tks + ending
 
     def _inline_some_context(
         self,
@@ -373,7 +389,7 @@ class TkCtxCodeChangeEncoder:
         change_tks = change_to_tokens(changed.change)
         ref_chunks = break_into_chunks(
             change_tks,
-            lambda i: self._encode_scope(changed.scope_change, i),
+            lambda i: self._encode_scopes(changed.parent_scopes, i),
             self.max_ref_tks,
             overlap=self.ref_chunk_overlap,
             max_return_chunks=self.max_chunks_per_ref,

@@ -43,7 +43,6 @@ class ChangeScope:
     tree: ScopeTree
     spans: Sequence["StatementSpan"]
     subscopes: Mapping[ProjectPath, Self]
-    parent_scope: Optional["ChangeScope"]
 
     @cached_property
     def spans_code(self) -> str:
@@ -51,7 +50,7 @@ class ChangeScope:
 
     @cached_property
     def header_code(self) -> str:
-        if self.parent_scope is None:
+        if isinstance(self.tree, ptree.Module):
             return f"# module: {self.path.module}"
         # get the first non-empty line of self.tree
         first_line = "#" if isinstance(self.tree, ptree.Function) else ""
@@ -66,14 +65,13 @@ class ChangeScope:
             else:
                 first_line += snippet.splitlines()[0]
                 break
-        parent_header = self.parent_scope.header_code
-        return f"{parent_header}\n{first_line}"
+        return first_line
 
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
         spans = []
         subscopes = dict()
-        scope = ChangeScope(path, tree, spans, subscopes, parent_scope=None)
+        scope = ChangeScope(path, tree, spans, subscopes)
         if isinstance(tree, ptree.Function):
             span = StatementSpan([_to_decorated(tree)])
             spans.append(span)
@@ -99,7 +97,6 @@ class ChangeScope:
                 stree: ptree.Function | ptree.Class
                 spath = path.append(cast(ptree.Name, stree.name).value)
                 subscope = ChangeScope.from_tree(spath, stree)
-                subscope.parent_scope = scope
                 subscopes[spath] = subscope
         return scope
 
@@ -152,12 +149,12 @@ class StatementSpan:
 class ChangedSpan:
     "Represents the changes made to a statement span."
     change: Change[str]
-    scope_change: Change[ChangeScope]
+    parent_scopes: Sequence[Change[ChangeScope]]
     line_range: tuple[int, int]
     old_statements: Sequence[PyNode]
 
     def __repr__(self):
-        return f"ChangeSpan(scope={self.scope_change.earlier().path}, range={self.line_range}, type={self.change.as_char()})"
+        return f"ChangeSpan(scope={self.parent_scopes[-1].earlier().path}, range={self.line_range}, type={self.change.as_char()})"
 
 
 @dataclass
@@ -198,8 +195,10 @@ class JModuleChange:
         "Compute the change spans from two versions of the same module."
         with _tlogger.timed("JModuleChange.from_modules"):
             changed = dict[ProjectPath, ChangedSpan]()
-            for cspan in get_changed_spans(module_change.map(lambda m: m._to_scope())):
-                path = cspan.scope_change.earlier().path
+            for cspan in get_changed_spans(
+                module_change.map(lambda m: m._to_scope()), tuple()
+            ):
+                path = cspan.parent_scopes[-1].earlier().path
                 changed[path] = cspan
             return JModuleChange(module_change, changed)
 
@@ -439,7 +438,7 @@ def _edits_from_commit_history(
 
 
 def get_changed_spans(
-    scope_change: Change[ChangeScope],
+    scope_change: Change[ChangeScope], parent_changes: tuple[Change[ChangeScope], ...]
 ) -> list[ChangedSpan]:
     """
     Extract the change spans from scope change.
@@ -451,7 +450,9 @@ def get_changed_spans(
     """
 
     def get_modified_spans(
-        old_scope: ChangeScope, new_scope: ChangeScope
+        old_scope: ChangeScope,
+        new_scope: ChangeScope,
+        parent_changes: Sequence[Change[ChangeScope]],
     ) -> Iterable[ChangedSpan]:
         if code_equal(old_scope.spans_code, new_scope.spans_code):
             return
@@ -466,32 +467,38 @@ def get_changed_spans(
             if subdelta := delta.for_input_range(line_range):
                 new_code = subdelta.apply_to_input(code)
                 change = Modified(code, new_code)
-                scope_change = Modified(old_scope, new_scope)
                 yield ChangedSpan(
-                    change, scope_change, span.line_range, span.statements
+                    change,
+                    parent_changes,
+                    span.line_range,
+                    span.statements,
                 )
             line = line_range[1]
 
-    def recurse(scope_change) -> Iterable[ChangedSpan]:
+    def recurse(scope_change, parent_changes) -> Iterable[ChangedSpan]:
+        parent_changes = (*parent_changes, scope_change)
         match scope_change:
             case Modified(old_scope, new_scope):
                 # compute statement differences
-                yield from get_modified_spans(old_scope, new_scope)
+                yield from get_modified_spans(old_scope, new_scope, parent_changes)
                 for sub_change in get_named_changes(
                     old_scope.subscopes, new_scope.subscopes
                 ).values():
-                    yield from recurse(sub_change)
+                    yield from recurse(sub_change, parent_changes)
             case Added(scope) | Deleted(scope):
                 for span in scope.spans:
                     code_change = scope_change.new_value(span.code)
                     yield ChangedSpan(
-                        code_change, scope_change, span.line_range, span.statements
+                        code_change,
+                        parent_changes,
+                        span.line_range,
+                        span.statements,
                     )
                 for s in scope.subscopes.values():
                     s_change = scope_change.new_value(s)
-                    yield from recurse(s_change)
+                    yield from recurse(s_change, parent_changes)
 
-    spans = list(recurse(scope_change))
+    spans = list(recurse(scope_change, parent_changes))
     spans.sort(key=lambda s: s.line_range[0])
     return spans
 
