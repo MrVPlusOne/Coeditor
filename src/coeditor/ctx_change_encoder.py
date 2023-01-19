@@ -349,7 +349,7 @@ class TkCtxCodeChangeEncoder:
     ) -> tuple[TokenSeq, TokenSeq, TokenSeq]:
         "try move some some of the ctx tokens into the input if there's space."
         extra_space = size_limit - len(input)
-        if above_ctx and extra_space > 0:
+        if (above_ctx or below_ctx) and extra_space > 0:
             truncated_above, truncated_below = truncate_sections(
                 extra_space,
                 (above_ctx, TruncateAt.Left),
