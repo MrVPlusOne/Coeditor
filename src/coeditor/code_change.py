@@ -26,7 +26,7 @@ from jedi.inference.references import recurse_find_python_files
 from jedi.file_io import FileIO, FolderIO
 from jedi.inference.context import ModuleContext
 
-ScopeTree = ptree.Module | ptree.Function | ptree.Class
+ScopeTree = ptree.Function | ptree.Class | ptree.Module
 PyNode = ptree.PythonBaseNode | ptree.PythonNode
 
 _tlogger = TimeLogger()
@@ -49,55 +49,67 @@ class ChangeScope:
         return "\n".join(s.code for s in self.spans)
 
     @cached_property
+    def all_code(self) -> str:
+        return f"{self.header_code}\n{self.spans_code}"
+
+    @cached_property
     def header_code(self) -> str:
         if isinstance(self.tree, ptree.Module):
             return f"# module: {self.path.module}"
         # get the first non-empty line of self.tree
-        first_line = "#" if isinstance(self.tree, ptree.Function) else ""
-        for i, c in enumerate(self.tree.children):
+        tree = self.tree
+        to_visit = []
+        parent = not_none(tree.parent)
+        while parent.type in ("decorated", "async_funcdef"):
+            to_visit.insert(0, parent.children[0])
+            parent = not_none(parent.parent)
+        to_visit.extend(tree.children)
+
+        snippets = list[str]()
+        for i, c in enumerate(to_visit):
+            if c.type == "suite":
+                break
             snippet = cast(str, c.get_code())
             if i == 0:
                 # remove leading newlines
                 snippet = snippet.lstrip("\n")
             assert isinstance(snippet, str)
-            if count_lines(snippet) == 1:
-                first_line += snippet
-            else:
-                first_line += snippet.splitlines()[0]
-                break
-        return first_line
+            snippets.append(snippet)
+        return "".join(snippets)
 
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
         spans = []
         subscopes = dict()
         scope = ChangeScope(path, tree, spans, subscopes)
-        if isinstance(tree, ptree.Function):
-            span = StatementSpan([_to_decorated(tree)])
-            spans.append(span)
-        else:
-            assert isinstance(tree, (ptree.Module, ptree.Class))
-            current_stmts = []
-            content = (
-                tree.children
-                if isinstance(tree, ptree.Module)
-                else cast(ptree.PythonNode, tree.get_suite()).children
-            )
-            for s in content:
-                if _is_scope_statement(as_any(s)):
-                    current_stmts.append(s)
-                else:
-                    if current_stmts:
-                        spans.append(StatementSpan(current_stmts))
-                        current_stmts = []
-            if current_stmts:
-                spans.append(StatementSpan(current_stmts))
+        assert isinstance(tree, ScopeTree)
+        is_func = isinstance(tree, ptree.Function)
 
-            for stree in tree._search_in_scope(ptree.Function.type, ptree.Class.type):
-                stree: ptree.Function | ptree.Class
-                spath = path.append(cast(ptree.Name, stree.name).value)
-                subscope = ChangeScope.from_tree(spath, stree)
-                subscopes[spath] = subscope
+        current_stmts = []
+        content = (
+            tree.children
+            if isinstance(tree, ptree.Module)
+            else cast(ptree.PythonNode, tree.get_suite()).children
+        )
+        for s in content:
+            # we don't create inner scopes for function contents
+            if is_func or _is_scope_statement(as_any(s)):
+                current_stmts.append(s)
+            else:
+                if current_stmts:
+                    spans.append(StatementSpan(current_stmts))
+                    current_stmts = []
+        if current_stmts:
+            spans.append(StatementSpan(current_stmts))
+
+        if is_func:
+            # we don't create inner scopes for function contents
+            return scope
+        for stree in tree._search_in_scope(ptree.Function.type, ptree.Class.type):
+            stree: ptree.Function | ptree.Class
+            spath = path.append(cast(ptree.Name, stree.name).value)
+            subscope = ChangeScope.from_tree(spath, stree)
+            subscopes[spath] = subscope
         return scope
 
     def __repr__(self):
@@ -442,7 +454,8 @@ def _edits_from_commit_history(
 
 
 def get_changed_spans(
-    scope_change: Change[ChangeScope], parent_changes: tuple[Change[ChangeScope], ...]
+    scope_change: Change[ChangeScope],
+    parent_changes: tuple[Change[ChangeScope], ...] = (),
 ) -> list[ChangedSpan]:
     """
     Extract the change spans from scope change.

@@ -57,14 +57,13 @@ def test_change_scope():
 
     f1_expect = dedent(
         """\
-        def f1():
-            global x
-            x *= 5
-            return x
+        global x
+        x *= 5
+        return x
         """
     )
     f1_code = scope.subscopes[ProjectPath("code1", "f1")].spans_code
-    assert_str_equal(f1_code, f1_expect)
+    assert_str_equal(f1_code, indent(f1_expect, " " * 4))
 
     f2_expect = dedent(
         """\
@@ -73,7 +72,7 @@ def test_change_scope():
             return 1
         """
     )
-    f2_code = scope.subscopes[ProjectPath("code1", "f2")].spans_code
+    f2_code = scope.subscopes[ProjectPath("code1", "f2")].all_code
     assert_str_equal(f2_code, f2_expect)
 
     attr1_expect = dedent(
@@ -94,21 +93,22 @@ def test_change_scope():
     method1_code = (
         scope.subscopes[ProjectPath("code1", "A")]
         .subscopes[ProjectPath("code1", "A.method1")]
-        .spans_code
+        .all_code
     )
     assert_str_equal(method1_code, indent(method1_expect, " " * 4))
 
     inner_attr1_expect = dedent(
         """\
-        inner_attr1: int
+        class B:
+            inner_attr1: int
         """
     )
-    inner_attr1_code = (
+    inner_class_code = (
         scope.subscopes[ProjectPath("code1", "A")]
         .subscopes[ProjectPath("code1", "A.B")]
-        .spans_code
+        .all_code
     )
-    assert_str_equal(inner_attr1_code, indent(inner_attr1_expect, " " * 8))
+    assert_str_equal(inner_class_code, indent(inner_attr1_expect, " " * 4))
 
 
 class TestChangedSpan:
@@ -325,6 +325,6 @@ class TestChangedSpan:
         self.check_changed_spans(
             get_changed_spans(Modified(self.scope1, scope2)),
             (Modified, -1),
-            (Modified, 3),
+            (Modified, 1),
             (Modified, 1),
         )

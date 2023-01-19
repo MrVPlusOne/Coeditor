@@ -198,7 +198,7 @@ class TkCtxCodeChangeEncoder:
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
-    max_scope_tks: int = 50
+    max_scope_tks: int = 128
     max_lines_to_edit: int = 20
     ref_chunk_overlap: int = 32
     max_chunks_per_ref: int = 4
@@ -338,7 +338,10 @@ class TkCtxCodeChangeEncoder:
             ending = encode_basic(f"\n# offset: {offset}\n")
         else:
             ending = [Newline_id]
-        return scope_tks + ending
+        scope_tks = truncate_section(
+            scope_tks + ending, TruncateAt.Left, self.max_scope_tks
+        )
+        return scope_tks
 
     def _inline_some_context(
         self,
