@@ -15,7 +15,7 @@ from coeditor.encoding import (
     truncate_section,
     truncate_sections,
 )
-from coeditor.history import Change, Modified
+from coeditor.history import Added, Change, Modified
 from spot.static_analysis import (
     ModuleName,
     ProjectPath,
@@ -30,13 +30,18 @@ from jedi import cache
 from .code_change import (
     ChangeScope,
     ChangedSpan,
-    CtxEditEncoder,
+    JModule,
     JProjectChange,
-    JProject,
     BasicTkQueryEdit,
+    ProjectChangeProcessor,
+    PyNode,
 )
 from parso.python import tree as ptree
 from cachetools import FIFOCache
+import parso.tree as parso_tree
+import jedi.cache
+
+jedi.cache.clear_time_caches = lambda: None
 
 
 @dataclass
@@ -48,22 +53,80 @@ class CtxCodeChangeProblem:
     relevant_unchanged: list[tuple[ProjectPath, str]]
 
 
-class CtxCodeChangeGenerator:
-    def get_problems(
-        self, pchange: "JProjectChange", project: "JProject"
-    ) -> Iterable[CtxCodeChangeProblem]:
+PyFullName = NewType("PyPathStr", str)
+
+
+@dataclass
+class LineUsageAnalysis:
+    line2usages: dict[int, set[PyFullName]]
+
+
+@dataclass
+class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]):
+    def pre_edit_analysis(
+        self,
+        project: jedi.Project,
+        modules: Mapping[RelPath, JModule],
+        file_changes: Sequence[Change[str]],
+    ) -> Mapping[ModuleName, LineUsageAnalysis]:
+        "Return the definition usages of each line."
+        analysis = JediUsageAnalysis(project)
+        # proot = Path(project._path)
+        result = dict[ModuleName, LineUsageAnalysis]()
+        for change in file_changes:
+            if not isinstance(change, Modified):
+                continue
+            mod_path = RelPath(Path(change.before))
+            jmod = modules[mod_path]
+            assert (project.path / mod_path).exists()
+            script = jedi.Script(path=project.path / mod_path, project=project)
+            line_usages, script = analysis.get_module_usages(script, silent=True)
+            result[jmod.mname] = line_usages
+        return result
+
+    def post_edit_analysis(
+        self,
+        project: jedi.Project,
+        modules: Mapping[RelPath, JModule],
+        file_changes,
+    ) -> list[ModuleName]:
+        "Return the topological order among the modules."
         # sort modules topologically
         module_deps = dict[ModuleName, set[ModuleName]]()
-        src_map = dict[ModuleName, RelPath]()
-        for rel_path, (module, script) in project.module_scripts.items():
-            src_map[module.mname] = rel_path
+        for rel_path, module in modules.items():
+            assert (project.path / rel_path).exists()
+            script = jedi.Script(path=project._path / rel_path, project=project)
             deps = module_deps.setdefault(module.mname, set())
             for n in module.imported_names:
+                n = script._module_node.get_name_of_position(n.start_pos)
                 for source in fast_goto(
                     script, n, follow_imports=True, follow_builtin_imports=False
                 ):
                     deps.add(source.module_name)
         module_order = sort_modules_by_imports(module_deps)
+        return module_order
+
+    def encode_change(
+        self,
+        pchange: JProjectChange,
+        mod2usages: Mapping[ModuleName, LineUsageAnalysis],
+        module_order: Sequence[ModuleName],
+    ) -> Iterable[CtxCodeChangeProblem]:
+        def _get_relevant(span: ChangedSpan):
+            if isinstance(span.change, Added):
+                # nothing to analyze
+                return []
+            path = span.scope_change.earlier().path
+            line_usages = mod2usages[path.module]
+            all_used = set[PyFullName]()
+            for l in range(*span.line_range):
+                all_used.update(line_usages.line2usages.get(l, tuple()))
+
+            result = list[tuple[ProjectPath, str]]()
+            for used in all_used:
+                result.append((ProjectPath("?", used), used))
+            return result
+
         sorted_cspans = list[ChangedSpan]()
         for m in module_order:
             if (mchange := pchange.changed.get(m)) is None:
@@ -73,7 +136,7 @@ class CtxCodeChangeGenerator:
                     yield CtxCodeChangeProblem(
                         span,
                         relevant_changes=sorted_cspans.copy(),
-                        relevant_unchanged=[],
+                        relevant_unchanged=_get_relevant(span),
                     )
                 sorted_cspans.append(span)
 
@@ -124,7 +187,7 @@ _ObjId = NewType("_ObjId", int)
 
 
 @dataclass
-class CtxCodeChangeEncoder(CtxEditEncoder):
+class TkCtxCodeChangeEncoder:
     VERSION = "0.0"
     max_ref_tks: int = 512
     max_query_tks: int = 512
@@ -137,6 +200,7 @@ class CtxCodeChangeEncoder(CtxEditEncoder):
 
     def __post_init__(self):
         self._id_cache = FIFOCache[_ObjId, Sequence[TokenSeq]](maxsize=1000)
+        self._value_cache = FIFOCache[Any, Sequence[TokenSeq]](maxsize=1000)
 
     def encode_problem(
         self,
@@ -288,9 +352,14 @@ class CtxCodeChangeEncoder(CtxEditEncoder):
         return input, above_ctx, below_ctx
 
     def _encode_unchanged_ref(
-        self, path: ProjectPath, unchanged: str
+        self, path: ProjectPath, content: str
     ) -> Iterable[TokenSeq]:
-        return ()
+        if (key := (path, content)) in self._value_cache:
+            return self._value_cache[key]
+        main_tks = encode_basic(f"#{str(path)}\n{content}")
+        ref_chunks = (truncate_section(main_tks, TruncateAt.Right, self.max_ref_tks),)
+        self._value_cache[key] = ref_chunks
+        return ref_chunks
 
     def _encode_changed_ref(self, changed: ChangedSpan) -> Sequence[TokenSeq]:
         if (key := _ObjId(id(changed))) in self._id_cache:
@@ -309,50 +378,49 @@ class CtxCodeChangeEncoder(CtxEditEncoder):
 
 @dataclass
 class JediUsageAnalysis:
-    project: PythonProject
+    jproj: jedi.Project
+    follow_imports: bool = True
+    only_same_project_usages: bool = True
 
     def __post_init__(self):
-        self.jproj = jedi.Project(self.project.root_dir)
         self.errors = dict[str, int]()
         self.tlogger: TimeLogger = TimeLogger()
+        self.proj_root = self.jproj._path
+        assert isinstance(self.proj_root, Path)
 
-    def get_module_usages(self, module: ModuleName, follow_imports: bool = True):
-        src_path = self.project.module2src_file[module]
-        script = jedi.Script(path=src_path, project=self.jproj)
+    def get_module_usages(self, script: jedi.Script, silent: bool = False):
         jmod: tree.Module = script._module_node
-        usage_map = dict[tree.Name, list]()
+        line_usages = dict[int, set[PyFullName]]()
         all_names = [
             name for k, names in jmod.get_used_names()._dict.items() for name in names
         ]
         all_names.sort(key=lambda x: x.start_pos)
         errors = self.errors
-        for name in tqdm(all_names, f"Analyzing {module}"):
+        for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
-            if name.value == "self":
-                continue
+            line = name.start_pos[0]
+            line_usages.setdefault(line, set())
             try:
                 defs = fast_goto(
                     script,
                     name,
-                    follow_imports=follow_imports,
+                    follow_imports=self.follow_imports,
                     follow_builtin_imports=False,
                 )
-                if defs:
-                    usage_map[name] = list(defs)
+                for d in defs:
+                    if (
+                        d.module_path
+                        and d.full_name
+                        and (
+                            not self.only_same_project_usages
+                            or (self.proj_root in d.module_path.parents)
+                        )
+                    ):
+                        line_usages[line].add(PyFullName(d.full_name))
             except (AttributeError, AssertionError) as e:
                 text = str(e)
                 errors[text] = errors.setdefault(text, 0) + 1
-        return usage_map
-
-    def get_all_usages(self, follow_imports: bool = True):
-        mod2usages = dict[ModuleName, dict[tree.Name, list]]()
-        for module in self.project.modules:
-            with self.tlogger.timed(f"get_module_usages({module})"):
-                mod2usages[module] = self.get_module_usages(
-                    module, follow_imports=follow_imports
-                )
-        print("total usages:", sum(len(us) for us in mod2usages.values()))
-        return mod2usages
+        return LineUsageAnalysis(line_usages), script
 
 
 def fast_goto(

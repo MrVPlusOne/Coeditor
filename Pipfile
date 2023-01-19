@@ -27,6 +27,7 @@ spot = {editable = true, path = "."}
 jsonrpcserver = "~=5.0.9"
 jedi = "*"
 parso = "*"
+cachetools = "*"
 
 [dev-packages]
 pytest = "*"

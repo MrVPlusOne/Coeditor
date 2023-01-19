@@ -154,6 +154,7 @@ class ChangedSpan:
     change: Change[str]
     scope_change: Change[ChangeScope]
     line_range: tuple[int, int]
+    old_statements: Sequence[PyNode]
 
     def __repr__(self):
         return f"ChangeSpan(scope={self.scope_change.earlier().path}, range={self.line_range}, type={self.change.as_char()})"
@@ -220,32 +221,6 @@ class EditTarget:
 
 
 @dataclass
-class CtxEditEncoder:
-    @abstractmethod
-    def encode_pedit(
-        self,
-        pchange: "JProjectChange",
-        project: "JProject",
-        queries: Sequence[EditTarget] | None = None,
-    ) -> Iterable[BasicTkQueryEdit]:
-        pass
-
-
-TEnc = TypeVar("TEnc", covariant=True)
-
-
-@dataclass
-class JProject:
-    module_scripts: dict[RelPath, tuple[JModule, jedi.Script]]
-
-
-def no_change_encoder(
-    pchange: "JProjectChange", project: "JProject"
-) -> Iterable["JProjectChange"]:
-    yield pchange
-
-
-@dataclass
 class JProjectChange:
     changed: Mapping[ModuleName, JModuleChange]
     commit_info: "CommitInfo | None"
@@ -256,56 +231,84 @@ class JProjectChange:
         )
         return f"JProjectChange({commit}{self.changed})"
 
-    @staticmethod
-    def edits_from_commit_history(
-        project_dir: Path,
-        history: Sequence[CommitInfo],
-        tempdir: Path,
-        change_encoder: Callable[
-            ["JProjectChange", JProject], Iterable[TEnc]
-        ] = no_change_encoder,
-        ignore_dirs=DefaultIgnoreDirs,
-        silent: bool = False,
-    ) -> list[TEnc]:
-        """Incrementally compute the edits to a project from the git history.
 
-        Returns:
-            A list of edits to the project, from past to present.
-        """
-        tempdir = tempdir.resolve()
-        if tempdir.exists():
-            raise FileExistsError(f"Workdir '{tempdir}' already exists.")
-        tempdir.mkdir(parents=True, exist_ok=False)
-        use_fast_parser = jedi.settings.fast_parser
-        try:
-            run_command(
-                ["cp", "-r", str(project_dir / ".git"), str(tempdir)],
-                cwd=project_dir.parent,
-            )
+TEnc = TypeVar("TEnc", covariant=True)
 
-            return _edits_from_commit_history(
-                tempdir, history, change_encoder, ignore_dirs, silent
-            )
-        finally:
-            run_command(["rm", "-rf", str(tempdir)], cwd=tempdir.parent)
-            jedi.settings.fast_parser = use_fast_parser
+
+class ProjectChangeProcessor(Generic[TEnc]):
+    def pre_edit_analysis(
+        self,
+        project: jedi.Project,
+        modules: Mapping[RelPath, JModule],
+        file_changes: Sequence[Change[str]],
+    ) -> Any:
+        return None
+
+    def post_edit_analysis(
+        self,
+        project: jedi.Project,
+        modules: Mapping[RelPath, JModule],
+        file_changes: Sequence[Change[str]],
+    ) -> Any:
+        return None
+
+    def encode_change(
+        self, pchange: "JProjectChange", pre_analysis: Any, post_analysis: Any
+    ) -> Iterable[TEnc]:
+        ...
+
+
+class NoProcessing(ProjectChangeProcessor[JProjectChange]):
+    def encode_change(
+        self,
+        pchange: JProjectChange,
+        pre_analysis,
+        post_analysis,
+    ) -> Iterable[JProjectChange]:
+        yield pchange
+
+
+def edits_from_commit_history(
+    project_dir: Path,
+    history: Sequence[CommitInfo],
+    tempdir: Path,
+    change_encoder: ProjectChangeProcessor[TEnc] = NoProcessing(),
+    ignore_dirs=DefaultIgnoreDirs,
+    silent: bool = False,
+) -> Iterable[TEnc]:
+    """Incrementally compute the edits to a project from the git history.
+    Note that this will change the file states in the project directory, so
+    you should make a copy of the project before calling this function.
+
+    Note that this returns an iterator, and the file state cleaning up will
+    only happen when the iterator is exhausted.
+    """
+    tempdir = tempdir.resolve()
+    if tempdir.exists():
+        raise FileExistsError(f"Workdir '{tempdir}' already exists.")
+    tempdir.mkdir(parents=True, exist_ok=False)
+    use_fast_parser = jedi.settings.fast_parser
+    try:
+        run_command(
+            ["cp", "-r", str(project_dir / ".git"), str(tempdir)],
+            cwd=project_dir.parent,
+        )
+
+        yield from _edits_from_commit_history(
+            tempdir, history, change_encoder, ignore_dirs, silent
+        )
+    finally:
+        run_command(["rm", "-rf", str(tempdir)], cwd=tempdir.parent)
+        jedi.settings.fast_parser = use_fast_parser
 
 
 def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
-    change_encoder: Callable[[JProjectChange, JProject], Iterable[TEnc]],
+    change_encoder: ProjectChangeProcessor[TEnc],
     ignore_dirs: set[str],
     silent: bool,
-) -> list[TEnc]:
-    """Incrementally compute the edits to a project from the git history.
-    Note that this will change the file states in the project directory, so
-    you should make a copy of the project before calling this function.
-
-    Returns:
-        A list of edits to the project, from past to present.
-    """
-
+) -> Iterable[TEnc]:
     def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
             s = jedi.Script(path=path, project=proj)
@@ -315,15 +318,18 @@ def _edits_from_commit_history(
             if mname.startswith("src."):
                 e = ValueError(f"Bad module name: {mname}")
                 files = list(project.iterdir())
-                print(f"project: {proj}", file=sys.stderr)
-                print(f"files in root: {files}", file=sys.stderr)
+                print_err(f"project: {proj}", file=sys.stderr)
+                print_err(f"files in root: {files}", file=sys.stderr)
                 raise e
-            m = s._module_node
+            m = copy.deepcopy(s._module_node)  # needed due to reusing
             assert isinstance(m, ptree.Module)
-            return JModule(mname, m), s
+            # mname = PythonProject.rel_path_to_module_name(path.relative_to(proj.path))
+            # m = parso.parse(path.read_text())
+            return JModule(mname, m)
 
     # turn this off so we don't have to deep copy the Modules
-    jedi.settings.fast_parser = False
+    # jedi.settings.fast_parser = False
+    # Update: Have to use deep copy for now due to a bug in jedi: https://github.com/davidhalter/jedi/issues/1888
 
     # checkout to the first commit
     commit_now = history[-1]
@@ -338,7 +344,7 @@ def _edits_from_commit_history(
 
     # now we can get the first project state, although this not needed for now
     # but we'll use it later for pre-edit analysis
-    module_scripts = {
+    path2module = {
         RelPath(f): parse_module(project / f) for f in get_python_files(project)
     }
 
@@ -347,7 +353,6 @@ def _edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     future_commits = list(reversed(history[:-1]))
-    results = list[TEnc]()
     for commit_next in tqdm(
         future_commits, smoothing=0, desc="processing commits", disable=silent
     ):
@@ -356,15 +361,6 @@ def _edits_from_commit_history(
             ["git", "diff", commit_now.hash, commit_next.hash, "--name-status"],
             cwd=project,
         ).splitlines()
-        # check out commit_next
-        with _tlogger.timed("checkout"):
-            subprocess.run(
-                ["git", "checkout", commit_next.hash],
-                cwd=project,
-                capture_output=True,
-                check=True,
-            )
-        proj = jedi.Project(path=project, added_sys_path=[project / "src"])
 
         path_changes = list[Change[str]]()
 
@@ -388,32 +384,58 @@ def _edits_from_commit_history(
                 path_changes.append(Deleted(path1))
                 path_changes.append(Added(path2))
 
+        with _tlogger.timed("pre_edit_analysis"):
+            pre_analysis = change_encoder.pre_edit_analysis(
+                proj,
+                path2module,
+                path_changes,
+            )
+
+        # check out commit_next
+        with _tlogger.timed("checkout"):
+            subprocess.run(
+                ["git", "checkout", commit_next.hash],
+                cwd=project,
+                capture_output=True,
+                check=True,
+            )
+        proj = jedi.Project(path=project, added_sys_path=[project / "src"])
+
+        new_path2module = path2module.copy()
         changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
             path = project / path_change.earlier()
             rel_path = RelPath(path.relative_to(project))
             match path_change:
                 case Added():
-                    ms = parse_module(path)
-                    module_scripts[rel_path] = ms
-                    changed[ms[0].mname] = JModuleChange.from_modules(Added(ms[0]))
+                    mod = parse_module(path)
+                    new_path2module[rel_path] = mod
+                    changed[mod.mname] = JModuleChange.from_modules(Added(mod))
                 case Deleted():
-                    ms = module_scripts.pop(rel_path)
-                    changed[ms[0].mname] = JModuleChange.from_modules(Deleted(ms[0]))
+                    mod = new_path2module.pop(rel_path)
+                    changed[mod.mname] = JModuleChange.from_modules(Deleted(mod))
                 case Modified(path1, path2):
                     assert path1 == path2
-                    ms_old = module_scripts[rel_path]
-                    module_scripts[rel_path] = ms_new = parse_module(path)
-                    changed[ms_new[0].mname] = JModuleChange.from_modules(
-                        Modified(ms_old[0], ms_new[0])
+                    mod_old = new_path2module[rel_path]
+                    new_path2module[rel_path] = mod_new = parse_module(path)
+                    changed[mod_new.mname] = JModuleChange.from_modules(
+                        Modified(mod_old, mod_new)
                     )
 
-        pchange = JProjectChange(changed, commit_info=commit_next)
-        with _tlogger.timed("change_encoder"):
-            results.extend(change_encoder(pchange, JProject(module_scripts)))
-        commit_now = commit_next
+        with _tlogger.timed("post_edit_analysis"):
+            post_analysis = change_encoder.post_edit_analysis(
+                proj,
+                new_path2module,
+                path_changes,
+            )
 
-    return results
+        pchange = JProjectChange(changed, commit_next)
+
+        with _tlogger.timed("encode_change"):
+            encs = change_encoder.encode_change(pchange, pre_analysis, post_analysis)
+            yield from encs
+        commit_now = commit_next
+        path2module = new_path2module
 
 
 def get_changed_spans(
@@ -445,7 +467,9 @@ def get_changed_spans(
                 new_code = subdelta.apply_to_input(code)
                 change = Modified(code, new_code)
                 scope_change = Modified(old_scope, new_scope)
-                yield ChangedSpan(change, scope_change, span.line_range)
+                yield ChangedSpan(
+                    change, scope_change, span.line_range, span.statements
+                )
             line = line_range[1]
 
     def recurse(scope_change) -> Iterable[ChangedSpan]:
@@ -460,7 +484,9 @@ def get_changed_spans(
             case Added(scope) | Deleted(scope):
                 for span in scope.spans:
                     code_change = scope_change.new_value(span.code)
-                    yield ChangedSpan(code_change, scope_change, span.line_range)
+                    yield ChangedSpan(
+                        code_change, scope_change, span.line_range, span.statements
+                    )
                 for s in scope.subscopes.values():
                     s_change = scope_change.new_value(s)
                     yield from recurse(s_change)

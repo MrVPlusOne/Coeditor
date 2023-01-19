@@ -50,6 +50,7 @@ Token = int
 TokenSeq = list[Token]
 
 RelPath = NewType("RelPath", Path)
+AbsPath = NewType("AbsPath", Path)
 
 
 def proj_root() -> Path:
