@@ -206,7 +206,7 @@ class TkCtxCodeChangeEncoder:
     skip_unchanged_problems: bool = True
 
     def __post_init__(self):
-        self._id_cache = FIFOCache[_ObjId, Sequence[TokenSeq]](maxsize=1000)
+        self._id_cache = FIFOCache[_ObjId, TokenSeq](maxsize=1000)
         self._scope_cache = FIFOCache[_ObjId, TokenSeq](maxsize=1000)
         self._value_cache = FIFOCache[Any, Sequence[TokenSeq]](maxsize=1000)
 
@@ -217,9 +217,9 @@ class TkCtxCodeChangeEncoder:
         span = problem.span
         named_references = list[tuple[str, TokenSeq]]()
         # compute the references that are relevant to this span
-        for i, ref_span in enumerate(problem.relevant_changes):
-            for j, ref in enumerate(self._encode_changed_ref(ref_span)):
-                named_references.append((f"changed ref {i}-{j}", ref))
+        relevant_chunks = self._group_encode_changed_refs(problem.relevant_changes)
+        for i, chunk in enumerate(relevant_chunks):
+            named_references.append((f"changed ref {i}", chunk))
         for i, (path, unchanged) in enumerate(problem.relevant_unchanged):
             for j, ref in enumerate(self._encode_unchanged_ref(path, unchanged)):
                 named_references.append((f"unchanged ref {i}-{j}", ref))
@@ -230,7 +230,7 @@ class TkCtxCodeChangeEncoder:
         tk_delta = delta.to_tk_delta()
         chunk_id = 0
         chunk_start_l = 0
-        scope_tks = self._encode_scopes(span.parent_scopes, 0)
+        scope_tks = self._encode_parent_scopes(span.parent_scopes, 0)
         chunk_input = TokenSeq()
         input_limit = self.max_query_tks - len(scope_tks)
         chunk_lines = 0
@@ -254,7 +254,7 @@ class TkCtxCodeChangeEncoder:
 
             above_chunks = break_into_chunks(
                 above_tks,
-                lambda i: self._encode_scopes(span.parent_scopes, -1 - i),
+                lambda i: self._encode_parent_scopes(span.parent_scopes, -1 - i),
                 chunk_size=self.max_ref_tks,
                 overlap=self.ref_chunk_overlap,
                 right_to_left=True,
@@ -264,7 +264,7 @@ class TkCtxCodeChangeEncoder:
             else:
                 below_chunks = break_into_chunks(
                     below_tks,
-                    lambda i: self._encode_scopes(span.parent_scopes, i + 1),
+                    lambda i: self._encode_parent_scopes(span.parent_scopes, i + 1),
                     chunk_size=self.max_ref_tks,
                     overlap=self.ref_chunk_overlap,
                 )
@@ -328,7 +328,7 @@ class TkCtxCodeChangeEncoder:
         self._scope_cache[key] = tks
         return tks
 
-    def _encode_scopes(
+    def _encode_parent_scopes(
         self, scope_changes: Sequence[Change[ChangeScope]], offset: int
     ) -> TokenSeq:
         scope_tks = join_list(
@@ -383,19 +383,49 @@ class TkCtxCodeChangeEncoder:
         self._value_cache[key] = ref_chunks
         return ref_chunks
 
-    def _encode_changed_ref(self, changed: ChangedSpan) -> Sequence[TokenSeq]:
-        if (key := _ObjId(id(changed))) in self._id_cache:
+    def _encode_change(self, change: Change[str]) -> TokenSeq:
+        if (key := _ObjId(id(change))) in self._id_cache:
             return self._id_cache[key]
-        change_tks = change_to_tokens(changed.change)
-        ref_chunks = break_into_chunks(
-            change_tks,
-            lambda i: self._encode_scopes(changed.parent_scopes, i),
-            self.max_ref_tks,
-            overlap=self.ref_chunk_overlap,
-            max_return_chunks=self.max_chunks_per_ref,
-        )
-        self._id_cache[key] = ref_chunks
-        return ref_chunks
+        change_tks = change_to_tokens(change)
+        self._id_cache[key] = change_tks
+        return change_tks
+
+    def _group_encode_changed_refs(
+        self, changes: Sequence[ChangedSpan]
+    ) -> Sequence[TokenSeq]:
+        module2changes = groupby(changes, lambda c: c.path.module)
+        all_chunks = list[TokenSeq]()
+        for change_group in module2changes.values():
+            change_group.sort(key=lambda c: c.line_range[0])
+            file_tks = TokenSeq()
+            # we'll add module as the chunk header, so we start within the module
+            last_scope = change_group[0].parent_scopes[:1]
+            for c in change_group:
+                scope_diff = []
+                for i, s in enumerate(c.parent_scopes):
+                    if (
+                        i >= len(last_scope)
+                        or s.earlier().path != last_scope[i].earlier().path
+                    ):
+                        scope_diff.append(s)
+                if scope_diff:
+                    header_tks = self._encode_parent_scopes(scope_diff, 0)
+                    file_tks.extend(header_tks)
+                body_tks = self._encode_change(c.change)
+                file_tks.extend(body_tks)
+                file_tks.append(Newline_id)
+                last_scope = c.parent_scopes
+
+            mod_change = change_group[0].parent_scopes[:1]
+            mod_chunks = break_into_chunks(
+                file_tks,
+                lambda i: self._encode_parent_scopes(mod_change, i),
+                self.max_ref_tks,
+                overlap=self.ref_chunk_overlap,
+                max_return_chunks=self.max_chunks_per_ref,
+            )
+            all_chunks.extend(mod_chunks)
+        return all_chunks
 
 
 @dataclass

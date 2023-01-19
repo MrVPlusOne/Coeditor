@@ -153,8 +153,12 @@ class ChangedSpan:
     line_range: tuple[int, int]
     old_statements: Sequence[PyNode]
 
+    @property
+    def path(self):
+        return self.parent_scopes[-1].earlier().path
+
     def __repr__(self):
-        return f"ChangeSpan(scope={self.parent_scopes[-1].earlier().path}, range={self.line_range}, type={self.change.as_char()})"
+        return f"ChangeSpan(scope={self.path}, range={self.line_range}, type={self.change.as_char()})"
 
 
 @dataclass
