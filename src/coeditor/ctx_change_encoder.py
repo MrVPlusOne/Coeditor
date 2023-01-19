@@ -35,6 +35,7 @@ from .code_change import (
     BasicTkQueryEdit,
     ProjectChangeProcessor,
     PyNode,
+    JModuleChange,
 )
 from parso.python import tree as ptree
 from cachetools import FIFOCache
@@ -58,30 +59,26 @@ PyFullName = NewType("PyPathStr", str)
 
 @dataclass(unsafe_hash=True)
 class PyDefinition:
+    """Note that the module and positions can be referring to either the import
+    statement or the actual definition."""
+
     full_name: PyFullName
-    module: ModuleName
-    file: Path
+    import_module: ModuleName
     start_pos: tuple[int, int]
     end_pos: tuple[int, int]
 
     @staticmethod
-    def from_signatures(
-        name: classes.BaseName, project: Path | None = None
-    ) -> Iterable["PyDefinition"]:
-        if name.in_builtin_module():
-            return
-        for sig in name.get_signatures():
-            if (
-                not sig.in_builtin_module()
-                and (full_name := sig.full_name)
-                and (file := sig.module_path)
-                and (project in file.parents)
-                and (module := sig.module_name)
-                and (start_pos := sig.get_definition_start_position())
-                and (end_pos := sig.get_definition_end_position())
-            ):
-                full_name = PyFullName(full_name)
-                yield PyDefinition(full_name, module, file, start_pos, end_pos)
+    def from_signatures(name: classes.BaseName) -> Iterable["PyDefinition"]:
+        cast(classes.Name, name).is_definition()
+        if (
+            not name.in_builtin_module()
+            and (full_name := name.full_name)
+            and (import_module := name.module_name)
+            and (start_pos := name.get_definition_start_position())
+            and (end_pos := name.get_definition_end_position())
+        ):
+            full_name = PyFullName(full_name)
+            yield PyDefinition(full_name, import_module, start_pos, end_pos)
 
 
 @dataclass
@@ -99,29 +96,40 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
         self,
         project: jedi.Project,
         modules: Mapping[RelPath, JModule],
-        file_changes: Sequence[Change[str]],
+        changes: Mapping[ModuleName, JModuleChange],
     ) -> Mapping[ModuleName, LineUsageAnalysis]:
         "Return the definition usages of each line."
         # proot = Path(project._path)
         result = dict[ModuleName, LineUsageAnalysis]()
-        for change in file_changes:
-            if not isinstance(change, Modified):
+
+        src_map = {m.mname: f for f, m in modules.items()}
+        for mname, mchange in changes.items():
+            if not isinstance(mchange.module_change, Modified):
                 continue
-            mod_path = RelPath(Path(change.before))
-            jmod = modules[mod_path]
-            assert (project.path / mod_path).exists()
-            script = jedi.Script(path=project.path / mod_path, project=project)
-            line_usages = self.analysis.get_module_usages(
-                script, project.path, silent=True
+
+            lines_to_analyze = set[int]()
+            for span in mchange.changed.values():
+                if span.change is Added:
+                    continue
+                start, end = span.line_range
+                lines_to_analyze.update(range(start, end + 1))
+
+            mod_path = src_map[mname]
+            assert (
+                src_file := project.path / mod_path
+            ).exists(), f"src file missing: {src_file}"
+            script = jedi.Script(path=src_file, project=project)
+            line_usages = self.analysis.get_line_usages(
+                script, project.path, lines_to_analyze, silent=True
             )
-            result[jmod.mname] = line_usages
+            result[mname] = line_usages
         return result
 
     def post_edit_analysis(
         self,
         project: jedi.Project,
         modules: Mapping[RelPath, JModule],
-        file_changes,
+        changes: Mapping[ModuleName, JModuleChange],
     ) -> list[ModuleName]:
         "Return the topological order among the modules."
         # sort modules topologically
@@ -156,11 +164,9 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             for l in range(l_start, l_end + 1):
                 for pydef in line_usages.line2usages.get(l, set()):
                     if (
-                        pydef.module == path.module
+                        pydef.full_name.startswith(pydef.import_module)
                         and l_start <= pydef.start_pos[0] <= l_end
                     ):
-                        # skip self references
-                        print(f"Skip: {pydef}")
                         continue
                     all_used.add(pydef)
 
@@ -476,8 +482,12 @@ class JediUsageAnalysis:
         self.error_counts = dict[str, int]()
         self.tlogger: TimeLogger = TimeLogger()
 
-    def get_module_usages(
-        self, script: jedi.Script, proj_root: Path, silent: bool = False
+    def get_line_usages(
+        self,
+        script: jedi.Script,
+        proj_root: Path,
+        lines_to_analyze: Collection[int],
+        silent: bool = False,
     ):
         jmod: tree.Module = script._module_node
         line2usages = dict[int, set[PyDefinition]]()
@@ -490,6 +500,8 @@ class JediUsageAnalysis:
         for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
             line = name.start_pos[0]
+            if line not in lines_to_analyze:
+                continue
             usages = line2usages.setdefault(line, set())
             try:
                 defs = fast_goto(
@@ -501,7 +513,7 @@ class JediUsageAnalysis:
                 for d in defs:
                     key = _ObjId(id(d))
                     if (defs := resolve_cache.get(key)) is None:
-                        defs = set(PyDefinition.from_signatures(d, proj_root))
+                        defs = set(PyDefinition.from_signatures(d))
                         resolve_cache[key] = defs
                     usages.update(defs)
 

@@ -255,7 +255,7 @@ class ProjectChangeProcessor(Generic[TEnc]):
         self,
         project: jedi.Project,
         modules: Mapping[RelPath, JModule],
-        file_changes: Sequence[Change[str]],
+        changes: Mapping[ModuleName, JModuleChange],
     ) -> Any:
         return None
 
@@ -263,7 +263,7 @@ class ProjectChangeProcessor(Generic[TEnc]):
         self,
         project: jedi.Project,
         modules: Mapping[RelPath, JModule],
-        file_changes: Sequence[Change[str]],
+        changes: Mapping[ModuleName, JModuleChange],
     ) -> Any:
         return None
 
@@ -342,19 +342,18 @@ def _edits_from_commit_history(
             # m = parso.parse(path.read_text())
             return JModule(mname, m)
 
-    # turn this off so we don't have to deep copy the Modules
-    # jedi.settings.fast_parser = False
-    # Update: Have to use deep copy for now due to a bug in jedi: https://github.com/davidhalter/jedi/issues/1888
+    def checkout_commit(commit_hash: str, force: bool = False):
+        with _tlogger.timed("checkout"):
+            subprocess.run(
+                ["git", "checkout", "-f", commit_hash],
+                cwd=project,
+                capture_output=True,
+                check=True,
+            )
 
     # checkout to the first commit
     commit_now = history[-1]
-    with _tlogger.timed("checkout"):
-        subprocess.run(
-            ["git", "checkout", "-f", commit_now.hash],
-            cwd=project,
-            capture_output=True,
-            check=True,
-        )
+    checkout_commit(commit_now.hash, force=True)
     proj = jedi.Project(path=project, added_sys_path=[project / "src"])
 
     # now we can get the first project state, although this not needed for now
@@ -399,21 +398,8 @@ def _edits_from_commit_history(
                 path_changes.append(Deleted(path1))
                 path_changes.append(Added(path2))
 
-        with _tlogger.timed("pre_edit_analysis"):
-            pre_analysis = change_encoder.pre_edit_analysis(
-                proj,
-                path2module,
-                path_changes,
-            )
+        checkout_commit(commit_next.hash)
 
-        # check out commit_next
-        with _tlogger.timed("checkout"):
-            subprocess.run(
-                ["git", "checkout", commit_next.hash],
-                cwd=project,
-                capture_output=True,
-                check=True,
-            )
         proj = jedi.Project(path=project, added_sys_path=[project / "src"])
 
         new_path2module = path2module.copy()
@@ -441,8 +427,18 @@ def _edits_from_commit_history(
             post_analysis = change_encoder.post_edit_analysis(
                 proj,
                 new_path2module,
-                path_changes,
+                changed,
             )
+
+        # now go backwards in time to perform pre-edit analysis
+        checkout_commit(commit_now.hash)
+        with _tlogger.timed("pre_edit_analysis"):
+            pre_analysis = change_encoder.pre_edit_analysis(
+                proj,
+                path2module,
+                changed,
+            )
+        checkout_commit(commit_next.hash)
 
         pchange = JProjectChange(changed, commit_next)
 
