@@ -36,6 +36,7 @@ from .code_change import (
     BasicTkQueryEdit,
     LineRange,
     ProjectChangeProcessor,
+    ProjectState,
     PyNode,
     JModuleChange,
     StatementSpan,
@@ -99,12 +100,12 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
 
     def pre_edit_analysis(
         self,
-        project: jedi.Project,
+        pstate: ProjectState,
         modules: Mapping[RelPath, JModule],
         changes: Mapping[ModuleName, JModuleChange],
     ) -> Mapping[ModuleName, LineUsageAnalysis]:
         "Return the definition usages of each line."
-        # proot = Path(project._path)
+        project = pstate.project
         result = dict[ModuleName, LineUsageAnalysis]()
 
         src_map = {m.mname: f for f, m in modules.items()}
@@ -120,10 +121,7 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                 lines_to_analyze.update(range(*span.header_line_range))
 
             mod_path = src_map[mname]
-            assert (
-                src_file := project.path / mod_path
-            ).exists(), f"src file missing: {src_file}"
-            script = jedi.Script(path=src_file, project=project)
+            script = pstate.scripts[mod_path]
             line_usages = self.analysis.get_line_usages(
                 script, project.path, lines_to_analyze, silent=True
             )
@@ -132,7 +130,7 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
 
     def post_edit_analysis(
         self,
-        project: jedi.Project,
+        pstate: ProjectState,
         modules: Mapping[RelPath, JModule],
         changes: Mapping[ModuleName, JModuleChange],
     ) -> list[ModuleName]:
@@ -140,11 +138,10 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
         # sort modules topologically
         module_deps = dict[ModuleName, set[ModuleName]]()
         for rel_path, module in modules.items():
-            assert (project.path / rel_path).exists()
-            script = jedi.Script(path=project._path / rel_path, project=project)
+            names = {n for n in module.imported_names}
+            script = pstate.scripts[rel_path]
             deps = module_deps.setdefault(module.mname, set())
-            for n in module.imported_names:
-                n = script._module_node.get_name_of_position(n.start_pos)
+            for n in names:
                 for source in fast_goto(
                     script, n, follow_imports=True, follow_builtin_imports=False
                 ):

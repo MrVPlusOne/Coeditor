@@ -298,7 +298,7 @@ class JModuleChange:
             return JModuleChange(module_change, changed)
 
 
-def get_python_files(project: RelPath) -> list[RelPath]:
+def get_python_files(project: Path) -> list[RelPath]:
     files = list[RelPath]()
     for f in recurse_find_python_files(FolderIO(str(project))):
         f: FileIO
@@ -327,13 +327,19 @@ class JProjectChange:
         return f"JProjectChange({commit}{self.changed})"
 
 
+@dataclass
+class ProjectState:
+    project: jedi.Project
+    scripts: Mapping[RelPath, jedi.Script]
+
+
 TProb = TypeVar("TProb", covariant=True)
 
 
 class ProjectChangeProcessor(Generic[TProb]):
     def pre_edit_analysis(
         self,
-        project: jedi.Project,
+        pstate: ProjectState,
         modules: Mapping[RelPath, JModule],
         changes: Mapping[ModuleName, JModuleChange],
     ) -> Any:
@@ -341,7 +347,7 @@ class ProjectChangeProcessor(Generic[TProb]):
 
     def post_edit_analysis(
         self,
-        project: jedi.Project,
+        pstate: ProjectState,
         modules: Mapping[RelPath, JModule],
         changes: Mapping[ModuleName, JModuleChange],
     ) -> Any:
@@ -412,9 +418,12 @@ def _edits_from_commit_history(
     ignore_dirs: set[str],
     silent: bool,
 ) -> Sequence[T1]:
-    def parse_module(path: Path, deep_copy: bool = False):
+    scripts = dict[RelPath, jedi.Script]()
+
+    def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
             s = jedi.Script(path=path, project=proj)
+            scripts[to_rel_path(path.relative_to(proj._path))] = s
             mcontext = s._get_module_context()
             assert isinstance(mcontext, ModuleContext)
             mname = cast(str, mcontext.py__name__())
@@ -425,9 +434,6 @@ def _edits_from_commit_history(
                 print_err(f"files in root: {files}", file=sys.stderr)
                 raise e
             m = s._module_node
-            if deep_copy:
-                m = copy.deepcopy(m)
-
             assert isinstance(m, ptree.Module)
             # mname = PythonProject.rel_path_to_module_name(path.relative_to(proj.path))
             # m = parso.parse(path.read_text())
@@ -446,11 +452,12 @@ def _edits_from_commit_history(
     commit_now = history[-1]
     checkout_commit(commit_now.hash, force=True)
     proj = jedi.Project(path=project, added_sys_path=[project / "src"])
+    pstate = ProjectState(proj, scripts)
 
     # now we can get the first project state, although this not needed for now
     # but we'll use it later for pre-edit analysis
     path2module = {
-        f: parse_module(project / f, deep_copy=False)
+        f: parse_module(project / f)
         for f in tqdm(
             get_python_files(project), desc="building initial project", disable=silent
         )
@@ -503,8 +510,6 @@ def _edits_from_commit_history(
 
         checkout_commit(commit_next.hash)
 
-        proj = jedi.Project(path=project, added_sys_path=[project / "src"])
-
         new_path2module = path2module.copy()
         changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
@@ -528,7 +533,7 @@ def _edits_from_commit_history(
 
         with _tlogger.timed("post_edit_analysis"):
             post_analysis = change_processor.post_edit_analysis(
-                proj,
+                pstate,
                 new_path2module,
                 changed,
             )
@@ -537,7 +542,7 @@ def _edits_from_commit_history(
         checkout_commit(commit_now.hash)
         with _tlogger.timed("pre_edit_analysis"):
             pre_analysis = change_processor.pre_edit_analysis(
-                proj,
+                pstate,
                 path2module,
                 changed,
             )
