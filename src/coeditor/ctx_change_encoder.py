@@ -37,6 +37,8 @@ from .code_change import (
     ProjectChangeProcessor,
     PyNode,
     JModuleChange,
+    StatementSpan,
+    _line_range,
 )
 from parso.python import tree as ptree
 from cachetools import FIFOCache
@@ -52,7 +54,7 @@ class CtxCodeChangeProblem:
     # most relevant to least relevant
     relevant_changes: list[ChangedSpan]
     # most relevant to least relevant
-    relevant_unchanged: list[tuple[ProjectPath, str]]
+    relevant_unchanged: list[ChangedSpan]
 
 
 PyFullName = NewType("PyPathStr", str)
@@ -69,7 +71,7 @@ class PyDefinition:
     end_pos: tuple[int, int]
 
     @staticmethod
-    def from_signatures(name: classes.BaseName) -> Iterable["PyDefinition"]:
+    def from_name(name: classes.BaseName) -> Iterable["PyDefinition"]:
         cast(classes.Name, name).is_definition()
         if (
             not name.in_builtin_module()
@@ -169,19 +171,39 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             for l in all_lines:
                 for pydef in line_usages.line2usages.get(l, set()):
                     if (
-                        pydef.full_name.startswith(pydef.import_module)
+                        pydef.full_name.startswith(path.module)
                         and pydef.start_pos[0] in all_lines
                     ):
                         # skip self references
                         continue
                     all_used.add(pydef)
 
-            result = list[tuple[ProjectPath, str]]()
+            result = list[ChangedSpan]()
             for used in all_used:
                 path = mod_hier.resolve_path(used.full_name.split("."))
                 if path is None:
                     continue
-                result.append((ProjectPath(used.full_name, ""), str(used)))
+                jmod = before_mod_map[path.module]
+                scope = jmod.as_scope
+                elem = scope._search_scope(path.path)
+                match elem:
+                    case ChangeScope(path=path, tree=ptree.Function()):
+                        ancestors = elem.ancestors()
+                        body_code = "    " * len(ancestors) + "..."
+                        h_end = elem.header_line_range[1]
+                        cspan = ChangedSpan(
+                            Modified.from_unchanged(body_code),
+                            [Modified.from_unchanged(s) for s in ancestors],
+                            _line_range(h_end, h_end + 1),
+                        )
+                        result.append(cspan)
+                    case _:
+                        cspan = ChangedSpan(
+                            Modified.from_unchanged(f"path={path}"),
+                            [Modified.from_unchanged(s) for s in elem.ancestors()],
+                            _line_range(0, 1),
+                        )
+                        result.append(cspan)
             return result
 
         sorted_cspans = list[ChangedSpan]()
@@ -268,12 +290,13 @@ class TkCtxCodeChangeEncoder:
         span = problem.span
         named_references = list[tuple[str, TokenSeq]]()
         # compute the references that are relevant to this span
-        relevant_chunks = self._group_encode_changed_refs(problem.relevant_changes)
+        # FIXME
+        # relevant_chunks = self._group_encode_changed_refs(problem.relevant_changes)
+        # for i, chunk in enumerate(relevant_chunks):
+        #     named_references.append((f"changed ref {i}", chunk))
+        relevant_chunks = self._group_encode_unchanged_refs(problem.relevant_unchanged)
         for i, chunk in enumerate(relevant_chunks):
-            named_references.append((f"changed ref {i}", chunk))
-        for i, (path, unchanged) in enumerate(problem.relevant_unchanged):
-            for j, ref in enumerate(self._encode_unchanged_ref(path, unchanged)):
-                named_references.append((f"unchanged ref {i}-{j}", ref))
+            named_references.append((f"unchanged ref {i}", chunk))
 
         diffs = change_to_line_diffs(span.change)
         original, delta = line_diffs_to_original_delta(diffs)
@@ -384,12 +407,8 @@ class TkCtxCodeChangeEncoder:
     ) -> TokenSeq:
         scope_tks = join_list((self._encode_scope_change(c) for c in scope_changes))
         if offset != 0:
-            ending = encode_basic(f"\n# offset: {offset}\n")
-        else:
-            ending = [Newline_id]
-        scope_tks = truncate_section(
-            scope_tks + ending, TruncateAt.Left, self.max_scope_tks
-        )
+            scope_tks.extend(encode_basic(f"# offset: {offset}\n"))
+        scope_tks = truncate_section(scope_tks, TruncateAt.Left, self.max_scope_tks)
         return scope_tks
 
     def _inline_some_context(
@@ -425,22 +444,17 @@ class TkCtxCodeChangeEncoder:
             input = truncated_above + input + truncated_below
         return input, above_ctx, below_ctx
 
-    def _encode_unchanged_ref(
-        self, path: ProjectPath, content: str
-    ) -> Iterable[TokenSeq]:
-        if (key := (path, content)) in self._value_cache:
-            return self._value_cache[key]
-        main_tks = encode_basic(f"#{str(path)}\n{content}")
-        ref_chunks = (truncate_section(main_tks, TruncateAt.Right, self.max_ref_tks),)
-        self._value_cache[key] = ref_chunks
-        return ref_chunks
-
     def _encode_change(self, change: Change[str]) -> TokenSeq:
         if (key := _ObjId(id(change))) in self._id_cache:
             return self._id_cache[key]
         change_tks = change_to_tokens(change)
         self._id_cache[key] = change_tks
         return change_tks
+
+    def _group_encode_unchanged_refs(
+        self, elems: Sequence[ChangedSpan]
+    ) -> Sequence[TokenSeq]:
+        return self._group_encode_changed_refs(elems)
 
     def _group_encode_changed_refs(
         self, changes: Sequence[ChangedSpan]
@@ -517,7 +531,7 @@ class JediUsageAnalyzer:
                     follow_builtin_imports=False,
                 )
                 for d in defs:
-                    usages.update(PyDefinition.from_signatures(d))
+                    usages.update(PyDefinition.from_name(d))
 
             except (AttributeError, AssertionError) as e:
                 text = repr(e)

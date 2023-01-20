@@ -6,7 +6,7 @@ import shutil
 import sys
 from coeditor.encoders import BasicTkQueryEdit
 from coeditor.encoding import change_to_line_diffs, line_diffs_to_original_delta
-from spot.static_analysis import ModuleName, ProjectPath, PythonProject
+from spot.static_analysis import ElemPath, ModuleName, ProjectPath, PythonProject
 from .common import *
 from .history import (
     Change,
@@ -57,7 +57,8 @@ class ChangeScope:
     path: ProjectPath
     tree: ScopeTree
     spans: Sequence["StatementSpan"]
-    subscopes: Mapping[ProjectPath, Self]
+    subscopes: Mapping[str, Self]
+    parent_scope: "ChangeScope | None"
 
     @cached_property
     def spans_code(self) -> str:
@@ -66,6 +67,31 @@ class ChangeScope:
     @cached_property
     def all_code(self) -> str:
         return self.header_code + self.spans_code
+
+    def _search(self, path: ElemPath, line: int) -> Self | "StatementSpan":
+        scope = self._search_scope(path)
+        if scope.header_line_range[0] <= line < scope.header_line_range[1]:
+            return scope
+        span = scope._search_span(line)
+        return span or scope
+
+    def _search_scope(self, path: ElemPath) -> Self:
+        """Find the scope that can potentially contain the given path. Follow the
+        path segments until no more subscopes are found."""
+        segs = path.split(".")
+        scope = self
+        for s in segs:
+            if s in scope.subscopes:
+                scope = scope.subscopes[s]
+            else:
+                break
+        return scope
+
+    def _search_span(self, line: int) -> "StatementSpan | None":
+        for span in self.spans:
+            if span.line_range[0] <= line < span.line_range[1]:
+                return span
+        return None
 
     def __post_init__(self):
         # compute header
@@ -101,11 +127,19 @@ class ChangeScope:
         self.header_code: str = header_code + "\n"
         self.header_line_range: _LineRange = header_line_range
 
+    def ancestors(self) -> list[Self]:
+        scope = self
+        result = [scope]
+        while scope := scope.parent_scope:
+            result.append(scope)
+        result.reverse()
+        return result
+
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
         spans = []
         subscopes = dict()
-        scope = ChangeScope(path, tree, spans, subscopes)
+        scope = ChangeScope(path, tree, spans, subscopes, None)
         assert isinstance(tree, ScopeTree)
         is_func = isinstance(tree, ptree.Function)
 
@@ -121,19 +155,21 @@ class ChangeScope:
                 current_stmts.append(s)
             else:
                 if current_stmts:
-                    spans.append(StatementSpan(current_stmts))
+                    spans.append(StatementSpan(current_stmts, scope))
                     current_stmts = []
         if current_stmts:
-            spans.append(StatementSpan(current_stmts))
+            spans.append(StatementSpan(current_stmts, scope))
 
         if is_func:
             # we don't create inner scopes for function contents
             return scope
         for stree in tree._search_in_scope(ptree.Function.type, ptree.Class.type):
             stree: ptree.Function | ptree.Class
-            spath = path.append(cast(ptree.Name, stree.name).value)
+            name = cast(ptree.Name, stree.name).value
+            spath = path.append(name)
             subscope = ChangeScope.from_tree(spath, stree)
-            subscopes[spath] = subscope
+            subscope.parent_scope = scope
+            subscopes[name] = subscope
         return scope
 
     def __repr__(self):
@@ -165,6 +201,7 @@ class StatementSpan:
     """
 
     statements: Sequence[PyNode]
+    scope: ChangeScope
 
     def __post_init__(self):
         assert self.statements
@@ -208,7 +245,8 @@ class JModule:
     mname: ModuleName
     tree: ptree.Module
 
-    def _to_scope(self) -> ChangeScope:
+    @cached_property
+    def as_scope(self) -> ChangeScope:
         return ChangeScope.from_tree(ProjectPath(self.mname, ""), self.tree)
 
     @cached_property
@@ -241,7 +279,7 @@ class JModuleChange:
         with _tlogger.timed("JModuleChange.from_modules"):
             changed = dict[ProjectPath, ChangedSpan]()
             for cspan in get_changed_spans(
-                module_change.map(lambda m: m._to_scope()), tuple()
+                module_change.map(lambda m: m.as_scope), tuple()
             ):
                 path = cspan.parent_scopes[-1].earlier().path
                 changed[path] = cspan

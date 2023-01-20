@@ -88,6 +88,7 @@ class Deleted(_ChangeBase[E1]):
 class Modified(_ChangeBase[E1]):
     before: E1
     after: E1
+    unchanged: bool = False
 
     def map(self, f: Callable[[E1], T2]) -> "Modified[T2]":
         return Modified(f(self.before), f(self.after))
@@ -101,6 +102,10 @@ class Modified(_ChangeBase[E1]):
     @staticmethod
     def as_char():
         return "M"
+
+    @staticmethod
+    def from_unchanged(v: T1) -> "Modified[T1]":
+        return Modified(v, v, unchanged=True)
 
 
 Change = Added[E1] | Deleted[E1] | Modified[E1]

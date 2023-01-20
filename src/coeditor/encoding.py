@@ -102,7 +102,10 @@ def change_to_line_diffs(change: Change[str]) -> list[str]:
     "Encode a change as a token sequence."
     match change:
         case Modified(before, after):
-            diffs = compute_line_diffs(splitlines(before), splitlines(after))
+            if change.unchanged:
+                diffs = []
+            else:
+                diffs = compute_line_diffs(splitlines(before), splitlines(after))
             # rearrange_diffs_(diffs)
             if not diffs:
                 # as a special case, `unified_diff` would return an empty when there is no change.

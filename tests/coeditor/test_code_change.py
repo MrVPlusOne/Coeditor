@@ -62,7 +62,7 @@ def test_change_scope():
         return x
         """
     )
-    f1_code = scope.subscopes[ProjectPath("code1", "f1")].spans_code
+    f1_code = scope.subscopes["f1"].spans_code
     assert_str_equal(f1_code, indent(f1_expect, " " * 4))
 
     f2_expect = dedent(
@@ -72,7 +72,7 @@ def test_change_scope():
             return 1
         """
     )
-    f2_code = scope.subscopes[ProjectPath("code1", "f2")].all_code
+    f2_code = scope.subscopes["f2"].all_code
     assert_str_equal(f2_code, f2_expect)
 
     attr1_expect = dedent(
@@ -80,7 +80,7 @@ def test_change_scope():
         attr1: int
         """
     )
-    attr1_code = scope.subscopes[ProjectPath("code1", "A")].spans_code
+    attr1_code = scope.subscopes["A"].spans_code
     assert_str_equal(attr1_code, indent(attr1_expect, " " * 4))
 
     method1_expect = dedent(
@@ -90,11 +90,7 @@ def test_change_scope():
             return 1
         """
     )
-    method1_code = (
-        scope.subscopes[ProjectPath("code1", "A")]
-        .subscopes[ProjectPath("code1", "A.method1")]
-        .all_code
-    )
+    method1_code = scope.subscopes["A"].subscopes["method1"].all_code
     assert_str_equal(method1_code, indent(method1_expect, " " * 4))
 
     inner_attr1_expect = dedent(
@@ -103,11 +99,7 @@ def test_change_scope():
             inner_attr1: int
         """
     )
-    inner_class_code = (
-        scope.subscopes[ProjectPath("code1", "A")]
-        .subscopes[ProjectPath("code1", "A.B")]
-        .all_code
-    )
+    inner_class_code = scope.subscopes["A"].subscopes["B"].all_code
     assert_str_equal(inner_class_code, indent(inner_attr1_expect, " " * 4))
 
 
