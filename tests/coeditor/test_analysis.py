@@ -1,0 +1,138 @@
+import pytest
+from coeditor.ctx_change_encoder import JediUsageAnalyzer, PyDefinition, PyFullName
+import jedi
+from coeditor.common import *
+
+from spot.utils import proj_root
+
+testcase_root = proj_root() / "tests" / "coeditor" / "testcases"
+
+
+def assert_has_usages(defs: Collection[PyDefinition], *full_names: str):
+    nameset = list(d.full_name for d in defs)
+    for name in full_names:
+        if PyFullName(name) not in nameset:
+            raise AssertionError(f"{name} not in {nameset}")
+
+
+def assert_no_usages(defs: Collection[PyDefinition], *full_names: str):
+    nameset = list(d.full_name for d in defs)
+    for name in full_names:
+        if PyFullName(name) in nameset:
+            raise AssertionError(f"{name} should not be in {nameset}")
+
+
+def test_anlayzing_defs():
+    analyzer = JediUsageAnalyzer()
+    project = jedi.Project(path=testcase_root, added_sys_path=[proj_root() / "src"])
+    script = jedi.Script(path=testcase_root / "defs.py", project=project)
+    analysis = analyzer.get_line_usages(
+        script, testcase_root, range(0, 46), silent=True
+    )
+
+    if analyzer.error_counts:
+        raise RuntimeError(f"Errors found: {analyzer.error_counts}")
+
+    assert_has_usages(
+        analysis.line2usages[10],
+        "defs.ScopeTree",
+        "parso.python.tree.Function",
+        "parso.python.tree.Class",
+        "parso.python.tree.Module",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[21],
+        "defs.ChangeScope.path",
+        "spot.static_analysis.ProjectPath",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[22],
+        "defs.ChangeScope.tree",
+        "defs.ScopeTree",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[23],
+        "defs.ChangeScope.spans",
+        "typing.Sequence",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[24],
+        "typing.Mapping",
+        "spot.static_analysis.ProjectPath",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[28],
+        "defs.ChangeScope.spans",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[31],
+        "spot.static_analysis.ProjectPath",
+        "defs.ScopeTree",
+        # "defs.ChangeScope",  # couldn't handle string annotations for now
+    )
+
+    assert_has_usages(
+        analysis.line2usages[40],
+        "parso.tree.BaseNode.__init__.children",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[42],
+        "parso.python.tree.PythonNode",
+        "parso.python.tree.Scope.get_suite",
+        # "parso.python.tree.BaseNode.children",
+    )
+
+
+def test_anlayzing_usages():
+    analyzer = JediUsageAnalyzer()
+    project = jedi.Project(path=testcase_root, added_sys_path=[proj_root() / "src"])
+    script = jedi.Script(path=testcase_root / "usages.py", project=project)
+    analysis = analyzer.get_line_usages(
+        script, testcase_root, range(0, 63), silent=True
+    )
+
+    if analyzer.error_counts:
+        raise RuntimeError(f"Errors found: {analyzer.error_counts}")
+
+    assert_has_usages(
+        analysis.line2usages[11],
+        "usages.JModule.tree",
+        "parso.python.tree.Module",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[13],
+        "usages.JModule._to_scope",
+        "defs.ChangeScope",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[14],
+        "usages.JModule.mname",
+        "usages.JModule.tree",
+        "defs.ChangeScope",
+        "defs.ChangeScope.from_tree",
+        "spot.static_analysis.ProjectPath",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[19],
+        "usages.JModule.iter_imports",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[21],
+        # "parso.python.tree.ImportFrom.get_from_names",
+    )
+
+    assert_has_usages(
+        analysis.line2usages[34],
+        "spot.utils.as_any",
+    )

@@ -21,6 +21,7 @@ from spot.static_analysis import (
     ProjectPath,
     PythonProject,
     sort_modules_by_imports,
+    ModuleHierarchy,
 )
 from .common import *
 import jedi, parso
@@ -42,7 +43,7 @@ from cachetools import FIFOCache
 import parso.tree as parso_tree
 import jedi.cache
 
-jedi.cache.clear_time_caches = lambda: None
+# jedi.cache.clear_time_caches = lambda: None
 
 
 @dataclass
@@ -87,9 +88,9 @@ class LineUsageAnalysis:
 
 
 class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]):
-    def __init__(self, analysis: "JediUsageAnalysis | None"):
+    def __init__(self, analysis: "JediUsageAnalyzer | None"):
         if analysis is None:
-            analysis = JediUsageAnalysis()
+            analysis = JediUsageAnalyzer()
         self.analysis = analysis
 
     def pre_edit_analysis(
@@ -111,8 +112,8 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             for span in mchange.changed.values():
                 if span.change is Added:
                     continue
-                start, end = span.line_range
-                lines_to_analyze.update(range(start, end + 1))
+                lines_to_analyze.update(range(*span.line_range))
+                lines_to_analyze.update(range(*span.header_line_range))
 
             mod_path = src_map[mname]
             assert (
@@ -153,6 +154,9 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
         mod2usages: Mapping[ModuleName, LineUsageAnalysis],
         module_order: Sequence[ModuleName],
     ) -> Iterable[CtxCodeChangeProblem]:
+        before_mod_map = {m.mname: m for m in pchange.all_modules.before}
+        mod_hier = ModuleHierarchy.from_modules(before_mod_map)
+
         def _get_relevant(span: ChangedSpan):
             if isinstance(span.change, Added):
                 # nothing to analyze
@@ -160,18 +164,23 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             path = span.parent_scopes[-1].earlier().path
             line_usages = mod2usages[path.module]
             all_used = set[PyDefinition]()
-            l_start, l_end = span.line_range
-            for l in range(l_start, l_end + 1):
+            all_lines = set(range(*span.line_range))
+            all_lines.update(range(*span.header_line_range))
+            for l in all_lines:
                 for pydef in line_usages.line2usages.get(l, set()):
                     if (
                         pydef.full_name.startswith(pydef.import_module)
-                        and l_start <= pydef.start_pos[0] <= l_end
+                        and pydef.start_pos[0] in all_lines
                     ):
+                        # skip self references
                         continue
                     all_used.add(pydef)
 
             result = list[tuple[ProjectPath, str]]()
             for used in all_used:
+                path = mod_hier.resolve_path(used.full_name.split("."))
+                if path is None:
+                    continue
                 result.append((ProjectPath(used.full_name, ""), str(used)))
             return result
 
@@ -373,9 +382,7 @@ class TkCtxCodeChangeEncoder:
     def _encode_parent_scopes(
         self, scope_changes: Sequence[Change[ChangeScope]], offset: int
     ) -> TokenSeq:
-        scope_tks = join_list(
-            (self._encode_scope_change(c) for c in scope_changes), sep=Newline_id
-        )
+        scope_tks = join_list((self._encode_scope_change(c) for c in scope_changes))
         if offset != 0:
             ending = encode_basic(f"\n# offset: {offset}\n")
         else:
@@ -474,9 +481,8 @@ class TkCtxCodeChangeEncoder:
 
 
 @dataclass
-class JediUsageAnalysis:
+class JediUsageAnalyzer:
     follow_imports: bool = True
-    only_same_project_usages: bool = False
 
     def __post_init__(self):
         self.error_counts = dict[str, int]()
@@ -511,11 +517,7 @@ class JediUsageAnalysis:
                     follow_builtin_imports=False,
                 )
                 for d in defs:
-                    key = _ObjId(id(d))
-                    if (defs := resolve_cache.get(key)) is None:
-                        defs = set(PyDefinition.from_signatures(d))
-                        resolve_cache[key] = defs
-                    usages.update(defs)
+                    usages.update(PyDefinition.from_signatures(d))
 
             except (AttributeError, AssertionError) as e:
                 text = repr(e)

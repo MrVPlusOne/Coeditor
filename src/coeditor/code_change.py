@@ -28,8 +28,23 @@ from jedi.inference.context import ModuleContext
 
 ScopeTree = ptree.Function | ptree.Class | ptree.Module
 PyNode = ptree.PythonBaseNode | ptree.PythonNode
+_LineRange = NewType("LineRange", tuple[int, int])
 
 _tlogger = TimeLogger()
+
+
+def _line_range(start: int, end: int, can_be_empty: bool = False) -> _LineRange:
+    if not can_be_empty and start >= end:
+        raise ValueError(f"Bad line range: {start=}, {end=}")
+    return _LineRange((start, end))
+
+
+def _strip_empty_lines(s: str):
+    s1 = s.lstrip("\n")
+    s2 = s1.rstrip("\n")
+    e_lines_left = len(s) - len(s1)
+    e_lines_right = len(s1) - len(s2)
+    return s2, e_lines_left, e_lines_right
 
 
 @dataclass
@@ -50,32 +65,41 @@ class ChangeScope:
 
     @cached_property
     def all_code(self) -> str:
-        return f"{self.header_code}\n{self.spans_code}"
+        return self.header_code + self.spans_code
 
-    @cached_property
-    def header_code(self) -> str:
+    def __post_init__(self):
+        # compute header
         if isinstance(self.tree, ptree.Module):
-            return f"# module: {self.path.module}"
-        # get the first non-empty line of self.tree
-        tree = self.tree
-        to_visit = []
-        parent = not_none(tree.parent)
-        while parent.type in ("decorated", "async_funcdef"):
-            to_visit.insert(0, parent.children[0])
-            parent = not_none(parent.parent)
-        to_visit.extend(tree.children)
+            header_code = f"# module: {self.path.module}"
+            header_line_range = _line_range(0, 0, can_be_empty=True)
+        else:
+            h_start, h_end = 0, 0
+            tree = self.tree
+            to_visit = list[NodeOrLeaf]()
+            parent = not_none(tree.parent)
+            while parent.type in ("decorated", "async_funcdef"):
+                to_visit.insert(0, parent.children[0])
+                parent = not_none(parent.parent)
+            to_visit.extend(tree.children)
+            visited = list[NodeOrLeaf]()
+            for c in to_visit:
+                if c.type == "suite":
+                    break
+                visited.append(c)
+            header_code = "".join(cast(str, c.get_code()) for c in visited)
+            header_code, _, e_right = _strip_empty_lines(header_code)
+            h_start = visited[0].start_pos[0]
+            h_end = visited[-1].end_pos[0] + 1 - e_right
+            assert_eq(count_lines(header_code) == h_end - h_start)
+            header_line_range = _line_range(h_start, h_end)
+            if self.spans and h_end > self.spans[0].line_range[0]:
+                raise ValueError(
+                    f"Header covers the fisrt span: {self.path=}, {h_start=}, {h_end=} "
+                    f"{self.spans[0].line_range=}"
+                )
 
-        snippets = list[str]()
-        for i, c in enumerate(to_visit):
-            if c.type == "suite":
-                break
-            snippet = cast(str, c.get_code())
-            if i == 0:
-                # remove leading newlines
-                snippet = snippet.lstrip("\n")
-            assert isinstance(snippet, str)
-            snippets.append(snippet)
-        return "".join(snippets)
+        self.header_code: str = header_code + "\n"
+        self.header_line_range: _LineRange = header_line_range
 
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
@@ -144,17 +168,17 @@ class StatementSpan:
 
     def __post_init__(self):
         assert self.statements
-        code = "".join(s.get_code() for s in self.statements)
-        n_lines_0 = count_lines(code)
-        code = code.lstrip("\n")
-        prefix_empty_lines = n_lines_0 - count_lines(code)
+        origin_code = "".join(s.get_code() for s in self.statements)
+        code, _, e_right = _strip_empty_lines(origin_code)
         start = self.statements[0].start_pos[0]
-        start += prefix_empty_lines
-        end = self.statements[-1].end_pos[0]
+        end = self.statements[-1].end_pos[0] + 1 - e_right
 
-        self._prefix_empty_lines: int = prefix_empty_lines
-        self.code: str = code
-        self.line_range: tuple[int, int] = (start, end)
+        self.code: str = code + "\n"
+        try:
+            self.line_range: _LineRange = _line_range(start, end)
+        except ValueError:
+            print_err(f"{origin_code=}, {e_right=}, {start=}, {end=}")
+            raise
 
 
 @dataclass
@@ -162,14 +186,19 @@ class ChangedSpan:
     "Represents the changes made to a statement span."
     change: Change[str]
     parent_scopes: Sequence[Change[ChangeScope]]
-    line_range: tuple[int, int]
-    old_statements: Sequence[PyNode]
+    line_range: _LineRange
 
     @property
-    def path(self):
+    def header_line_range(self) -> _LineRange:
+        parent_scope = self.parent_scopes[-1].earlier()
+        hrange = parent_scope.header_line_range
+        return hrange
+
+    @property
+    def path(self) -> ProjectPath:
         return self.parent_scopes[-1].earlier().path
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"ChangeSpan(scope={self.path}, range={self.line_range}, type={self.change.as_char()})"
 
 
@@ -238,6 +267,7 @@ class EditTarget:
 @dataclass
 class JProjectChange:
     changed: Mapping[ModuleName, JModuleChange]
+    all_modules: Modified[Collection[JModule]]
     commit_info: "CommitInfo | None"
 
     def __repr__(self) -> str:
@@ -359,7 +389,10 @@ def _edits_from_commit_history(
     # now we can get the first project state, although this not needed for now
     # but we'll use it later for pre-edit analysis
     path2module = {
-        RelPath(f): parse_module(project / f) for f in get_python_files(project)
+        RelPath(f): parse_module(project / f)
+        for f in tqdm(
+            get_python_files(project), desc="building initial project", disable=silent
+        )
     }
 
     def is_src(path_s: str) -> bool:
@@ -440,7 +473,8 @@ def _edits_from_commit_history(
             )
         checkout_commit(commit_next.hash)
 
-        pchange = JProjectChange(changed, commit_next)
+        modules_mod = Modified(path2module.values(), new_path2module.values())
+        pchange = JProjectChange(changed, modules_mod, commit_next)
 
         with _tlogger.timed("encode_change"):
             encs = change_encoder.encode_change(pchange, pre_analysis, post_analysis)
@@ -484,11 +518,12 @@ def get_changed_spans(
                     change,
                     parent_changes,
                     span.line_range,
-                    span.statements,
                 )
             line = line_range[1]
 
-    def recurse(scope_change, parent_changes) -> Iterable[ChangedSpan]:
+    def recurse(
+        scope_change: Change[ChangeScope], parent_changes
+    ) -> Iterable[ChangedSpan]:
         parent_changes = (*parent_changes, scope_change)
         match scope_change:
             case Modified(old_scope, new_scope):
@@ -505,7 +540,6 @@ def get_changed_spans(
                         code_change,
                         parent_changes,
                         span.line_range,
-                        span.statements,
                     )
                 for s in scope.subscopes.values():
                     s_change = scope_change.new_value(s)
