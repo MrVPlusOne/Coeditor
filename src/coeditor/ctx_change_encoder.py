@@ -152,7 +152,7 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
         module_order = sort_modules_by_imports(module_deps)
         return module_order
 
-    def encode_change(
+    def process_change(
         self,
         pchange: JProjectChange,
         mod2usages: Mapping[ModuleName, LineUsageAnalysis],

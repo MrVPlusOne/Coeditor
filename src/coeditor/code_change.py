@@ -298,11 +298,11 @@ class JModuleChange:
             return JModuleChange(module_change, changed)
 
 
-def get_python_files(project: Path):
-    files = list[Path]()
+def get_python_files(project: RelPath) -> list[RelPath]:
+    files = list[RelPath]()
     for f in recurse_find_python_files(FolderIO(str(project))):
         f: FileIO
-        files.append(Path(f.path).relative_to(project))
+        files.append(to_rel_path(Path(f.path).relative_to(project)))
     return files
 
 
@@ -327,10 +327,10 @@ class JProjectChange:
         return f"JProjectChange({commit}{self.changed})"
 
 
-TEnc = TypeVar("TEnc", covariant=True)
+TProb = TypeVar("TProb", covariant=True)
 
 
-class ProjectChangeProcessor(Generic[TEnc]):
+class ProjectChangeProcessor(Generic[TProb]):
     def pre_edit_analysis(
         self,
         project: jedi.Project,
@@ -347,14 +347,14 @@ class ProjectChangeProcessor(Generic[TEnc]):
     ) -> Any:
         return None
 
-    def encode_change(
+    def process_change(
         self, pchange: "JProjectChange", pre_analysis: Any, post_analysis: Any
-    ) -> Iterable[TEnc]:
+    ) -> Iterable[TProb]:
         ...
 
 
 class NoProcessing(ProjectChangeProcessor[JProjectChange]):
-    def encode_change(
+    def process_change(
         self,
         pchange: JProjectChange,
         pre_analysis,
@@ -367,16 +367,14 @@ def edits_from_commit_history(
     project_dir: Path,
     history: Sequence[CommitInfo],
     tempdir: Path,
-    change_encoder: ProjectChangeProcessor[TEnc] = NoProcessing(),
+    change_processor: ProjectChangeProcessor[TProb] = NoProcessing(),
+    edit_encoder: Callable[[TProb], Iterable[T1]] = lambda x: [x],
     ignore_dirs=DefaultIgnoreDirs,
     silent: bool = False,
-) -> Iterable[TEnc]:
+) -> Sequence[T1]:
     """Incrementally compute the edits to a project from the git history.
     Note that this will change the file states in the project directory, so
     you should make a copy of the project before calling this function.
-
-    Note that this returns an iterator, and the file state cleaning up will
-    only happen when the iterator is exhausted.
     """
     tempdir = tempdir.resolve()
     if tempdir.exists():
@@ -389,22 +387,32 @@ def edits_from_commit_history(
             cwd=project_dir.parent,
         )
 
-        yield from _edits_from_commit_history(
-            tempdir, history, change_encoder, ignore_dirs, silent
+        return _edits_from_commit_history(
+            tempdir, history, change_processor, edit_encoder, ignore_dirs, silent
         )
     finally:
         run_command(["rm", "-rf", str(tempdir)], cwd=tempdir.parent)
         jedi.settings.fast_parser = use_fast_parser
 
 
+def _deep_copy_subset_(dict: dict[T1, T2], keys: Collection[T1]) -> dict[T1, T2]:
+    "This is more efficient than deepcopying each value individually if they share common data."
+    to_copy = {k: dict[k] for k in keys}
+    copies = copy.deepcopy(to_copy)
+    for k in keys:
+        dict[k] = copies[k]
+    return dict
+
+
 def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
-    change_encoder: ProjectChangeProcessor[TEnc],
+    change_processor: ProjectChangeProcessor[TProb],
+    edit_encoder: Callable[[TProb], Iterable[T1]],
     ignore_dirs: set[str],
     silent: bool,
-) -> Iterable[TEnc]:
-    def parse_module(path: Path):
+) -> Sequence[T1]:
+    def parse_module(path: Path, deep_copy: bool = False):
         with _tlogger.timed("parse_module"):
             s = jedi.Script(path=path, project=proj)
             mcontext = s._get_module_context()
@@ -416,7 +424,10 @@ def _edits_from_commit_history(
                 print_err(f"project: {proj}", file=sys.stderr)
                 print_err(f"files in root: {files}", file=sys.stderr)
                 raise e
-            m = copy.deepcopy(s._module_node)  # needed due to reusing
+            m = s._module_node
+            if deep_copy:
+                m = copy.deepcopy(m)
+
             assert isinstance(m, ptree.Module)
             # mname = PythonProject.rel_path_to_module_name(path.relative_to(proj.path))
             # m = parso.parse(path.read_text())
@@ -439,7 +450,7 @@ def _edits_from_commit_history(
     # now we can get the first project state, although this not needed for now
     # but we'll use it later for pre-edit analysis
     path2module = {
-        RelPath(f): parse_module(project / f)
+        f: parse_module(project / f, deep_copy=False)
         for f in tqdm(
             get_python_files(project), desc="building initial project", disable=silent
         )
@@ -450,6 +461,7 @@ def _edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     future_commits = list(reversed(history[:-1]))
+    results = list[T1]()
     for commit_next in tqdm(
         future_commits, smoothing=0, desc="processing commits", disable=silent
     ):
@@ -481,6 +493,14 @@ def _edits_from_commit_history(
                 path_changes.append(Deleted(path1))
                 path_changes.append(Added(path2))
 
+        # make deep copys of changed modules
+        to_copy = {
+            to_rel_path(Path(path_change.before))
+            for path_change in path_changes
+            if not isinstance(path_change, Added)
+        }
+        _deep_copy_subset_(path2module, to_copy)
+
         checkout_commit(commit_next.hash)
 
         proj = jedi.Project(path=project, added_sys_path=[project / "src"])
@@ -489,7 +509,7 @@ def _edits_from_commit_history(
         changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
             path = project / path_change.earlier()
-            rel_path = RelPath(path.relative_to(project))
+            rel_path = to_rel_path(path.relative_to(project))
             match path_change:
                 case Added():
                     mod = parse_module(path)
@@ -507,7 +527,7 @@ def _edits_from_commit_history(
                     )
 
         with _tlogger.timed("post_edit_analysis"):
-            post_analysis = change_encoder.post_edit_analysis(
+            post_analysis = change_processor.post_edit_analysis(
                 proj,
                 new_path2module,
                 changed,
@@ -516,7 +536,7 @@ def _edits_from_commit_history(
         # now go backwards in time to perform pre-edit analysis
         checkout_commit(commit_now.hash)
         with _tlogger.timed("pre_edit_analysis"):
-            pre_analysis = change_encoder.pre_edit_analysis(
+            pre_analysis = change_processor.pre_edit_analysis(
                 proj,
                 path2module,
                 changed,
@@ -526,11 +546,16 @@ def _edits_from_commit_history(
         modules_mod = Modified(path2module.values(), new_path2module.values())
         pchange = JProjectChange(changed, modules_mod, commit_next)
 
-        with _tlogger.timed("encode_change"):
-            encs = change_encoder.encode_change(pchange, pre_analysis, post_analysis)
-            yield from encs
+        with _tlogger.timed("process_change"):
+            processed = list(
+                change_processor.process_change(pchange, pre_analysis, post_analysis)
+            )
+        with _tlogger.timed("change_encoder"):
+            for change in processed:
+                results.extend(edit_encoder(change))
         commit_now = commit_next
         path2module = new_path2module
+    return results
 
 
 def get_changed_spans(
