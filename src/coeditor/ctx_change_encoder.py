@@ -34,11 +34,12 @@ from .code_change import (
     JModule,
     JProjectChange,
     BasicTkQueryEdit,
+    LineRange,
     ProjectChangeProcessor,
     PyNode,
     JModuleChange,
     StatementSpan,
-    _line_range,
+    line_range,
 )
 from parso.python import tree as ptree
 from cachetools import FIFOCache
@@ -57,7 +58,7 @@ class CtxCodeChangeProblem:
     relevant_unchanged: list[ChangedSpan]
 
 
-PyFullName = NewType("PyPathStr", str)
+PyFullName = NewType("PyFullName", str)
 
 
 @dataclass(unsafe_hash=True)
@@ -72,7 +73,6 @@ class PyDefinition:
 
     @staticmethod
     def from_name(name: classes.BaseName) -> Iterable["PyDefinition"]:
-        cast(classes.Name, name).is_definition()
         if (
             not name.in_builtin_module()
             and (full_name := name.full_name)
@@ -81,6 +81,8 @@ class PyDefinition:
             and (end_pos := name.get_definition_end_position())
         ):
             full_name = PyFullName(full_name)
+            if not full_name.startswith(import_module):
+                raise ValueError(f"Inconsistent module: {full_name=}, {import_module=}")
             yield PyDefinition(full_name, import_module, start_pos, end_pos)
 
 
@@ -158,16 +160,73 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
     ) -> Iterable[CtxCodeChangeProblem]:
         before_mod_map = {m.mname: m for m in pchange.all_modules.before}
         mod_hier = ModuleHierarchy.from_modules(before_mod_map)
+        cspan_cache = dict[PyDefinition, list[ChangedSpan]]()
 
-        def _get_relevant(span: ChangedSpan):
-            if isinstance(span.change, Added):
+        def get_def_spans(used: PyDefinition) -> list[ChangedSpan]:
+            "Get the (pre-edit) spans for the given definition."
+            if used.full_name in cspan_cache:
+                return cspan_cache[used.full_name]
+            path = mod_hier.resolve_path(used.full_name.split("."))
+            cspans = list[ChangedSpan]()
+            if path is None:
+                cspan_cache[used] = cspans
+                return cspans
+            jmod = before_mod_map[path.module]
+            scope = jmod.as_scope
+            elem = scope._search(path.path, used.start_pos[0])
+            func_scopes = list[ChangeScope]()
+            stmt_spans = list[StatementSpan]()
+            match elem:
+                case ChangeScope(tree=ptree.Function()):
+                    func_scopes.append(elem)
+                case ChangeScope(tree=ptree.Class()):
+                    # add all attrs and methods
+                    stmt_spans.extend(elem.spans)
+                    func_scopes.extend(elem.subscopes.values())
+                case StatementSpan():
+                    stmt_spans.append(elem)
+
+            # add collapsed functions
+            for f_scope in func_scopes:
+                ancestors = f_scope.ancestors()
+                stmts = f_scope.spans[-1].statements
+                body_code = stmts[-1].get_code().strip("\n")
+                if len(stmts) > 1:
+                    ellipsis = "    " * (len(ancestors) - 1) + "# ...\n"
+                    body_code = ellipsis + body_code
+                h_end = f_scope.header_line_range[1]
+                cspan = ChangedSpan(
+                    Modified.from_unchanged(body_code),
+                    [Modified.from_unchanged(s) for s in ancestors],
+                    line_range(h_end, h_end + len(body_code)),
+                )
+                cspans.append(cspan)
+
+            # add statement spans
+            for stmt_span in stmt_spans:
+                ancestors = stmt_span.scope.ancestors()
+                body_code = stmt_span.code
+                cspan = ChangedSpan(
+                    Modified.from_unchanged(body_code),
+                    [Modified.from_unchanged(s) for s in ancestors],
+                    stmt_span.line_range,
+                )
+                cspans.append(cspan)
+
+            cspan_cache[used] = cspans
+            return cspans
+
+        def get_relevant_unchanged(
+            this_change: ChangedSpan, other_changes: Sequence[ChangedSpan]
+        ):
+            if isinstance(this_change.change, Added):
                 # nothing to analyze
                 return []
-            path = span.parent_scopes[-1].earlier().path
+            path = this_change.path
             line_usages = mod2usages[path.module]
-            all_used = set[PyDefinition]()
-            all_lines = set(range(*span.line_range))
-            all_lines.update(range(*span.header_line_range))
+            used_defs = set[PyDefinition]()
+            all_lines = set(range(*this_change.line_range))
+            all_lines.update(range(*this_change.header_line_range))
             for l in all_lines:
                 for pydef in line_usages.line2usages.get(l, set()):
                     if (
@@ -176,34 +235,19 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                     ):
                         # skip self references
                         continue
-                    all_used.add(pydef)
+                    used_defs.add(pydef)
 
+            # only keep unique changed spans
+            seen = set[tuple[ModuleName, LineRange]]()
+            for cspan in other_changes:
+                seen.add((cspan.path.module, cspan.line_range))
             result = list[ChangedSpan]()
-            for used in all_used:
-                path = mod_hier.resolve_path(used.full_name.split("."))
-                if path is None:
-                    continue
-                jmod = before_mod_map[path.module]
-                scope = jmod.as_scope
-                elem = scope._search_scope(path.path)
-                match elem:
-                    case ChangeScope(path=path, tree=ptree.Function()):
-                        ancestors = elem.ancestors()
-                        body_code = "    " * len(ancestors) + "..."
-                        h_end = elem.header_line_range[1]
-                        cspan = ChangedSpan(
-                            Modified.from_unchanged(body_code),
-                            [Modified.from_unchanged(s) for s in ancestors],
-                            _line_range(h_end, h_end + 1),
-                        )
+            for used in used_defs:
+                for cspan in get_def_spans(used):
+                    key = (cspan.path.module, cspan.line_range)
+                    if key not in seen:
                         result.append(cspan)
-                    case _:
-                        cspan = ChangedSpan(
-                            Modified.from_unchanged(f"path={path}"),
-                            [Modified.from_unchanged(s) for s in elem.ancestors()],
-                            _line_range(0, 1),
-                        )
-                        result.append(cspan)
+                        seen.add(key)
             return result
 
         sorted_cspans = list[ChangedSpan]()
@@ -212,10 +256,13 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                 continue
             for span in mchange.changed.values():
                 if span.change.as_char() == Modified.as_char():
+                    relevant_changes = sorted_cspans.copy()
                     yield CtxCodeChangeProblem(
                         span,
-                        relevant_changes=sorted_cspans.copy(),
-                        relevant_unchanged=_get_relevant(span),
+                        relevant_changes=relevant_changes,
+                        relevant_unchanged=get_relevant_unchanged(
+                            span, relevant_changes
+                        ),
                     )
                 sorted_cspans.append(span)
 
@@ -290,10 +337,9 @@ class TkCtxCodeChangeEncoder:
         span = problem.span
         named_references = list[tuple[str, TokenSeq]]()
         # compute the references that are relevant to this span
-        # FIXME
-        # relevant_chunks = self._group_encode_changed_refs(problem.relevant_changes)
-        # for i, chunk in enumerate(relevant_chunks):
-        #     named_references.append((f"changed ref {i}", chunk))
+        relevant_chunks = self._group_encode_changed_refs(problem.relevant_changes)
+        for i, chunk in enumerate(relevant_chunks):
+            named_references.append((f"changed ref {i}", chunk))
         relevant_chunks = self._group_encode_unchanged_refs(problem.relevant_unchanged)
         for i, chunk in enumerate(relevant_chunks):
             named_references.append((f"unchanged ref {i}", chunk))
@@ -496,8 +542,6 @@ class TkCtxCodeChangeEncoder:
 
 @dataclass
 class JediUsageAnalyzer:
-    follow_imports: bool = True
-
     def __post_init__(self):
         self.error_counts = dict[str, int]()
         self.tlogger: TimeLogger = TimeLogger()
@@ -516,7 +560,6 @@ class JediUsageAnalyzer:
         ]
         all_names.sort(key=lambda x: x.start_pos)
         errors = self.error_counts
-        resolve_cache = dict[_ObjId, set[PyDefinition]]()
         for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
             line = name.start_pos[0]
@@ -527,7 +570,7 @@ class JediUsageAnalyzer:
                 defs = fast_goto(
                     script,
                     name,
-                    follow_imports=self.follow_imports,
+                    follow_imports=True,
                     follow_builtin_imports=False,
                 )
                 for d in defs:

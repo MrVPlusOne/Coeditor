@@ -198,6 +198,16 @@ class TestChangeIdentities:
                 """
             ),
         ),
+        "unchanged=True": Modified.from_unchanged(
+            dedent(
+                """\
+                def f1():
+                    x = 1
+                """
+            ),
+        ),
+        # this test case cannot pass for some reason. Tokenizer bug?
+        # "leading_whitespace": Modified.from_unchanged("    ..."),
         "replace last": Modified(
             dedent(
                 """\

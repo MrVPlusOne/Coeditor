@@ -28,15 +28,15 @@ from jedi.inference.context import ModuleContext
 
 ScopeTree = ptree.Function | ptree.Class | ptree.Module
 PyNode = ptree.PythonBaseNode | ptree.PythonNode
-_LineRange = NewType("LineRange", tuple[int, int])
+LineRange = NewType("LineRange", tuple[int, int])
 
 _tlogger = TimeLogger()
 
 
-def _line_range(start: int, end: int, can_be_empty: bool = False) -> _LineRange:
+def line_range(start: int, end: int, can_be_empty: bool = False) -> LineRange:
     if not can_be_empty and start >= end:
         raise ValueError(f"Bad line range: {start=}, {end=}")
-    return _LineRange((start, end))
+    return LineRange((start, end))
 
 
 def _strip_empty_lines(s: str):
@@ -97,7 +97,7 @@ class ChangeScope:
         # compute header
         if isinstance(self.tree, ptree.Module):
             header_code = f"# module: {self.path.module}"
-            header_line_range = _line_range(0, 0, can_be_empty=True)
+            header_line_range = line_range(0, 0, can_be_empty=True)
         else:
             h_start, h_end = 0, 0
             tree = self.tree
@@ -117,7 +117,7 @@ class ChangeScope:
             h_start = visited[0].start_pos[0]
             h_end = visited[-1].end_pos[0] + 1 - e_right
             assert_eq(count_lines(header_code) == h_end - h_start)
-            header_line_range = _line_range(h_start, h_end)
+            header_line_range = line_range(h_start, h_end)
             if self.spans and h_end > self.spans[0].line_range[0]:
                 raise ValueError(
                     f"Header covers the fisrt span: {self.path=}, {h_start=}, {h_end=} "
@@ -125,7 +125,7 @@ class ChangeScope:
                 )
 
         self.header_code: str = header_code + "\n"
-        self.header_line_range: _LineRange = header_line_range
+        self.header_line_range: LineRange = header_line_range
 
     def ancestors(self) -> list[Self]:
         scope = self
@@ -155,10 +155,10 @@ class ChangeScope:
                 current_stmts.append(s)
             else:
                 if current_stmts:
-                    spans.append(StatementSpan(current_stmts, scope))
+                    spans.append(StatementSpan(len(spans), current_stmts, scope))
                     current_stmts = []
         if current_stmts:
-            spans.append(StatementSpan(current_stmts, scope))
+            spans.append(StatementSpan(len(spans), current_stmts, scope))
 
         if is_func:
             # we don't create inner scopes for function contents
@@ -200,11 +200,23 @@ class StatementSpan:
         the spans recursively generated.
     """
 
+    nth_in_parent: int
     statements: Sequence[PyNode]
     scope: ChangeScope
 
     def __post_init__(self):
         assert self.statements
+        # remove leading newlines
+        n_leading_newlines = 0
+        stmts = self.statements
+        for s in stmts:
+            if s.type == ptree.Newline.type:
+                n_leading_newlines += 1
+            else:
+                break
+        if n_leading_newlines:
+            self.statements = stmts[n_leading_newlines:]
+
         origin_code = "".join(s.get_code() for s in self.statements)
         code, _, e_right = _strip_empty_lines(origin_code)
         start = self.statements[0].start_pos[0]
@@ -212,7 +224,7 @@ class StatementSpan:
 
         self.code: str = code + "\n"
         try:
-            self.line_range: _LineRange = _line_range(start, end)
+            self.line_range: LineRange = line_range(start, end)
         except ValueError:
             print_err(f"{origin_code=}, {e_right=}, {start=}, {end=}")
             raise
@@ -223,10 +235,10 @@ class ChangedSpan:
     "Represents the changes made to a statement span."
     change: Change[str]
     parent_scopes: Sequence[Change[ChangeScope]]
-    line_range: _LineRange
+    line_range: LineRange
 
     @property
-    def header_line_range(self) -> _LineRange:
+    def header_line_range(self) -> LineRange:
         parent_scope = self.parent_scopes[-1].earlier()
         hrange = parent_scope.header_line_range
         return hrange
