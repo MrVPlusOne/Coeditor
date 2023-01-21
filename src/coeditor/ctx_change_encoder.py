@@ -58,6 +58,8 @@ class CtxCodeChangeProblem:
     relevant_changes: list[ChangedSpan]
     # most relevant to least relevant
     relevant_unchanged: list[ChangedSpan]
+    # some optional information about how the problem was generated
+    src_info: dict[str, Any]
 
 
 PyFullName = NewType("PyFullName", str)
@@ -251,21 +253,22 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                         seen.add(key)
             return result
 
-        sorted_cspans = list[ChangedSpan]()
+        processed_cspans = list[ChangedSpan]()
         for m in module_order:
             if (mchange := pchange.changed.get(m)) is None:
                 continue
             for span in mchange.changed.values():
                 if span.change.as_char() == Modified.as_char():
-                    relevant_changes = sorted_cspans.copy()
+                    relevant_changes = processed_cspans.copy()
                     yield CtxCodeChangeProblem(
                         span,
                         relevant_changes=relevant_changes,
                         relevant_unchanged=get_relevant_unchanged(
                             span, relevant_changes
                         ),
+                        src_info={"commit": pchange.commit_info},
                     )
-                sorted_cspans.append(span)
+                processed_cspans.append(span)
 
 
 @dataclass
@@ -276,6 +279,7 @@ class TkCtxCodeChangeProblem(TokenizedEdit):
     change_type: Change[None]
     # most relevant to least relevant
     named_references: Sequence[tuple[str, TokenSeq]]
+    src_info: dict[str, Any]
 
     @property
     def references(self) -> Sequence[TokenSeq]:
@@ -299,6 +303,7 @@ class TkCtxCodeChangeProblem(TokenizedEdit):
             f"path: {self.path}",
             f"n_references: {len(self.references)}",
             f"total_reference_tks: {sum(len(ref) for ref in self.references)}",
+            f"src_info: {self.src_info}",
         ]
 
     def stats(self) -> Mapping[str, int | float]:
@@ -401,6 +406,7 @@ class TkCtxCodeChangeEncoder:
                 path=span.parent_scopes[-1].earlier().path,
                 change_type=span.change.map(lambda _: None),
                 named_references=above_chunks + below_chunks + named_references,
+                src_info=problem.src_info,
             )
 
         for l in range(len(tk_delta.deltas) + 1):
