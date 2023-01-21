@@ -88,6 +88,14 @@ class PyDefinition:
             #     raise ValueError(f"Inconsistent module: {full_name=}, {import_module=}")
             yield PyDefinition(full_name, start_pos, end_pos)
 
+    @staticmethod
+    def from_scope(scope: ChangeScope) -> "PyDefinition":
+        path = scope.path
+        full_name = PyFullName(f"{path.module}.{path.path}")
+        start_pos = scope.header_line_range[0], 0
+        end_pos = scope.header_line_range[1], 0
+        return PyDefinition(full_name, start_pos, end_pos)
+
 
 @dataclass
 class LineUsageAnalysis:
@@ -227,7 +235,13 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                 return []
             path = this_change.path
             line_usages = mod2usages[path.module]
-            used_defs = set[PyDefinition]()
+            # parent defs are also considered as used
+            parent_defs = [
+                PyDefinition.from_scope(c.earlier()) for c in this_change.parent_scopes
+            ]
+            # immediate parents are more relevant
+            sorted_defs = list(reversed(parent_defs))
+            used_defs = set(sorted_defs)
             all_lines = set(range(*this_change.line_range))
             all_lines.update(range(*this_change.header_line_range))
             for l in all_lines:
@@ -238,14 +252,17 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                     ):
                         # skip self references
                         continue
-                    used_defs.add(pydef)
+                    if pydef not in used_defs:
+                        used_defs.add(pydef)
+                        sorted_defs.append(pydef)
 
-            # only keep unique changed spans
+            # return unique cspans
             seen = set[tuple[ModuleName, LineRange]]()
+            # consider other changes as seen
             for cspan in other_changes:
                 seen.add((cspan.path.module, cspan.line_range))
             result = list[ChangedSpan]()
-            for used in used_defs:
+            for used in sorted_defs:
                 for cspan in get_def_spans(used):
                     key = (cspan.path.module, cspan.line_range)
                     if key not in seen:
@@ -259,7 +276,8 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                 continue
             for span in mchange.changed.values():
                 if span.change.as_char() == Modified.as_char():
-                    relevant_changes = processed_cspans.copy()
+                    # latest changes are more relevant
+                    relevant_changes = list(reversed(processed_cspans))
                     yield CtxCodeChangeProblem(
                         span,
                         relevant_changes=relevant_changes,
@@ -532,6 +550,7 @@ class TkCtxCodeChangeEncoder:
                     file_tks.extend(header_tks)
                 body_tks = self._encode_change(c.change)
                 file_tks.extend(body_tks)
+                file_tks.append(Newline_id)
                 file_tks.append(Newline_id)
                 last_scope = c.parent_scopes
 
