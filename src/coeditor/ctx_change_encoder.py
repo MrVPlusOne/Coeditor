@@ -258,8 +258,8 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
 
             # return unique cspans
             seen = set[tuple[ModuleName, LineRange]]()
-            # consider other changes as seen
-            for cspan in other_changes:
+            # we don't need to show the changed parts again
+            for cspan in (this_change, *other_changes):
                 seen.add((cspan.path.module, cspan.line_range))
             result = list[ChangedSpan]()
             for used in sorted_defs:
@@ -466,7 +466,7 @@ class TkCtxCodeChangeEncoder:
     def _encode_scope_change(self, c: Change[ChangeScope]) -> TokenSeq:
         if (key := _ObjId(id(c))) in self._scope_cache:
             return self._scope_cache[key]
-        hchange = c.map(lambda s: s.header_code)
+        hchange = c.map(lambda s: s.header_code.strip("\n"))
         tks = truncate_section(
             change_to_tokens(hchange), TruncateAt.Left, self.max_scope_tks
         )
@@ -476,9 +476,13 @@ class TkCtxCodeChangeEncoder:
     def _encode_parent_scopes(
         self, scope_changes: Sequence[Change[ChangeScope]], offset: int
     ) -> TokenSeq:
-        scope_tks = join_list((self._encode_scope_change(c) for c in scope_changes))
+        scope_tks = join_list(
+            (self._encode_scope_change(c) for c in scope_changes), Newline_id
+        )
         if offset != 0:
-            scope_tks.extend(encode_basic(f"# offset: {offset}\n"))
+            scope_tks.extend(encode_basic(f"\n# offset: {offset}\n"))
+        else:
+            scope_tks.append(Newline_id)
         scope_tks = truncate_section(scope_tks, TruncateAt.Left, self.max_scope_tks)
         return scope_tks
 
@@ -518,6 +522,7 @@ class TkCtxCodeChangeEncoder:
     def _encode_change(self, change: Change[str]) -> TokenSeq:
         if (key := _ObjId(id(change))) in self._id_cache:
             return self._id_cache[key]
+        change = change.map(lambda s: s.strip("\n"))
         change_tks = change_to_tokens(change)
         self._id_cache[key] = change_tks
         return change_tks
