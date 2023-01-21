@@ -1,3 +1,4 @@
+import logging
 from os import PathLike
 from coeditor.encoders import has_change
 from coeditor.encoding import (
@@ -68,7 +69,6 @@ class PyDefinition:
     statement or the actual definition."""
 
     full_name: PyFullName
-    import_module: ModuleName
     start_pos: tuple[int, int]
     end_pos: tuple[int, int]
 
@@ -77,14 +77,14 @@ class PyDefinition:
         if (
             not name.in_builtin_module()
             and (full_name := name.full_name)
-            and (import_module := name.module_name)
+            # and (import_module := name.module_name)
             and (start_pos := name.get_definition_start_position())
             and (end_pos := name.get_definition_end_position())
         ):
             full_name = PyFullName(full_name)
-            if not full_name.startswith(import_module):
-                raise ValueError(f"Inconsistent module: {full_name=}, {import_module=}")
-            yield PyDefinition(full_name, import_module, start_pos, end_pos)
+            # if not full_name.startswith(import_module):
+            #     raise ValueError(f"Inconsistent module: {full_name=}, {import_module=}")
+            yield PyDefinition(full_name, start_pos, end_pos)
 
 
 @dataclass
@@ -179,7 +179,11 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                 case ChangeScope(tree=ptree.Class()):
                     # add all attrs and methods
                     stmt_spans.extend(elem.spans)
-                    func_scopes.extend(elem.subscopes.values())
+                    func_scopes.extend(
+                        s
+                        for s in elem.subscopes.values()
+                        if isinstance(s.tree, ptree.Function)
+                    )
                 case StatementSpan():
                     stmt_spans.append(elem)
 
@@ -557,6 +561,7 @@ class JediUsageAnalyzer:
         ]
         all_names.sort(key=lambda x: x.start_pos)
         errors = self.error_counts
+        unexpected = dict[str, int]()
         for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
             line = name.start_pos[0]
@@ -573,16 +578,31 @@ class JediUsageAnalyzer:
                 for d in defs:
                     usages.update(PyDefinition.from_name(d))
 
-            except (AttributeError, AssertionError) as e:
-                text = repr(e)
-                errors[text] = errors.setdefault(text, 0) + 1
-            except ValueError as e:
+            except Exception as e:
                 # if the message is "not enough values to unpack"
-                if "not enough values to unpack (expected 2" in str(e):
-                    errors[repr(e)] = errors.setdefault(str(e), 0) + 1
-                else:
-                    raise
+                err_text = repr(e)
+                is_known = any(err in err_text for err in _KnownJediErrors)
+                errors[err_text] = errors.setdefault(err_text, 0) + 1
+                if not is_known:
+                    unexpected[err_text] = unexpected.get(err_text, 0) + 1
+        if unexpected:
+            project_name = proj_root.name
+            if script.path:
+                file_path = script.path.relative_to(proj_root)
+            else:
+                file_path = "<unknown>"
+            for err, count in unexpected.items():
+                logging.warn(
+                    f"Unexpected error when analyzing '{project_name}/{file_path}' ({count=}): {err}"
+                )
         return LineUsageAnalysis(line2usages)
+
+
+_KnownJediErrors = {
+    "not enough values to unpack (expected 2",
+    "'Newline' object has no attribute 'children'",
+    "AssertionError('trailer_op is actually'",
+}
 
 
 def fast_goto(

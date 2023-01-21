@@ -60,6 +60,48 @@ class ChangeScope:
     subscopes: Mapping[str, Self]
     parent_scope: "ChangeScope | None"
 
+    def __post_init__(self):
+        # compute header
+        if isinstance(self.tree, ptree.Module):
+            header_code = f"# module: {self.path.module}"
+            header_line_range = line_range(0, 0, can_be_empty=True)
+        else:
+            h_start, h_end = 0, 0
+            tree = self.tree
+            to_visit = list[NodeOrLeaf]()
+            parent = not_none(tree.parent)
+            while parent.type in ("decorated", "async_funcdef"):
+                to_visit.insert(0, parent.children[0])
+                parent = not_none(parent.parent)
+            to_visit.extend(tree.children)
+            visited = list[NodeOrLeaf]()
+            for c in to_visit:
+                if c.type == "suite":
+                    break
+                visited.append(c)
+            header_code = "".join(cast(str, c.get_code()) for c in visited)
+            header_code, e_left, e_right = _strip_empty_lines(header_code)
+            h_start = not_none(visited[0].get_start_pos_of_prefix())[0] + e_left
+            h_end = visited[-1].end_pos[0] + 1 - e_right
+            assert_eq(count_lines(header_code) == h_end - h_start)
+            header_line_range = line_range(h_start, h_end)
+            if self.spans and h_end > self.spans[0].line_range[0]:
+                raise ValueError(
+                    f"Header covers the fisrt span: {self.path=}, {h_start=}, {h_end=} "
+                    f"{self.spans[0].line_range=}"
+                )
+
+        self.header_code: str = header_code + "\n"
+        self.header_line_range: LineRange = header_line_range
+
+    def ancestors(self) -> list[Self]:
+        scope = self
+        result = [scope]
+        while scope := scope.parent_scope:
+            result.append(scope)
+        result.reverse()
+        return result
+
     @cached_property
     def spans_code(self) -> str:
         return "\n".join(s.code for s in self.spans)
@@ -93,48 +135,6 @@ class ChangeScope:
                 return span
         return None
 
-    def __post_init__(self):
-        # compute header
-        if isinstance(self.tree, ptree.Module):
-            header_code = f"# module: {self.path.module}"
-            header_line_range = line_range(0, 0, can_be_empty=True)
-        else:
-            h_start, h_end = 0, 0
-            tree = self.tree
-            to_visit = list[NodeOrLeaf]()
-            parent = not_none(tree.parent)
-            while parent.type in ("decorated", "async_funcdef"):
-                to_visit.insert(0, parent.children[0])
-                parent = not_none(parent.parent)
-            to_visit.extend(tree.children)
-            visited = list[NodeOrLeaf]()
-            for c in to_visit:
-                if c.type == "suite":
-                    break
-                visited.append(c)
-            header_code = "".join(cast(str, c.get_code()) for c in visited)
-            header_code, _, e_right = _strip_empty_lines(header_code)
-            h_start = visited[0].start_pos[0]
-            h_end = visited[-1].end_pos[0] + 1 - e_right
-            assert_eq(count_lines(header_code) == h_end - h_start)
-            header_line_range = line_range(h_start, h_end)
-            if self.spans and h_end > self.spans[0].line_range[0]:
-                raise ValueError(
-                    f"Header covers the fisrt span: {self.path=}, {h_start=}, {h_end=} "
-                    f"{self.spans[0].line_range=}"
-                )
-
-        self.header_code: str = header_code + "\n"
-        self.header_line_range: LineRange = header_line_range
-
-    def ancestors(self) -> list[Self]:
-        scope = self
-        result = [scope]
-        while scope := scope.parent_scope:
-            result.append(scope)
-        result.reverse()
-        return result
-
     @staticmethod
     def from_tree(path: ProjectPath, tree: ScopeTree) -> "ChangeScope":
         spans = []
@@ -142,6 +142,19 @@ class ChangeScope:
         scope = ChangeScope(path, tree, spans, subscopes, None)
         assert isinstance(tree, ScopeTree)
         is_func = isinstance(tree, ptree.Function)
+
+        def mk_span(stmts):
+            # remove leading newlines
+            n_leading_newlines = 0
+            for s in stmts:
+                if s.type == ptree.Newline.type:
+                    n_leading_newlines += 1
+                else:
+                    break
+            if n_leading_newlines:
+                stmts = stmts[n_leading_newlines:]
+            if stmts:
+                yield StatementSpan(len(spans), stmts, scope)
 
         current_stmts = []
         content = (
@@ -155,13 +168,15 @@ class ChangeScope:
                 current_stmts.append(s)
             else:
                 if current_stmts:
-                    spans.append(StatementSpan(len(spans), current_stmts, scope))
+                    spans.extend(mk_span(current_stmts))
                     current_stmts = []
         if current_stmts:
-            spans.append(StatementSpan(len(spans), current_stmts, scope))
+            spans.extend(mk_span(current_stmts))
 
         if is_func:
             # we don't create inner scopes for function contents
+            if not spans:
+                raise ValueError(f"Function with no spans: {path=}, {tree.get_code()=}")
             return scope
         for stree in tree._search_in_scope(ptree.Function.type, ptree.Class.type):
             stree: ptree.Function | ptree.Class
@@ -176,17 +191,21 @@ class ChangeScope:
         return f"ChangeScope(path={self.path}, type={self.tree.type})"
 
 
-_non_scope_stmt_types = {"decorated", "async_stmt"}
+_non_scope_stmt_types = {
+    "decorated",
+    "async_stmt",
+    ptree.Class.type,
+    ptree.Function.type,
+}
 
 
 def _is_scope_statement(stmt: PyNode) -> bool:
-    match stmt:
-        case ptree.PythonNode(type=node_type) if node_type not in _non_scope_stmt_types:
-            return stmt.children[0].type not in ptree._IMPORTS
-        case ptree.Flow():
-            return True
-        case _:
-            return False
+    """Will only return False for functions, classes, and import statments"""
+    if stmt.type in _non_scope_stmt_types:
+        return False
+    if stmt.type == "simple_stmt" and stmt.children[0].type in ptree._IMPORTS:
+        return False
+    return True
 
 
 @dataclass
@@ -206,27 +225,21 @@ class StatementSpan:
 
     def __post_init__(self):
         assert self.statements
-        # remove leading newlines
-        n_leading_newlines = 0
-        stmts = self.statements
-        for s in stmts:
-            if s.type == ptree.Newline.type:
-                n_leading_newlines += 1
-            else:
-                break
-        if n_leading_newlines:
-            self.statements = stmts[n_leading_newlines:]
-
         origin_code = "".join(s.get_code() for s in self.statements)
-        code, _, e_right = _strip_empty_lines(origin_code)
-        start = self.statements[0].start_pos[0]
+        code, e_left, e_right = _strip_empty_lines(origin_code)
+        start = not_none(self.statements[0].get_start_pos_of_prefix())[0] + e_left
         end = self.statements[-1].end_pos[0] + 1 - e_right
 
         self.code: str = code + "\n"
         try:
             self.line_range: LineRange = line_range(start, end)
         except ValueError:
-            print_err(f"{origin_code=}, {e_right=}, {start=}, {end=}")
+            print_err(f"{e_right=}, {start=}, {end=}")
+            print_err("Origin code:")
+            print_err(origin_code)
+            print_err("Stmts:")
+            for s in self.statements:
+                print_err(s)
             raise
 
 
@@ -334,6 +347,7 @@ class ProjectState:
 
 
 TProb = TypeVar("TProb", covariant=True)
+TEnc = TypeVar("TEnc", covariant=True)
 
 
 class ProjectChangeProcessor(Generic[TProb]):
@@ -374,10 +388,10 @@ def edits_from_commit_history(
     history: Sequence[CommitInfo],
     tempdir: Path,
     change_processor: ProjectChangeProcessor[TProb] = NoProcessing(),
-    edit_encoder: Callable[[TProb], Iterable[T1]] = lambda x: [x],
+    edit_encoder: Callable[[TProb], Iterable[TEnc]] = lambda x: [x],
     ignore_dirs=DefaultIgnoreDirs,
     silent: bool = False,
-) -> Sequence[T1]:
+) -> Sequence[TEnc]:
     """Incrementally compute the edits to a project from the git history.
     Note that this will change the file states in the project directory, so
     you should make a copy of the project before calling this function.
@@ -414,10 +428,10 @@ def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
     change_processor: ProjectChangeProcessor[TProb],
-    edit_encoder: Callable[[TProb], Iterable[T1]],
+    edit_encoder: Callable[[TProb], Iterable[TEnc]],
     ignore_dirs: set[str],
     silent: bool,
-) -> Sequence[T1]:
+) -> Sequence[TEnc]:
     scripts = dict[RelPath, jedi.Script]()
 
     def parse_module(path: Path):
@@ -439,7 +453,7 @@ def _edits_from_commit_history(
             # m = parso.parse(path.read_text())
             return JModule(mname, m)
 
-    def checkout_commit(commit_hash: str, force: bool = False):
+    def checkout_commit(commit_hash: str):
         with _tlogger.timed("checkout"):
             subprocess.run(
                 ["git", "checkout", "-f", commit_hash],
@@ -448,9 +462,13 @@ def _edits_from_commit_history(
                 check=True,
             )
 
+    # to ensure sure we are not accidentally overriding real code changes
+    if list(project.iterdir()) != [project / ".git"]:
+        raise FileExistsError(f"Directory '{project}' should contain only '.git'.")
+
     # checkout to the first commit
     commit_now = history[-1]
-    checkout_commit(commit_now.hash, force=True)
+    checkout_commit(commit_now.hash)
     proj = jedi.Project(path=project, added_sys_path=[project / "src"])
     pstate = ProjectState(proj, scripts)
 
@@ -468,7 +486,7 @@ def _edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     future_commits = list(reversed(history[:-1]))
-    results = list[T1]()
+    results = list[TEnc]()
     for commit_next in tqdm(
         future_commits, smoothing=0, desc="processing commits", disable=silent
     ):
