@@ -1,4 +1,4 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 import copy
 from functools import cached_property
 from os import PathLike
@@ -350,7 +350,10 @@ TProb = TypeVar("TProb", covariant=True)
 TEnc = TypeVar("TEnc", covariant=True)
 
 
-class ProjectChangeProcessor(Generic[TProb]):
+@dataclass
+class ProjectChangeProcessor(Generic[TProb], ABC):
+    VERSION = "1.0"
+
     def pre_edit_analysis(
         self,
         pstate: ProjectState,
@@ -367,9 +370,10 @@ class ProjectChangeProcessor(Generic[TProb]):
     ) -> Any:
         return None
 
+    @abstractmethod
     def process_change(
         self, pchange: "JProjectChange", pre_analysis: Any, post_analysis: Any
-    ) -> Iterable[TProb]:
+    ) -> Sequence[TProb]:
         ...
 
 
@@ -379,8 +383,8 @@ class NoProcessing(ProjectChangeProcessor[JProjectChange]):
         pchange: JProjectChange,
         pre_analysis,
         post_analysis,
-    ) -> Iterable[JProjectChange]:
-        yield pchange
+    ) -> Sequence[JProjectChange]:
+        return [pchange]
 
 
 def edits_from_commit_history(
@@ -399,8 +403,8 @@ def edits_from_commit_history(
     tempdir = tempdir.resolve()
     if tempdir.exists():
         raise FileExistsError(f"Workdir '{tempdir}' already exists.")
-    tempdir.mkdir(parents=True, exist_ok=False)
     use_fast_parser = jedi.settings.fast_parser
+    tempdir.mkdir(parents=True, exist_ok=False)
     try:
         run_command(
             ["cp", "-r", str(project_dir / ".git"), str(tempdir)],
@@ -411,7 +415,7 @@ def edits_from_commit_history(
             tempdir, history, change_processor, edit_encoder, ignore_dirs, silent
         )
     finally:
-        run_command(["rm", "-rf", str(tempdir)], cwd=tempdir.parent)
+        shutil.rmtree(tempdir)
         jedi.settings.fast_parser = use_fast_parser
 
 
@@ -436,6 +440,7 @@ def _edits_from_commit_history(
 
     def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
+            assert path.is_absolute(), f"Path is not absolute: {path=}"
             s = jedi.Script(path=path, project=proj)
             scripts[to_rel_path(path.relative_to(proj._path))] = s
             mcontext = s._get_module_context()
@@ -570,8 +575,8 @@ def _edits_from_commit_history(
         pchange = JProjectChange(changed, modules_mod, commit_next)
 
         with _tlogger.timed("process_change"):
-            processed = list(
-                change_processor.process_change(pchange, pre_analysis, post_analysis)
+            processed = change_processor.process_change(
+                pchange, pre_analysis, post_analysis
             )
         with _tlogger.timed("change_encoder"):
             for change in processed:

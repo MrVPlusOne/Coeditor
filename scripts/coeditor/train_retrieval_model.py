@@ -1,6 +1,7 @@
 import copy
 import os
 import warnings
+from coeditor.dataset import C3EditEncoder
 from coeditor.model import DecodingArgs
 from spot.utils import run_long_task
 from train_model import check_save_dir, TokenizedEditDataset
@@ -21,8 +22,7 @@ from prepare_data import make_or_load_datasets
 def train_model(
     dataset_name="medium",
     model_variant="-sig-analysis-post_usees",
-    encoder: QueryRefEditEncoder = QueryRefEditEncoder(),
-    drop_comments: bool = True,
+    encoder: C3EditEncoder = C3EditEncoder(),
     batch_args=BatchArgs.train_default(),
     test_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
@@ -40,9 +40,7 @@ def train_model(
     if not eval_only:
         check_save_dir(model_name)
 
-    datasets = make_or_load_datasets(
-        dataset_name, encoder, drop_comments=drop_comments, recreate_data=recreate_data
-    )
+    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=recreate_data)
 
     config_dict = {
         k: get_modified_args(v)
@@ -136,13 +134,12 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="xl",
-            model_variant="-bi-request-stub-comments-v4",
-            drop_comments=False,
+            model_variant="-c3-v1",
             train_args=TrainingArgs(
-                max_train_epochs=1,
+                max_train_epochs=2,
                 quicktest=False,
             ),
-            encoder=QueryRefEditEncoder(),  # (ast_mask_prob=0.06),
+            encoder=C3EditEncoder(),
             recreate_data=False,
             eval_only=False,
         )

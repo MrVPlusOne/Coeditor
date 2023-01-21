@@ -52,7 +52,8 @@ import jedi.cache
 
 
 @dataclass
-class CtxCodeChangeProblem:
+class C3Problem:
+    "Contextual code change prediction problem."
     span: ChangedSpan
     # most relevant to least relevant
     relevant_changes: list[ChangedSpan]
@@ -102,8 +103,10 @@ class LineUsageAnalysis:
     line2usages: Mapping[int, set[PyDefinition]]
 
 
-class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]):
-    def __init__(self, analysis: "JediUsageAnalyzer | None"):
+class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
+    VERSION = "1.0"
+
+    def __init__(self, analysis: "JediUsageAnalyzer | None" = None):
         if analysis is None:
             analysis = JediUsageAnalyzer()
         self.analysis = analysis
@@ -164,7 +167,7 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
         pchange: JProjectChange,
         mod2usages: Mapping[ModuleName, LineUsageAnalysis],
         module_order: Sequence[ModuleName],
-    ) -> Iterable[CtxCodeChangeProblem]:
+    ) -> Sequence[C3Problem]:
         before_mod_map = {m.mname: m for m in pchange.all_modules.before}
         mod_hier = ModuleHierarchy.from_modules(before_mod_map)
         cspan_cache = dict[PyDefinition, list[ChangedSpan]]()
@@ -271,6 +274,7 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
             return result
 
         processed_cspans = list[ChangedSpan]()
+        problems = list[C3Problem]()
         for m in module_order:
             if (mchange := pchange.changed.get(m)) is None:
                 continue
@@ -278,7 +282,7 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                 if span.change.as_char() == Modified.as_char():
                     # latest changes are more relevant
                     relevant_changes = list(reversed(processed_cspans))
-                    yield CtxCodeChangeProblem(
+                    prob = C3Problem(
                         span,
                         relevant_changes=relevant_changes,
                         relevant_unchanged=get_relevant_unchanged(
@@ -286,11 +290,14 @@ class CtxCodeChangeProblemGenerator(ProjectChangeProcessor[CtxCodeChangeProblem]
                         ),
                         src_info={"commit": pchange.commit_info},
                     )
+                    problems.append(prob)
                 processed_cspans.append(span)
+        return problems
 
 
 @dataclass
-class TkCtxCodeChangeProblem(TokenizedEdit):
+class TkC3Problem(TokenizedEdit):
+    "Tokenized contextual code change prediction problem."
     input_tks: TokenSeq
     output_tks: TokenSeq
     path: ProjectPath
@@ -304,7 +311,7 @@ class TkCtxCodeChangeProblem(TokenizedEdit):
         return [ref for name, ref in self.named_references]
 
     def __repr__(self):
-        return f"TkCtxCodeChangeProblem(path={self.path}, type={self.change_type.as_char()}, stats={self.stats()})"
+        return f"TkC3Problem(path={self.path}, type={self.change_type.as_char()}, stats={self.stats()})"
 
     @property
     def main_tks(self):
@@ -337,8 +344,8 @@ _ObjId = NewType("_ObjId", int)
 
 
 @dataclass
-class TkCtxCodeChangeEncoder:
-    VERSION = "0.0"
+class C3ProblemTokenizer:
+    VERSION = "1.0"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
@@ -354,10 +361,10 @@ class TkCtxCodeChangeEncoder:
         self._scope_cache = FIFOCache[_ObjId, TokenSeq](maxsize=1000)
         self._value_cache = FIFOCache[Any, Sequence[TokenSeq]](maxsize=1000)
 
-    def encode_problem(
+    def tokenize_problem(
         self,
-        problem: CtxCodeChangeProblem,
-    ) -> Iterable[TkCtxCodeChangeProblem]:
+        problem: C3Problem,
+    ) -> Iterable[TkC3Problem]:
         span = problem.span
         named_references = list[tuple[str, TokenSeq]]()
         # compute the references that are relevant to this span
@@ -418,7 +425,7 @@ class TkCtxCodeChangeEncoder:
             below_chunks = [
                 (f"below chunk {i}", chunk) for i, chunk in enumerate(below_chunks)
             ]
-            return TkCtxCodeChangeProblem(
+            return TkC3Problem(
                 scope_tks + chunk_input,
                 chunk_output,
                 path=span.parent_scopes[-1].earlier().path,
@@ -570,6 +577,8 @@ class TkCtxCodeChangeEncoder:
             all_chunks.extend(mod_chunks)
         return all_chunks
 
+    def __repr__(self):
+        return repr_modified_args(self)
 
 @dataclass
 class JediUsageAnalyzer:
@@ -631,7 +640,8 @@ class JediUsageAnalyzer:
 _KnownJediErrors = {
     "not enough values to unpack (expected 2",
     "'Newline' object has no attribute 'children'",
-    "AssertionError('trailer_op is actually'",
+    "trailer_op is actually <AssertStmt:",
+    "There's a scope that was not managed: <Module",
 }
 
 

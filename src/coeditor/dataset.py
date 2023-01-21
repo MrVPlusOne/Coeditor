@@ -1,29 +1,23 @@
-import numpy as np
-from coeditor.encoders import QueryRefEditEncoder
-from coeditor.encoding import (
-    AnalysisBasedEditEncoder,
-    Del_id,
-    FileBasedEditEncoder,
-    CstBasedEditEncoder,
-    EditEncoder,
-    TEdit,
-    TokenizedEdit,
-    Newline_id,
-    Add_id,
-    decode_tokens,
-    encode_basic,
+import shutil
+import tempfile
+from coeditor.code_change import ProjectChangeProcessor, edits_from_commit_history
+from coeditor.ctx_change_encoder import (
+    C3Problem,
+    C3ProblemGenerator,
+    C3ProblemTokenizer,
+    TkC3Problem,
 )
-from spot.data import output_ids_as_seqs
+from coeditor.encoding import TEdit
 from spot.utils import scalar_stats
 from .common import *
 from coeditor.history import (
     Added,
     CommitInfo,
-    ProjectEdit,
     get_commit_history,
-    edits_from_commit_history,
 )
-import pandas as pd
+import multiprocessing
+from spot.utils import pretty_print_dict
+import jedi.settings
 
 
 @dataclass
@@ -46,17 +40,6 @@ class TokenizedEditDataset(Generic[TEdit]):
         return TokenizedEditDataset(
             {repo: [f(e) for e in edits] for repo, edits in repos}
         )
-
-    # def per_repo_stats(self) -> pd.DataFrame:
-    #     rows = []
-    #     for repo, edits in self.project2edits.items():
-    #         avg_input_size = float(np.mean([len(e.input_tks) for e in edits]))
-    #         avg_output_size = float(np.mean([len(e.output_tks) for e in edits]))
-    #         stats = {"repo": repo.name, "n_edits": len(edits)}
-    #         [e.stats().items() for e in edits]
-    #         [e for e in edits]
-    #         rows.append(stats)
-    #     return pd.DataFrame(rows)
 
     def overall_stats(self) -> dict:
         all_edits = self.all_edits()
@@ -85,46 +68,55 @@ class TokenizedEditDataset(Generic[TEdit]):
         return TokenizedEditDataset({path: list(edits)})
 
 
+@dataclass
+class C3EditEncoder:
+    change_processor: ProjectChangeProcessor[C3Problem] = field(
+        default_factory=C3ProblemGenerator
+    )
+    edit_tokenizer: C3ProblemTokenizer = field(default_factory=C3ProblemTokenizer)
+
+
 def _process_commits(
     root: Path,
+    workdir: Path,
     commits: Sequence[CommitInfo],
-    training: bool,
-    encoder: EditEncoder[T1],
-    drop_comments: bool,
-) -> list[T1]:
+    encoder: C3EditEncoder,
+) -> Sequence[TkC3Problem]:
+    # use process-specific parso cache
+    old_cache = jedi.settings.cache_directory
+    jedi.settings.cache_directory = workdir / "jedi_cache"
     try:
-        edits = list(
-            edits_from_commit_history(root, commits, drop_comments=drop_comments)
+        # cannot return here since subprocess will be killed after returning
+        return edits_from_commit_history(
+            root,
+            commits,
+            tempdir=workdir / "code",
+            change_processor=encoder.change_processor,
+            edit_encoder=encoder.edit_tokenizer.tokenize_problem,
+            silent=True,
         )
     except UnicodeDecodeError as e:
         # this might happen in rare cases
         warnings.warn(f"Unable to process project: {root}\nError: {e}")
         return []
-    tk_edits = list()
-    if isinstance(encoder, AnalysisBasedEditEncoder) or isinstance(
-        encoder, QueryRefEditEncoder
-    ):
-        tk_edits.extend(encoder.encode_pedits(edits, training))
-    else:
-        for pe in edits:
-            tk_edits.extend(encoder.encode_pedit(pe, training))
-    return tk_edits
+    finally:
+        jedi.settings.cache_directory = old_cache
 
 
 def dataset_from_projects(
     project_roots: Sequence[Path],
-    encoder: EditEncoder[TEdit],
+    encoder: C3EditEncoder,
     repo_training: Sequence[bool],
-    drop_comments: bool,
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
-) -> "TokenizedEditDataset[TEdit]":
+) -> "TokenizedEditDataset[TkC3Problem]":
     """
     Create a TokenizedEditDataset from a list of project roots and a given encoder.
     Args:
         - max_history_per_repo (int, optional): When the repo history is longer than
         this value, only the oldest portion is going to be used. Defaults to 1000.
     """
+    workdir = Path(tempfile.gettempdir()) / "dataset_from_projects"
     histories = pmap(
         get_commit_history,
         project_roots,
@@ -145,34 +137,35 @@ def dataset_from_projects(
             chunk_training.append(train)
             # note that we need 1 extra overlapping commit to get all diffs
             chunked_histories.append(h[i : i + history_chunk_size + 1])
-    tk_edits = pmap(
-        _process_commits,
-        roots,
-        chunked_histories,
-        chunk_training,
-        key_args={"encoder": encoder, "drop_comments": drop_comments},
-        desc="Create tokenized edits",
-        max_workers=workers,
-        tqdm_args={"unit": "chunk"},
-    )  # return type cannot be inferred correctly without using TypeVarTuple
-    project2edits = dict[Path, list[TEdit]]()
+    workdirs = [workdir / f"chunk-{i}" for i in range(len(roots))]
+    try:
+        tk_edits = pmap(
+            _process_commits,
+            roots,
+            workdirs,
+            chunked_histories,
+            key_args={"encoder": encoder},
+            desc="Create tokenized edits",
+            max_workers=workers,
+            tqdm_args={"unit": "chunk"},
+        )
+    finally:
+        if workdir.exists():
+            shutil.rmtree(workdir)
+            print("Workdir removed:", workdir)
+    project2edits = dict[Path, list[TkC3Problem]]()
     for root, edits in zip(roots, tk_edits):
-        edits = cast(list[TEdit], edits)
-        if root in project2edits:
-            project2edits[root].extend(edits)
-        else:
-            project2edits[root] = edits
+        project2edits.setdefault(root, []).extend(edits)
 
     return TokenizedEditDataset(project2edits)
 
 
 def datasets_from_repos(
     repos_root: Path,
-    encoder: EditEncoder[TEdit],
-    drop_comments: bool,
+    encoder: C3EditEncoder,
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
-) -> dict[str, TokenizedEditDataset[TEdit]]:
+) -> dict[str, TokenizedEditDataset[TkC3Problem]]:
     splits = ["test", "valid", "train"]
     projects = dict[str, list[Path]]()
     split_is_training = dict[str, list[bool]]()
@@ -190,12 +183,51 @@ def datasets_from_repos(
     dataset = dataset_from_projects(
         join_list(projects.values()),
         encoder=encoder,
-        drop_comments=drop_comments,
         repo_training=join_list(split_is_training.values()),
         max_history_per_repo=max_history_per_repo,
         workers=workers,
     )
     return {k: dataset.subset(v) for k, v in projects.items()}
+
+
+def make_or_load_datasets(
+    dataset_name: str,
+    encoder: C3EditEncoder,
+    recreate_data: bool = False,
+    workers: int = DefaultWorkers,
+) -> dict[str, TokenizedEditDataset[TkC3Problem]]:
+    config_str = (
+        repr_modified_args(encoder.change_processor)
+        + "-"
+        + repr_modified_args(encoder.edit_tokenizer)
+    )
+    save_dir = get_dataset_dir(dataset_name) / config_str
+
+    if recreate_data or not save_dir.exists():
+        if dataset_name == "SPOT":
+            datasets = {
+                "test": dataset_from_projects(
+                    [proj_root()], encoder, [False], workers=workers
+                )
+            }
+        else:
+            datasets = datasets_from_repos(
+                get_dataset_dir(dataset_name) / "repos",
+                encoder,
+                workers=workers,
+            )
+        with timed_action("Saving datasets to disk"):
+            save_datasets(datasets, save_dir)
+        print("Tokenized dataset saved to:", save_dir)
+        print("Dataset stats:")
+        for group, dataset in datasets.items():
+            print("=" * 20, group, "=" * 20)
+            pretty_print_dict(dataset.overall_stats())
+    else:
+        with timed_action("Loading datasets from disk"):
+            datasets = load_datasets(save_dir)
+
+    return datasets
 
 
 def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path) -> None:
