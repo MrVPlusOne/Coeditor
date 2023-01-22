@@ -768,7 +768,7 @@ def _select_ast_calls(
     node: ast.AST, path: ProjectPath
 ) -> Generator[ast.Call, None, None]:
     """Return all call nodes with the mathcing function name in the AST."""
-    segs = path.path.split(".")
+    segs = split_dots(path.path)
     if segs[-1] == "__init__":
         f_name = segs[-2]
     else:

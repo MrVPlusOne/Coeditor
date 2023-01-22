@@ -84,7 +84,7 @@ class ProjectPath(NamedTuple):
         return ProjectPath(self.module, new_path)
 
     def pop(self) -> "ProjectPath":
-        p1 = ".".join(self.path.split(".")[:-1])
+        p1 = ".".join(split_dots(self.path)[:-1])
         return ProjectPath(self.module, p1)
 
     @staticmethod
@@ -203,7 +203,7 @@ class PythonFunction:
         # follow the pytest rules (but ignore the method requirements):
         # https://docs.pytest.org/en/7.1.x/explanation/goodpractices.html#conventions-for-python-test-discovery
         return self.name.startswith("test") and (
-            (file := self.path.module.split(".")[-1]).startswith("test_")
+            (file := split_dots(self.path.module)[-1]).startswith("test_")
             or file.endswith("_test")
         )
 
@@ -696,9 +696,9 @@ def to_abs_import_path(
         if allow_implicit:
             yield path_join(path_up(current_mod), path)
         return
-    mod_segs = split_import_path(current_mod)
+    mod_segs = split_dots(current_mod)
     assert len(mod_segs) >= dots, "Cannot go up more levels."
-    result_segs = mod_segs[:-dots]
+    result_segs = list(mod_segs[:-dots])
     rest = path[dots:]
     if rest:
         result_segs.append(rest)
@@ -706,13 +706,8 @@ def to_abs_import_path(
 
 
 @cache
-def split_import_path(path: str):
-    return path.split(".")
-
-
-@cache
 def path_up(path: str) -> str:
-    segs = split_import_path(path)
+    segs = split_dots(path)
     return ".".join(segs[:-1])
 
 
@@ -743,7 +738,7 @@ class ModuleHierarchy:
     def __repr__(self):
         return f"ModuleNamespace({self.children})"
 
-    def add_module(self, segs: list[str]) -> None:
+    def add_module(self, segs: Sequence[str]) -> None:
         namespace = self
         for s in segs:
             if s in namespace.children:
@@ -752,7 +747,7 @@ class ModuleHierarchy:
                 namespace.children[s] = ModuleHierarchy()
                 namespace = namespace.children[s]
 
-    def has_module(self, segs: list[str]) -> bool:
+    def has_module(self, segs: Sequence[str]) -> bool:
         namespace = self
         for s in segs:
             if s in namespace.children:
@@ -761,7 +756,7 @@ class ModuleHierarchy:
                 return False
         return True
 
-    def resolve_path(self, segs: list[str]) -> ProjectPath | None:
+    def resolve_path(self, segs: Sequence[str]) -> ProjectPath | None:
         if len(segs) < 2:
             return None
         namespace = self
@@ -780,7 +775,7 @@ class ModuleHierarchy:
     def from_modules(modules: Iterable[str]) -> "ModuleHierarchy":
         root = ModuleHierarchy()
         for m in modules:
-            root.add_module(split_import_path(m))
+            root.add_module(split_dots(m))
         return root
 
 
@@ -1043,7 +1038,7 @@ class UsageAnalysis:
                 for abs_p in to_abs_import_path(
                     mname, qname.name, self.add_implicit_rel_imports
                 ):
-                    segs = split_import_path(abs_p)
+                    segs = split_dots(abs_p)
                     if len(segs) >= 2:
                         cls_path = self.ns_hier.resolve_path(segs)
                         break
@@ -1150,7 +1145,7 @@ class UsageAnalysis:
                 for abs_p in to_abs_import_path(
                     mname, qname.name, self.add_implicit_rel_imports
                 ):
-                    segs = split_import_path(abs_p)
+                    segs = split_dots(abs_p)
                     callee = self.ns_hier.resolve_path(segs)
                     if callee is None:
                         continue

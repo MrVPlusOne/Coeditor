@@ -23,6 +23,7 @@ from libcst.metadata import CodePosition, CodeRange
 import multiprocessing
 import textwrap
 from termcolor import colored
+from functools import cache
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm
@@ -928,3 +929,8 @@ def cprint(color: str, *elems, **print_args):
 
 def show_code_range(crange: CodeRange) -> str:
     return f"[{crange.start.line}:{crange.start.column+1}--{crange.end.line}:{crange.end.column+1}]"
+
+
+@cache
+def split_dots(path: str) -> tuple[str, ...]:
+    return tuple(path.split("."))

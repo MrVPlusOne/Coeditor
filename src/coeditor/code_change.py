@@ -120,7 +120,7 @@ class ChangeScope:
     def _search_scope(self, path: ElemPath) -> Self:
         """Find the scope that can potentially contain the given path. Follow the
         path segments until no more subscopes are found."""
-        segs = path.split(".")
+        segs = split_dots(path)
         scope = self
         for s in segs:
             if s in scope.subscopes:

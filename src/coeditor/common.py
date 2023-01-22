@@ -33,6 +33,7 @@ from spot.utils import (
     repr_modified_args,
     PickleCache,
 )
+from spot.static_analysis import split_dots
 from IPython.display import display, HTML
 import html
 import asyncio
