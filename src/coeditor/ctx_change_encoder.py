@@ -1,5 +1,3 @@
-import logging
-from os import PathLike
 from coeditor.encoders import has_change
 from coeditor.encoding import (
     Del_id,
@@ -20,7 +18,6 @@ from coeditor.history import Added, Change, Modified
 from spot.static_analysis import (
     ModuleName,
     ProjectPath,
-    PythonProject,
     sort_modules_by_imports,
     ModuleHierarchy,
 )
@@ -28,24 +25,20 @@ from .common import *
 import jedi, parso
 from parso.python import tree
 from jedi.api import helpers, convert_names, classes
-from jedi import cache
 from .code_change import (
     ChangeScope,
     ChangedSpan,
     JModule,
     JProjectChange,
-    BasicTkQueryEdit,
     LineRange,
     ProjectChangeProcessor,
     ProjectState,
-    PyNode,
     JModuleChange,
     StatementSpan,
     line_range,
 )
 from parso.python import tree as ptree
 from cachetools import FIFOCache
-import parso.tree as parso_tree
 import jedi.cache
 import jedi.parser_utils
 import parso.cache
@@ -66,7 +59,7 @@ class C3Problem:
 PyFullName = NewType("PyFullName", str)
 
 
-@dataclass(unsafe_hash=True)
+@dataclass(frozen=True)
 class PyDefinition:
     """Note that the module and positions can be referring to either the import
     statement or the actual definition."""
@@ -98,23 +91,26 @@ class PyDefinition:
         return PyDefinition(full_name, start_pos, end_pos)
 
 
-@dataclass
+@dataclass(frozen=True)
 class LineUsageAnalysis:
     line2usages: Mapping[int, set[PyDefinition]]
 
 
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
-    VERSION = "1.0"
+    VERSION = "1.1"
 
     def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
         if analyzer is None:
             analyzer = JediUsageAnalyzer()
         self.analyzer = analyzer
 
-    def get_errors(self) -> dict[str, int]:
-        return self.analyzer.error_counts
+    def __repr__(self) -> str:
+        return repr_modified_args(self)
 
-    def clear_errors(self):
+    def append_stats(self, stats: dict[str, Any]) -> None:
+        rec_add_dict_to(stats, {"analyzer_errors": self.analyzer.error_counts})
+
+    def clear_stats(self) -> None:
         return self.analyzer.error_counts.clear()
 
     def pre_edit_analysis(
@@ -161,9 +157,17 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             script = pstate.scripts[rel_path]
             deps = module_deps.setdefault(module.mname, set())
             for n in names:
-                for source in _fast_goto(
-                    script, n, follow_imports=True, follow_builtin_imports=False
-                ):
+                try:
+                    srcs = _fast_goto(
+                        script, n, follow_imports=True, follow_builtin_imports=False
+                    )
+                except Exception as e:
+                    if "There's a scope that was not managed:" in str(e):
+                        self.analyzer.add_error(str(e))
+                        continue
+                    else:
+                        raise
+                for source in srcs:
                     deps.add(source.module_name)
         module_order = sort_modules_by_imports(module_deps)
         return module_order
@@ -182,12 +186,11 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             "Get the (pre-edit) spans for the given definition."
             if used.full_name in cspan_cache:
                 return cspan_cache[used.full_name]
-            path = mod_hier.resolve_path(used.full_name.split("."))
+            path = mod_hier.resolve_path(split_dots(used.full_name))
             cspans = list[ChangedSpan]()
-            if path is None:
+            if path is None or (jmod := before_mod_map.get(path.module)) is None:
                 cspan_cache[used] = cspans
                 return cspans
-            jmod = before_mod_map[path.module]
             scope = jmod.as_scope
             elem = scope._search(path.path, used.start_pos[0])
             func_scopes = list[ChangeScope]()
@@ -589,6 +592,15 @@ class C3ProblemTokenizer:
 
 @dataclass
 class JediUsageAnalyzer:
+    _KnownJediErrors = {
+        "not enough values to unpack (expected 2",
+        "'Newline' object has no attribute 'children'",
+        "trailer_op is actually ",
+        "There's a scope that was not managed: <Module",
+        "maximum recursion depth exceeded",
+        "'NoneType' object has no attribute 'type'",
+    }
+
     def __post_init__(self):
         self.error_counts = dict[str, int]()
         self.tlogger: TimeLogger = TimeLogger()
@@ -606,8 +618,6 @@ class JediUsageAnalyzer:
             name for k, names in jmod.get_used_names()._dict.items() for name in names
         ]
         all_names.sort(key=lambda x: x.start_pos)
-        errors = self.error_counts
-        unexpected = dict[str, int]()
         for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
             line = name.start_pos[0]
@@ -624,35 +634,20 @@ class JediUsageAnalyzer:
                 for d in defs:
                     usages.update(PyDefinition.from_name(d))
 
-            except KeyError:
-                # for debugging
-                raise
             except Exception as e:
                 err_text = repr(e)
-                is_known = any(err in err_text for err in _KnownJediErrors)
-                errors[err_text] = errors.get(err_text, 0) + 1
-                if not is_known:
-                    unexpected[err_text] = unexpected.get(err_text, 0) + 1
-        if unexpected:
-            project_name = proj_root.name
-            if script.path:
-                file_path = script.path.relative_to(proj_root)
-            else:
-                file_path = "<unknown>"
-            for err, count in unexpected.items():
-                logging.warn(
-                    f"Unexpected error when analyzing '{project_name}/{file_path}' ({count=}): {err}"
-                )
+                str_limit = 40
+                if len(err_text) > str_limit:
+                    err_text = err_text[:str_limit] + "..."
+                self.add_error(err_text)
         return LineUsageAnalysis(line2usages)
 
+    def add_error(self, err_text: str):
+        self.error_counts[err_text] = self.error_counts.get(err_text, 0) + 1
 
-_KnownJediErrors = {
-    "not enough values to unpack (expected 2",
-    "'Newline' object has no attribute 'children'",
-    "trailer_op is actually <AssertStmt:",
-    "There's a scope that was not managed: <Module",
-    "maximum recursion depth exceeded",
-}
+    @staticmethod
+    def is_known_error(err_text: str):
+        return any(k in err_text for k in JediUsageAnalyzer._KnownJediErrors)
 
 
 def _fast_goto(

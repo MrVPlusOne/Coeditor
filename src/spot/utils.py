@@ -390,10 +390,14 @@ class TimeLogger:
         self.times[name].append(end - start)
 
     def as_dataframe(self):
-        names = list(self.times.keys())
-        total_times = [sum(ts) for ts in self.times.values()]
-        counts = [len(ts) for ts in self.times.values()]
-        avg_times = [sum(ts) / len(ts) for ts in self.times.values()]
+        return self.times_to_dataframe(self.times)
+
+    @staticmethod
+    def times_to_dataframe(times: dict[str, list[float]]):
+        names = list(times.keys())
+        total_times = [sum(ts) for ts in times.values()]
+        counts = [len(ts) for ts in times.values()]
+        avg_times = [sum(ts) / len(ts) for ts in times.values()]
 
         df = pd.DataFrame(
             {

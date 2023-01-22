@@ -1,10 +1,12 @@
 import shutil
 import tempfile
+import coeditor.code_change
 from coeditor.code_change import ProjectChangeProcessor, edits_from_commit_history
 from coeditor.ctx_change_encoder import (
     C3Problem,
     C3ProblemGenerator,
     C3ProblemTokenizer,
+    JediUsageAnalyzer,
     TkC3Problem,
     _fix_jedi_cache,
 )
@@ -78,7 +80,7 @@ class C3EditEncoder:
 @dataclass
 class _ProcessingResult:
     edits: Sequence[TkC3Problem]
-    processor_errors: dict[str, int]
+    stats: dict[str, dict | Any]
 
 
 def _process_commits(
@@ -89,6 +91,7 @@ def _process_commits(
 ) -> _ProcessingResult:
     # use process-specific parso cache
     _fix_jedi_cache(workdir)
+    coeditor.code_change._tlogger.clear()
     try:
         # cannot return here since subprocess will be killed after returning
         edits = edits_from_commit_history(
@@ -103,10 +106,10 @@ def _process_commits(
         # this might happen in rare cases
         warnings.warn(f"Unable to process project: {root}\nError: {e}")
         edits = []
-    return _ProcessingResult(
-        edits,
-        encoder.change_processor.get_errors(),
-    )
+    stats = dict()
+    encoder.change_processor.append_stats(stats)
+    rec_add_dict_to(stats, {"tlogger": coeditor.code_change._tlogger.times})
+    return _ProcessingResult(edits, stats)
 
 
 def dataset_from_projects(
@@ -159,16 +162,34 @@ def dataset_from_projects(
         if workdir.exists():
             shutil.rmtree(workdir)
             print("Workdir removed:", workdir)
+
     project2edits = dict[Path, list[TkC3Problem]]()
 
-    error_counts = dict[str, int]()
-    for root, pr in zip(roots, presults):
-        project2edits.setdefault(root, []).extend(pr.edits)
-        for k, v in pr.processor_errors.items():
-            error_counts[k] = error_counts.get(k, 0) + v
+    try:
+        stats = dict[str, Any]()
+        for root, pr in zip(roots, presults):
+            project2edits.setdefault(root, []).extend(pr.edits)
+            rec_add_dict_to(stats, pr.stats)
 
-    print("Processor Errors:")
-    pretty_print_dict(error_counts)
+        if "tlogger" in stats:
+            df = TimeLogger.times_to_dataframe(stats.pop("tlogger"))
+            print("Time stats:")
+            display(df)
+        if "analyzer_errors" in list(stats.keys()):
+            errors: dict = stats.pop("analyzer_errors")
+            for k in list(errors.keys()):
+                if JediUsageAnalyzer.is_known_error(k):
+                    errors.pop(k)
+            if errors:
+                print("Analyzer errors:")
+                for k in sorted(errors.keys(), reverse=True):
+                    print(f"{k}:\t{errors[k]}")
+        if stats:
+            print("Other Stats:")
+            pretty_print_dict(stats)
+    except Exception as e:
+        if not isinstance(e, KeyboardInterrupt):
+            print("Error while printing stats:", e)
 
     return TokenizedEditDataset(project2edits)
 

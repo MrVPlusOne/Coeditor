@@ -1,12 +1,16 @@
 from abc import ABC, abstractmethod
 import copy
 from functools import cached_property
-from os import PathLike
+import warnings
 import shutil
 import sys
-from coeditor.encoders import BasicTkQueryEdit
 from coeditor.encoding import change_to_line_diffs, line_diffs_to_original_delta
-from spot.static_analysis import ElemPath, ModuleName, ProjectPath, PythonProject
+from spot.static_analysis import (
+    ElemPath,
+    ModuleName,
+    ProjectPath,
+)
+from spot.utils import rec_iter_files
 from .common import *
 from .history import (
     Change,
@@ -15,13 +19,11 @@ from .history import (
     Deleted,
     get_named_changes,
     CommitInfo,
-    get_commit_history,
 )
 import jedi
 import jedi.settings
 from parso.python import tree as ptree
 from parso.tree import NodeOrLeaf
-import parso
 from jedi.inference.references import recurse_find_python_files
 from jedi.file_io import FileIO, FolderIO
 from jedi.inference.context import ModuleContext
@@ -352,8 +354,6 @@ TEnc = TypeVar("TEnc", covariant=True)
 
 @dataclass
 class ProjectChangeProcessor(Generic[TProb], ABC):
-    VERSION = "1.0"
-
     def pre_edit_analysis(
         self,
         pstate: ProjectState,
@@ -376,11 +376,11 @@ class ProjectChangeProcessor(Generic[TProb], ABC):
     ) -> Sequence[TProb]:
         ...
 
-    def clear_errors(self):
+    def clear_stats(self):
         return None
 
-    def get_errors(self) -> dict[str, int]:
-        return dict()
+    def append_stats(self, stats: dict[str, Any]) -> None:
+        return None
 
 
 class NoProcessing(ProjectChangeProcessor[JProjectChange]):
@@ -427,6 +427,7 @@ def edits_from_commit_history(
 
 def _deep_copy_subset_(dict: dict[T1, T2], keys: Collection[T1]) -> dict[T1, T2]:
     "This is more efficient than deepcopying each value individually if they share common data."
+    keys = {k for k in keys if k in dict}
     to_copy = {k: dict[k] for k in keys}
     copies = copy.deepcopy(to_copy)
     for k in keys:
@@ -485,11 +486,14 @@ def _edits_from_commit_history(
 
     # now we can get the first project state, although this not needed for now
     # but we'll use it later for pre-edit analysis
+    init_srcs = [
+        to_rel_path(f.relative_to(project))
+        for f in rec_iter_files(project, dir_filter=lambda d: d.name not in ignore_dirs)
+        if f.suffix == ".py"
+    ]
     path2module = {
         f: parse_module(project / f)
-        for f in tqdm(
-            get_python_files(project), desc="building initial project", disable=silent
-        )
+        for f in tqdm(init_srcs, desc="building initial project", disable=silent)
     }
 
     def is_src(path_s: str) -> bool:
@@ -507,7 +511,7 @@ def _edits_from_commit_history(
             cwd=project,
         ).splitlines()
 
-        path_changes = list[Change[str]]()
+        path_changes = set[Change[str]]()
 
         for line in changed_files:
             segs = line.split("\t")
@@ -516,18 +520,18 @@ def _edits_from_commit_history(
                 if not is_src(path):
                     continue
                 if tag.endswith("A"):
-                    path_changes.append(Added(path))
+                    path_changes.add(Added(path))
                 elif tag.endswith("D"):
-                    path_changes.append(Deleted(path))
+                    path_changes.add(Deleted(path))
                 if tag.endswith("M"):
-                    path_changes.append(Modified(path, path))
+                    path_changes.add(Modified(path, path))
             elif len(segs) == 3:
                 tag, path1, path2 = segs
                 assert tag.startswith("R")
                 if not is_src(path1) or not is_src(path2):
                     continue
-                path_changes.append(Deleted(path1))
-                path_changes.append(Added(path2))
+                path_changes.add(Deleted(path1))
+                path_changes.add(Added(path2))
 
         # make deep copys of changed modules
         to_copy = {
@@ -544,6 +548,12 @@ def _edits_from_commit_history(
         for path_change in path_changes:
             path = project / path_change.earlier()
             rel_path = to_rel_path(path.relative_to(project))
+            if not isinstance(path_change, Added) and rel_path not in new_path2module:
+                warnings.warn(f"No module for file: {project/rel_path}")
+                if isinstance(path_change, Deleted):
+                    continue
+                elif isinstance(path_change, Modified):
+                    path_change = Added(path_change.after)
             match path_change:
                 case Added():
                     mod = parse_module(path)
