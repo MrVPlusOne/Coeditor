@@ -292,13 +292,16 @@ def normalize_code_by_ast(
 
     class DocStringremover(ast.NodeTransformer):
         def visit_FunctionDef(self, node: ast.FunctionDef):
-            match node.body:
-                case [ast.Expr(value=ast.Constant(value=str())), *body]:
-                    node.body = body
-            return node
+            return self._visit_def(node)
+
+        def visit_Module(self, node: ast.Module) -> Any:
+            return self._visit_def(node)
 
         def visit_ClassDef(self, node: ast.ClassDef):
-            node = cast(ast.ClassDef, self.generic_visit(node))
+            return self._visit_def(node)
+
+        def _visit_def(self, node):
+            node = as_any(self.generic_visit(node))
             match node.body:
                 case [ast.Expr(value=ast.Constant(value=str())), *body]:
                     node.body = body
@@ -412,3 +415,22 @@ def assert_str_equal(actual: str, expect: str):
         diff = show_string_diff(expect, actual)
         print_err(diff)
         raise AssertionError("Strings didn't match.")
+
+
+def rec_add_dict_to(
+    target: dict[str, Any],
+    value: dict[str, Any],
+    value_merger: Callable[[Any, Any], Any] = lambda x, y: x + y,
+):
+    for k, v in value.items():
+        if isinstance(v, dict):
+            if k not in target:
+                target[k] = {}
+            rec_add_dict_to(target[k], v, value_merger)
+        elif isinstance(v, list):
+            target.setdefault(k, []).extend(v)
+        else:
+            if k in target:
+                target[k] = value_merger(target[k], v)
+            else:
+                target[k] = v
