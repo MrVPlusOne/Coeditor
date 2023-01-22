@@ -40,7 +40,7 @@ class _ChangeBase(Generic[E1]):
         ...
 
 
-@dataclass
+@dataclass(frozen=True)
 class Added(_ChangeBase[E1]):
     after: E1
 
@@ -62,7 +62,7 @@ class Added(_ChangeBase[E1]):
         return "A"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Deleted(_ChangeBase[E1]):
     before: E1
 
@@ -84,10 +84,11 @@ class Deleted(_ChangeBase[E1]):
         return "D"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Modified(_ChangeBase[E1]):
     before: E1
     after: E1
+    # Used for optimization. If False, `before`` may still equal to `after`.
     unchanged: bool = False
 
     def map(self, f: Callable[[E1], T2]) -> "Modified[T2]":
@@ -211,7 +212,7 @@ def to_modified_function(c: Change):
         return None
 
 
-@dataclass
+@dataclass(frozen=True)
 class ModuleEdit:
     before: PythonModule
     after: PythonModule
@@ -316,7 +317,7 @@ class ModuleEdit:
         return ModuleEdit(before, after, added, deleted, modified, changes)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProjectEdit:
     """An edit to a project."""
 
@@ -504,7 +505,7 @@ def _path_to_mod_name(path: str) -> ModuleName:
     return PythonProject.rel_path_to_module_name(Path(path))
 
 
-@dataclass
+@dataclass(frozen=True)
 class CommitInfo:
     hash: str
     parents: tuple[str, ...]
@@ -619,7 +620,7 @@ def get_change_path(c: Change[PythonElem]) -> ProjectPath:
 TAB = " " * 4
 
 
-@dataclass
+@dataclass(frozen=True)
 class ContextualEdit:
     main_change: Change[PythonElem]
     grouped_ctx_changes: dict[str, Sequence[Change[PythonElem]]]
@@ -651,7 +652,7 @@ class ContextualEdit:
                 print(TAB, "-" * 20, file=file)
 
 
-@dataclass
+@dataclass(frozen=True)
 class EditAnalysis:
     ctx_edits: Sequence[ContextualEdit]
     pedit: ProjectEdit

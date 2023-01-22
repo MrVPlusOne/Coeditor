@@ -243,7 +243,7 @@ class StatementSpan:
             raise
 
 
-@dataclass
+@dataclass(frozen=True)
 class ChangedSpan:
     "Represents the changes made to a statement span."
     change: Change[str]
@@ -289,7 +289,7 @@ class JModule:
         return names
 
 
-@dataclass
+@dataclass(frozen=True)
 class JModuleChange:
     module_change: Change[JModule]
     changed: Mapping[ProjectPath, ChangedSpan]
@@ -322,12 +322,12 @@ def get_python_files(project: Path) -> list[RelPath]:
 DefaultIgnoreDirs = {".venv", ".mypy_cache", ".git", "venv", "build"}
 
 
-@dataclass
+@dataclass(frozen=True)
 class EditTarget:
     lines: tuple[int, int]
 
 
-@dataclass
+@dataclass(frozen=True)
 class JProjectChange:
     changed: Mapping[ModuleName, JModuleChange]
     all_modules: Modified[Collection[JModule]]

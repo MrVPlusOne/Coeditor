@@ -23,7 +23,7 @@ class AnnotCat(enum.Enum):
     LocalVar = enum.auto()
 
 
-@dataclass(order=True, unsafe_hash=True)
+@dataclass(order=True, frozen=True)
 class AnnotPath:
     """The unique path of a type annoation."""
 

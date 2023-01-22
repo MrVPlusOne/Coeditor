@@ -252,7 +252,7 @@ V = TypeVar("V")
 W = TypeVar("W")
 
 
-@dataclass
+@dataclass(frozen=True)
 class WeightedSum(Generic[V, W]):
     sum: V
     weight: W

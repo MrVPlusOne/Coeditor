@@ -7,7 +7,7 @@ import subprocess
 from .utils import *
 
 
-@dataclass(unsafe_hash=True, order=True)
+@dataclass(frozen=True, order=True)
 class PythonType:
     head: tuple[str, ...]
     args: tuple["PythonType", ...] = ()

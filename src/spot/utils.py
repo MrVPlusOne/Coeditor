@@ -24,6 +24,7 @@ import multiprocessing
 import textwrap
 from termcolor import colored
 from functools import cache
+import warnings
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm
@@ -465,7 +466,7 @@ def get_pushover_config() -> dict[str, str] | None:
             case {"user": user, "token": token}:
                 return {"user": user, "token": token}
     if not _pushover_warned[0]:
-        logging.warning(
+        warnings.warn(
             f"No pushover config file found at {config_file}. Not able to push message."
         )
         _pushover_warned[0] = True
@@ -556,14 +557,14 @@ class PickleCache:
         if path.exists():
             path.unlink()
         else:
-            logging.warning(f"[PickleCache] File not found: '{path}'")
+            warnings.warn(f"[PickleCache] File not found: '{path}'")
 
     def clear(self):
         if self.cache_dir.exists():
             logging.info(f"Clearing cache: at: {self.cache_dir}")
             shutil.rmtree(self.cache_dir)
         else:
-            logging.warning(f"No cache found at: {self.cache_dir}, skip clearing.")
+            warnings.warn(f"No cache found at: {self.cache_dir}, skip clearing.")
 
 
 def assert_eq(x: T1, *xs: T1, extra_message: Callable[[], str] = lambda: "") -> None:

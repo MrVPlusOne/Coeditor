@@ -119,13 +119,13 @@ def change_to_line_diffs(change: Change[str]) -> list[str]:
     return diffs
 
 
-@dataclass
+@dataclass(frozen=True)
 class StrDelta:
     """Stores the line deltas for each line. A line delta is a list of added lines
     (starting with a '+') followed by optionally a `-` line
     (for deleting the current line)."""
 
-    deltas: list[tuple[str, ...]]
+    deltas: Sequence[tuple[str, ...]]
 
     def apply_to_input(self, input: str):
         lines = input.split("\n")
@@ -214,11 +214,11 @@ def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
     return input, str_delta
 
 
-@dataclass
+@dataclass(frozen=True)
 class TkDelta:
     """The Tokenized version of :class:`StrDelta`."""
 
-    deltas: list[tuple[TokenSeq, ...]]
+    deltas: Sequence[tuple[TokenSeq, ...]]
 
     def apply_to_input(self, input: TokenSeq):
         lines = split_list(input, Newline_id)

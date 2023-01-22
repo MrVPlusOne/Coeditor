@@ -734,7 +734,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
     def _reorder_cache(self, past, beam_idx):
         if past is None:
-            logging.warning(
+            warnings.warn(
                 "You might want to consider setting `use_cache=True` to speed up decoding"
             )
             return past

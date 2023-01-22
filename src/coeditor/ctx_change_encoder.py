@@ -301,7 +301,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         return problems
 
 
-@dataclass
+@dataclass(frozen=True)
 class TkC3Problem(TokenizedEdit):
     "Tokenized contextual code change prediction problem."
     input_tks: TokenSeq
