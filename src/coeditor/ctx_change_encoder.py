@@ -47,8 +47,8 @@ from parso.python import tree as ptree
 from cachetools import FIFOCache
 import parso.tree as parso_tree
 import jedi.cache
-
-# jedi.cache.clear_time_caches = lambda: None
+import jedi.parser_utils
+import parso.cache
 
 
 @dataclass
@@ -106,10 +106,16 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     VERSION = "1.0"
 
-    def __init__(self, analysis: "JediUsageAnalyzer | None" = None):
-        if analysis is None:
-            analysis = JediUsageAnalyzer()
-        self.analysis = analysis
+    def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
+        if analyzer is None:
+            analyzer = JediUsageAnalyzer()
+        self.analyzer = analyzer
+
+    def get_errors(self) -> dict[str, int]:
+        return self.analyzer.error_counts
+
+    def clear_errors(self):
+        return self.analyzer.error_counts.clear()
 
     def pre_edit_analysis(
         self,
@@ -135,7 +141,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
             mod_path = src_map[mname]
             script = pstate.scripts[mod_path]
-            line_usages = self.analysis.get_line_usages(
+            line_usages = self.analyzer.get_line_usages(
                 script, project.path, lines_to_analyze, silent=True
             )
             result[mname] = line_usages
@@ -155,7 +161,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             script = pstate.scripts[rel_path]
             deps = module_deps.setdefault(module.mname, set())
             for n in names:
-                for source in fast_goto(
+                for source in _fast_goto(
                     script, n, follow_imports=True, follow_builtin_imports=False
                 ):
                     deps.add(source.module_name)
@@ -580,6 +586,7 @@ class C3ProblemTokenizer:
     def __repr__(self):
         return repr_modified_args(self)
 
+
 @dataclass
 class JediUsageAnalyzer:
     def __post_init__(self):
@@ -608,7 +615,7 @@ class JediUsageAnalyzer:
                 continue
             usages = line2usages.setdefault(line, set())
             try:
-                defs = fast_goto(
+                defs = _fast_goto(
                     script,
                     name,
                     follow_imports=True,
@@ -617,11 +624,13 @@ class JediUsageAnalyzer:
                 for d in defs:
                     usages.update(PyDefinition.from_name(d))
 
+            except KeyError:
+                # for debugging
+                raise
             except Exception as e:
-                # if the message is "not enough values to unpack"
                 err_text = repr(e)
                 is_known = any(err in err_text for err in _KnownJediErrors)
-                errors[err_text] = errors.setdefault(err_text, 0) + 1
+                errors[err_text] = errors.get(err_text, 0) + 1
                 if not is_known:
                     unexpected[err_text] = unexpected.get(err_text, 0) + 1
         if unexpected:
@@ -642,10 +651,11 @@ _KnownJediErrors = {
     "'Newline' object has no attribute 'children'",
     "trailer_op is actually <AssertStmt:",
     "There's a scope that was not managed: <Module",
+    "maximum recursion depth exceeded",
 }
 
 
-def fast_goto(
+def _fast_goto(
     script: jedi.Script,
     tree_name: tree.Name,
     *,
@@ -694,3 +704,20 @@ def fast_goto(
     )
 
     return {classes.Name(script._inference_state, d) for d in set(names)}
+
+
+# fix jedi cache error
+def _get_parso_cache_node(grammar, path):
+    try:
+        return jedi.parser_utils.parser_cache[grammar._hashed].get(path)
+    except KeyError:
+        return None
+
+
+jedi.parser_utils.get_parso_cache_node = _get_parso_cache_node
+
+
+def _fix_jedi_cache(cache_dir: Path):
+    jedi.parser_utils.get_parso_cache_node = _get_parso_cache_node
+    jedi.settings.cache_directory = cache_dir / "jedi_cache"
+    parso.cache._default_cache_path = cache_dir / "parso_cache"

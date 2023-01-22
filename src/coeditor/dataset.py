@@ -6,6 +6,7 @@ from coeditor.ctx_change_encoder import (
     C3ProblemGenerator,
     C3ProblemTokenizer,
     TkC3Problem,
+    _fix_jedi_cache,
 )
 from coeditor.encoding import TEdit
 from spot.utils import scalar_stats
@@ -15,9 +16,7 @@ from coeditor.history import (
     CommitInfo,
     get_commit_history,
 )
-import multiprocessing
 from spot.utils import pretty_print_dict
-import jedi.settings
 
 
 @dataclass
@@ -76,18 +75,23 @@ class C3EditEncoder:
     edit_tokenizer: C3ProblemTokenizer = field(default_factory=C3ProblemTokenizer)
 
 
+@dataclass
+class _ProcessingResult:
+    edits: Sequence[TkC3Problem]
+    processor_errors: dict[str, int]
+
+
 def _process_commits(
     root: Path,
     workdir: Path,
     commits: Sequence[CommitInfo],
     encoder: C3EditEncoder,
-) -> Sequence[TkC3Problem]:
+) -> _ProcessingResult:
     # use process-specific parso cache
-    old_cache = jedi.settings.cache_directory
-    jedi.settings.cache_directory = workdir / "jedi_cache"
+    _fix_jedi_cache(workdir)
     try:
         # cannot return here since subprocess will be killed after returning
-        return edits_from_commit_history(
+        edits = edits_from_commit_history(
             root,
             commits,
             tempdir=workdir / "code",
@@ -98,9 +102,11 @@ def _process_commits(
     except UnicodeDecodeError as e:
         # this might happen in rare cases
         warnings.warn(f"Unable to process project: {root}\nError: {e}")
-        return []
-    finally:
-        jedi.settings.cache_directory = old_cache
+        edits = []
+    return _ProcessingResult(
+        edits,
+        encoder.change_processor.get_errors(),
+    )
 
 
 def dataset_from_projects(
@@ -139,7 +145,7 @@ def dataset_from_projects(
             chunked_histories.append(h[i : i + history_chunk_size + 1])
     workdirs = [workdir / f"chunk-{i}" for i in range(len(roots))]
     try:
-        tk_edits = pmap(
+        presults = pmap(
             _process_commits,
             roots,
             workdirs,
@@ -154,8 +160,15 @@ def dataset_from_projects(
             shutil.rmtree(workdir)
             print("Workdir removed:", workdir)
     project2edits = dict[Path, list[TkC3Problem]]()
-    for root, edits in zip(roots, tk_edits):
-        project2edits.setdefault(root, []).extend(edits)
+
+    error_counts = dict[str, int]()
+    for root, pr in zip(roots, presults):
+        project2edits.setdefault(root, []).extend(pr.edits)
+        for k, v in pr.processor_errors.items():
+            error_counts[k] = error_counts.get(k, 0) + v
+
+    print("Processor Errors:")
+    pretty_print_dict(error_counts)
 
     return TokenizedEditDataset(project2edits)
 

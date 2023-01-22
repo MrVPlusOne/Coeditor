@@ -376,6 +376,12 @@ class ProjectChangeProcessor(Generic[TProb], ABC):
     ) -> Sequence[TProb]:
         ...
 
+    def clear_errors(self):
+        return None
+
+    def get_errors(self) -> dict[str, int]:
+        return dict()
+
 
 class NoProcessing(ProjectChangeProcessor[JProjectChange]):
     def process_change(
