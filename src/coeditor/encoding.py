@@ -242,12 +242,12 @@ class TkDelta:
         return join_list(new_lines, Newline_id)
 
     def to_change_tks(self, input: TokenSeq) -> TokenSeq:
-        lines = split_list(input, Newline_id)
+        lines = split_list(input, Newline_id) if input else []
         if len(lines) > len(self.deltas):
-            print_err(f"{self.deltas}")
-            print_err(f"{input}")
+            print_err(f"{self.deltas=}")
+            print_err(f"{input=}")
             raise ValueError(
-                f"Delta is longer than input: {len(lines)=} > {len(self.deltas)=}"
+                f"Input is longer than delta: {len(lines)=} > {len(self.deltas)=}"
             )
         new_lines = list[TokenSeq]()
         for line, delta in zip(lines, self.deltas):
