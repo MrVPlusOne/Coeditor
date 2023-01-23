@@ -462,12 +462,13 @@ def _edits_from_commit_history(
 ) -> Sequence[TEnc]:
     start_time = time.time()
     scripts = dict[RelPath, jedi.Script]()
+    results = list[TEnc]()
 
     def has_timeouted():
         if time_limit and (time.time() - start_time > time_limit):
             warnings.warn(
-                f"_edits_from_commit_history timed out (limit={time_limit})."
-                "Partial results will be returned."
+                f"_edits_from_commit_history timed out for {project}. ({time_limit=}) "
+                f"Partial results ({len(results)}/{len(history)-1}) will be returned."
             )
             return True
         else:
@@ -529,7 +530,6 @@ def _edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     future_commits = list(reversed(history[:-1]))
-    results = list[TEnc]()
     for commit_next in tqdm(
         future_commits, smoothing=0, desc="processing commits", disable=silent
     ):
@@ -537,7 +537,14 @@ def _edits_from_commit_history(
             return results
         # get changed files
         changed_files = run_command(
-            ["git", "diff", commit_now.hash, commit_next.hash, "--name-status"],
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-status",
+                commit_now.hash,
+                commit_next.hash,
+            ],
             cwd=project,
         ).splitlines()
 
@@ -558,10 +565,10 @@ def _edits_from_commit_history(
             elif len(segs) == 3:
                 tag, path1, path2 = segs
                 assert tag.startswith("R")
-                if not is_src(path1) or not is_src(path2):
-                    continue
-                path_changes.add(Deleted(path1))
-                path_changes.add(Added(path2))
+                if is_src(path1):
+                    path_changes.add(Deleted(path1))
+                if is_src(path2):
+                    path_changes.add(Added(path2))
 
         # make deep copys of changed modules
         to_copy = {

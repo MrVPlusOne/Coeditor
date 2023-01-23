@@ -19,6 +19,7 @@ from coeditor.history import (
     get_commit_history,
 )
 from spot.utils import pretty_print_dict
+import traceback
 
 
 @dataclass
@@ -82,7 +83,9 @@ class _ProcessingResult:
     edits: Sequence[TkC3Problem]
     stats: dict[str, dict | Any]
 
-time_limit_per_commit = 5.0
+
+time_limit_per_commit = 10.0
+
 
 def _process_commits(
     root: Path,
@@ -111,6 +114,7 @@ def _process_commits(
         if isinstance(e, KeyboardInterrupt):
             raise
         warnings.warn(f"Failed to process project: {root}\nError: {e}")
+        traceback.print_exception(e, limit=-6)
         edits = []
     stats = dict()
     encoder.change_processor.append_stats(stats)
@@ -146,7 +150,7 @@ def dataset_from_projects(
     chunk_training = list[bool]()
     chunked_histories = list[list[CommitInfo]]()
     for root, h, train in zip(project_roots, histories, repo_training):
-        history_chunk_size = max(50, math.ceil(len(h) / 4))
+        history_chunk_size = max(50, math.ceil(len(h) / 10))
         for i in range(0, len(h), history_chunk_size):
             roots.append(root)
             chunk_training.append(train)

@@ -3,9 +3,10 @@ import logging
 from textwrap import indent
 
 from numpy import zeros_like
+from coeditor.ctx_change_encoder import TkC3Problem
 
 from coeditor.dataset import TokenizedEditDataset
-from coeditor.encoders import BasicTkQueryEdit, EditRequest, apply_output_tks_to_change
+from coeditor.encoders import EditRequest, apply_output_tks_to_change
 from coeditor.history import Change, Modified
 from coeditor.model import (
     DatasetDecodingResult,
@@ -101,10 +102,10 @@ class RetrievalModelPrediction(ModelPrediction):
     references: list[TokenSeq]
 
 
-class RetrievalDecodingResult(DatasetDecodingResult[BasicTkQueryEdit]):
+class RetrievalDecodingResult(DatasetDecodingResult[TkC3Problem]):
     @classmethod
     def show_prediction(
-        cls, edit: BasicTkQueryEdit | None, pred: RetrievalModelPrediction
+        cls, edit: TkC3Problem | None, pred: RetrievalModelPrediction
     ) -> str:
         def show_label(i: int):
             return f" <{i}>" if i <= 9 else f"<{i}>"
@@ -303,7 +304,6 @@ class RetrievalEditorModel(T5PreTrainedModel):
         self, data: TokenizedEditDataset, batch_args: "BatchArgs"
     ) -> dict[str, WeightedSum]:
         batch_args = copy.deepcopy(batch_args)
-        batch_args.max_ref_dropout = 0.0
         batch_args.shuffle_extra_ids = False
         eval_loader = edits_to_dataloader(
             data.all_edits(),
@@ -419,10 +419,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             )
             return [
                 PredictedChange(
-                    preds[g[0]],
-                    out_tks[g[0]],
-                    sum(weights[i] for i in g),
-                    len(g)
+                    preds[g[0]], out_tks[g[0]], sum(weights[i] for i in g), len(g)
                 )
                 for g in groups
             ]
@@ -521,7 +518,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             with torch.autocast("cuda"):
                 self.forward(as_any(input_ids), references, labels=as_any(labels))
 
-    def run_on_edits(self, edits: Sequence[BasicTkQueryEdit], batch_args: "BatchArgs"):
+    def run_on_edits(self, edits: Sequence[TkC3Problem], batch_args: "BatchArgs"):
         train_edits = edits
         assert len(train_edits) > 0, "No training edits provided."
 
@@ -1633,9 +1630,7 @@ class BatchArgs:
     max_queries: int = 8
     max_ref_tks: int = 512
     max_total_ref_tks: int = 512 * 16
-    max_ref_dropout: float = 1.0
     shuffle_extra_ids: bool = True
-    use_only_modified: bool = True
 
     def cost_limit(self) -> float:
         return self.min_queires * retrieval_cost_model(
@@ -1651,24 +1646,21 @@ class BatchArgs:
         return BatchArgs(
             max_total_ref_tks=512 * 32,
             max_queries=32,
-            max_ref_dropout=0.0,
             shuffle_extra_ids=False,
         )
 
     @classmethod
     def service_default(cls) -> Self:
         args = BatchArgs.eval_default()
-        # args.max_query_tks *= 2
-        # args.max_output_tks *= 2
         return args
 
 
-def query_edits_to_batches(
-    query_edits: Sequence[BasicTkQueryEdit],
+def tk_edits_to_batches(
+    query_edits: Sequence[TkC3Problem],
     args: BatchArgs,
     silent: bool = False,
 ) -> list[dict]:
-    def process_edit(e: BasicTkQueryEdit):
+    def process_edit(e: TkC3Problem):
         labels = e.output_tks
 
         labels = wrap_bos(labels)
@@ -1689,17 +1681,13 @@ def query_edits_to_batches(
     warned_batch_size = False
 
     def edits_to_batches(
-        edits: Sequence[BasicTkQueryEdit],
+        edits: Sequence[TkC3Problem],
     ) -> Iterable[dict]:
-        def down_sample(xs: list[TokenSeq]) -> list[TokenSeq]:
-            n = round(len(xs) * (1 - args.max_ref_dropout * random.random()))
-            return random_subset(xs, n, random._inst)
-
         def pack_batch(rows: list[dict]):
             assert rows, "empty batch found"
             input_ids = [x["input_tks"] for x in rows]
             labels = [x["output_tks"] for x in rows]
-            refs = [x["ref_selected"] for x in rows]
+            refs = [x["references"] for x in rows]
             id2ref = {id(ref): ref for row in refs for ref in row}
             references = [id2ref[x] for x in id2ref]
             id2order = {x: i for i, x in enumerate(id2ref)}
@@ -1715,36 +1703,7 @@ def query_edits_to_batches(
         current_batch = []
         current_cost = 0
         for edit in tqdm(edits, desc="edits_to_batches", disable=silent):
-            pedit = edit.tk_pedit
-            key_stubs = list[TokenSeq]()
-            rest_stubs = list[TokenSeq]()
-            id2ref_name = dict[int, str]()
-            if mstubs := pedit.module_stubs:
-                for m, segs in mstubs.items():
-                    for j, seg in enumerate(segs):
-                        id2ref_name[id(seg)] = f"{m}/{j}"
-                    if m == edit.path.module:
-                        key_stubs.extend(segs)
-                    else:
-                        rest_stubs.extend(segs)
-            key_refs = list[TokenSeq]()
-            rest_refs = list[TokenSeq]()
-            for path, segs in pedit.tk_references.items():
-                for j, seg in enumerate(segs):
-                    id2ref_name[id(seg)] = f"{path}/{j}"
-                if path.module == edit.path.module:
-                    if path != edit.path:
-                        key_refs.extend(segs)
-                else:
-                    rest_refs.extend(segs)
-            key_refs = down_sample(key_refs)
-            rest_refs = down_sample(rest_refs)
-            all_rest = rest_stubs + rest_refs
-            key_refs.sort(key=len)
-            random.shuffle(all_rest)
-            for j, seg in enumerate(edit.prev_chunks):
-                id2ref_name[id(seg)] = f"{j}"
-            all_refs = list(edit.prev_chunks) + key_refs + key_stubs + all_rest
+            all_refs = [x[1] for x in edit.named_references]
             ref_size_sum = 0
             ref_selected = list[TokenSeq]()
             for ref in all_refs:
@@ -1757,11 +1716,10 @@ def query_edits_to_batches(
                 query_size=len(input_tks),
                 output_size=len(output_tks),
             )
-            ref_selected.sort(key=lambda x: id2ref_name[id(x)])
             row = {
                 "input_tks": input_tks,
                 "output_tks": output_tks,
-                "ref_selected": ref_selected,
+                "references": ref_selected,
             }
             nonlocal warned_batch_size
             if cost > cost_limit and not warned_batch_size:
@@ -1795,7 +1753,7 @@ def query_edits_to_batches(
 
 @dataclass
 class _BatchSampler:
-    all_edits: list[BasicTkQueryEdit]
+    all_edits: list[TkC3Problem]
     batch_args: BatchArgs
     shuffle: bool
     desc: str
@@ -1811,13 +1769,13 @@ class _BatchSampler:
         return self._len_est
 
     def estimate_n_batches(self) -> int:
-        batches = query_edits_to_batches(self.all_edits, self.batch_args, silent=True)
+        batches = tk_edits_to_batches(self.all_edits, self.batch_args, silent=True)
         return len(batches)
 
     def __iter__(self) -> Iterable[Mapping]:
         if self.shuffle:
             random.shuffle(self.all_edits)
-        batches = query_edits_to_batches(self.all_edits, self.batch_args)
+        batches = tk_edits_to_batches(self.all_edits, self.batch_args)
         if self.shuffle:
             random.shuffle(batches)
 
@@ -1835,14 +1793,12 @@ class _BatchSampler:
 
 
 def edits_to_dataloader(
-    edits: Sequence[BasicTkQueryEdit],
+    edits: Sequence[TkC3Problem],
     args: BatchArgs,
     desc: str,
     shuffle: bool = False,
     tqdm_args: dict | None = None,
 ):
-    # if args.use_only_modified:
-    #     edits = [e for e in edits if isinstance(e.change_type, Modified)]
     assert edits
     return _BatchSampler(
         list(edits), args, shuffle=shuffle, desc=desc, tqdm_args=tqdm_args

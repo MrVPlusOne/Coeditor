@@ -38,7 +38,7 @@ from coeditor.retrieval_model import (
     RetrievalDecodingResult,
     RetrievalEditorModel,
     RetrievalModelPrediction,
-    query_edits_to_batches,
+    tk_edits_to_batches,
 )
 from spot.data import output_ids_as_seqs
 from spot.static_analysis import (
@@ -227,7 +227,7 @@ class EditPredictionService:
         self,
         project: Path,
         model: RetrievalEditorModel,
-        batch_args: BatchArgs = BatchArgs(max_ref_dropout=0.0, shuffle_extra_ids=False),
+        batch_args: BatchArgs = BatchArgs(shuffle_extra_ids=False),
         encoder: QueryRefEditEncoder = QueryRefEditEncoder(),
         dec_args: DecodingArgs = DecodingArgs(),
         config: ChangeDetectionConfig = ChangeDetectionConfig(),
@@ -328,7 +328,7 @@ class EditPredictionService:
             if qedits[0].tk_pedit.module_stubs:
                 print("stub files:", qedits[0].tk_pedit.module_stubs.keys())
             assert len(qedits) == 1
-            batches = query_edits_to_batches(qedits, self.batch_args)
+            batches = tk_edits_to_batches(qedits, self.batch_args)
             assert len(batches) == 1
             batch = batches[0]
 
@@ -502,8 +502,7 @@ class EditPredictionService:
 
         change_tks = change_to_tokens(code_change)
         new_change = apply_output_tks_to_change(change_tks, lines_with_comment, out_tks)
-        new_change.before = new_change.before.strip("\n")
-        new_change.after = new_change.after.strip("\n")
+        new_change = new_change.map(lambda s: s.strip("\n"))
         preview = self.preview_changes(new_change, lines_with_comment)
         return new_change, preview
 

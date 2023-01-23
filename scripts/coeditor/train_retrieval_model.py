@@ -136,7 +136,7 @@ if __name__ == "__main__":
             dataset_name="xl",
             model_variant="-c3-v1",
             train_args=TrainingArgs(
-                max_train_epochs=2,
+                max_train_epochs=1,
                 quicktest=False,
             ),
             encoder=C3EditEncoder(),
