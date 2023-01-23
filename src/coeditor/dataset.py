@@ -82,16 +82,20 @@ class _ProcessingResult:
     edits: Sequence[TkC3Problem]
     stats: dict[str, dict | Any]
 
+time_limit_per_commit = 5.0
 
 def _process_commits(
     root: Path,
     workdir: Path,
     commits: Sequence[CommitInfo],
+    is_training: bool,
     encoder: C3EditEncoder,
 ) -> _ProcessingResult:
     # use process-specific parso cache
     _fix_jedi_cache(workdir)
     coeditor.code_change._tlogger.clear()
+    encoder.change_processor.clear_stats()
+    encoder.change_processor.set_training(is_training)
     try:
         # cannot return here since subprocess will be killed after returning
         edits = edits_from_commit_history(
@@ -101,10 +105,12 @@ def _process_commits(
             change_processor=encoder.change_processor,
             edit_encoder=encoder.edit_tokenizer.tokenize_problem,
             silent=True,
+            time_limit=time_limit_per_commit * (len(commits) + 10),
         )
-    except UnicodeDecodeError as e:
-        # this might happen in rare cases
-        warnings.warn(f"Unable to process project: {root}\nError: {e}")
+    except Exception as e:
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        warnings.warn(f"Failed to process project: {root}\nError: {e}")
         edits = []
     stats = dict()
     encoder.change_processor.append_stats(stats)
@@ -153,6 +159,7 @@ def dataset_from_projects(
             roots,
             workdirs,
             chunked_histories,
+            chunk_training,
             key_args={"encoder": encoder},
             desc="Create tokenized edits",
             max_workers=workers,
@@ -182,7 +189,7 @@ def dataset_from_projects(
                     errors.pop(k)
             if errors:
                 print("Analyzer errors:")
-                for k in sorted(errors.keys(), reverse=True):
+                for k in sorted(errors.keys(), key=lambda k: errors[k], reverse=True):
                     print(f"{k}:\t{errors[k]}")
         if stats:
             print("Other Stats:")

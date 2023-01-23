@@ -314,7 +314,7 @@ def normalize_code_by_ast(
         if sort_keyargs:
             tree = KeyargSorter().visit(tree)
         return ast.unparse(tree)
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return code
 
 

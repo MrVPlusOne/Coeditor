@@ -666,7 +666,7 @@ def compute_line_diffs(
         sum(len(x) for x in before) > SizeLimit
         or sum(len(x) for x in after) > SizeLimit
     ):
-        compute_line_diffs_fast(before, after)
+        return compute_line_diffs_fast(before, after)
     differ = difflib.Differ()
     result = []
     for line in differ.compare(before, after):

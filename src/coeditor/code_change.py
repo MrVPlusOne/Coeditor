@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import copy
 from functools import cached_property
+import time
 import warnings
 import shutil
 import sys
@@ -262,6 +263,9 @@ class ChangedSpan:
     def path(self) -> ProjectPath:
         return self.parent_scopes[-1].earlier().path
 
+    def _is_func_body(self) -> bool:
+        return self.parent_scopes[-1].earlier().tree.type == ptree.Function.type
+
     def __repr__(self) -> str:
         return f"ChangeSpan(scope={self.path}, range={self.line_range}, type={self.change.as_char()})"
 
@@ -352,7 +356,6 @@ TProb = TypeVar("TProb", covariant=True)
 TEnc = TypeVar("TEnc", covariant=True)
 
 
-@dataclass
 class ProjectChangeProcessor(Generic[TProb], ABC):
     def pre_edit_analysis(
         self,
@@ -382,6 +385,9 @@ class ProjectChangeProcessor(Generic[TProb], ABC):
     def append_stats(self, stats: dict[str, Any]) -> None:
         return None
 
+    def set_training(self, is_training: bool) -> None:
+        return None
+
 
 class NoProcessing(ProjectChangeProcessor[JProjectChange]):
     def process_change(
@@ -401,6 +407,7 @@ def edits_from_commit_history(
     edit_encoder: Callable[[TProb], Iterable[TEnc]] = lambda x: [x],
     ignore_dirs=DefaultIgnoreDirs,
     silent: bool = False,
+    time_limit: float | None = None,
 ) -> Sequence[TEnc]:
     """Incrementally compute the edits to a project from the git history.
     Note that this will change the file states in the project directory, so
@@ -418,7 +425,13 @@ def edits_from_commit_history(
         )
 
         return _edits_from_commit_history(
-            tempdir, history, change_processor, edit_encoder, ignore_dirs, silent
+            tempdir,
+            history,
+            change_processor,
+            edit_encoder,
+            ignore_dirs,
+            silent,
+            time_limit=time_limit,
         )
     finally:
         shutil.rmtree(tempdir)
@@ -435,6 +448,9 @@ def _deep_copy_subset_(dict: dict[T1, T2], keys: Collection[T1]) -> dict[T1, T2]
     return dict
 
 
+_Second = float
+
+
 def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
@@ -442,8 +458,20 @@ def _edits_from_commit_history(
     edit_encoder: Callable[[TProb], Iterable[TEnc]],
     ignore_dirs: set[str],
     silent: bool,
+    time_limit: _Second | None,
 ) -> Sequence[TEnc]:
+    start_time = time.time()
     scripts = dict[RelPath, jedi.Script]()
+
+    def has_timeouted():
+        if time_limit and (time.time() - start_time > time_limit):
+            warnings.warn(
+                f"_edits_from_commit_history timed out (limit={time_limit})."
+                "Partial results will be returned."
+            )
+            return True
+        else:
+            return False
 
     def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
@@ -505,6 +533,8 @@ def _edits_from_commit_history(
     for commit_next in tqdm(
         future_commits, smoothing=0, desc="processing commits", disable=silent
     ):
+        if has_timeouted():
+            return results
         # get changed files
         changed_files = run_command(
             ["git", "diff", commit_now.hash, commit_next.hash, "--name-status"],
@@ -569,6 +599,8 @@ def _edits_from_commit_history(
                     changed[mod_new.mname] = JModuleChange.from_modules(
                         Modified(mod_old, mod_new)
                     )
+            if has_timeouted():
+                return results
 
         with _tlogger.timed("post_edit_analysis"):
             post_analysis = change_processor.post_edit_analysis(
@@ -576,6 +608,8 @@ def _edits_from_commit_history(
                 new_path2module,
                 changed,
             )
+        if has_timeouted():
+            return results
 
         # now go backwards in time to perform pre-edit analysis
         checkout_commit(commit_now.hash)

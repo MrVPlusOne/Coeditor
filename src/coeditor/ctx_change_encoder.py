@@ -97,12 +97,15 @@ class LineUsageAnalysis:
 
 
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
-    VERSION = "1.1"
+    VERSION = "1.2"
 
     def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
         if analyzer is None:
             analyzer = JediUsageAnalyzer()
+
         self.analyzer = analyzer
+        # whether to only generate problems for editing functions
+        self._is_training: bool = False
 
     def __repr__(self) -> str:
         return repr_modified_args(self)
@@ -112,6 +115,9 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
     def clear_stats(self) -> None:
         return self.analyzer.error_counts.clear()
+
+    def set_training(self, is_training: bool) -> None:
+        self._is_training = is_training
 
     def pre_edit_analysis(
         self,
@@ -162,11 +168,8 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                         script, n, follow_imports=True, follow_builtin_imports=False
                     )
                 except Exception as e:
-                    if "There's a scope that was not managed:" in str(e):
-                        self.analyzer.add_error(str(e))
-                        continue
-                    else:
-                        raise
+                    self.analyzer.add_error(str(e))
+                    continue
                 for source in srcs:
                     deps.add(source.module_name)
         module_order = sort_modules_by_imports(module_deps)
@@ -217,11 +220,10 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 if len(stmts) > 1:
                     ellipsis = "    " * (len(ancestors) - 1) + "# ...\n"
                     body_code = ellipsis + body_code
-                h_end = f_scope.header_line_range[1]
                 cspan = ChangedSpan(
                     Modified.from_unchanged(body_code),
                     [Modified.from_unchanged(s) for s in ancestors],
-                    line_range(h_end, h_end + len(body_code)),
+                    f_scope.spans[-1].line_range,
                 )
                 cspans.append(cspan)
 
@@ -288,7 +290,12 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             if (mchange := pchange.changed.get(m)) is None:
                 continue
             for span in mchange.changed.values():
-                if span.change.as_char() == Modified.as_char():
+                should_mk_problem = (span.change.as_char() == Modified.as_char()) and (
+                    # only consider function edits at test time
+                    self._is_training
+                    or span._is_func_body()
+                )
+                if should_mk_problem:
                     # latest changes are more relevant
                     relevant_changes = list(reversed(processed_cspans))
                     prob = C3Problem(
@@ -361,8 +368,8 @@ class C3ProblemTokenizer:
     max_scope_tks: int = 128
     max_lines_to_edit: int = 20
     ref_chunk_overlap: int = 32
-    max_chunks_per_ref: int = 4
-    max_lines_per_function: int = 500
+    max_total_ref_tks: int = 512 * 64  # a very large threshold
+    max_chunks_per_elem: int = 4
     skip_unchanged_problems: bool = True
 
     def __post_init__(self):
@@ -373,7 +380,7 @@ class C3ProblemTokenizer:
     def tokenize_problem(
         self,
         problem: C3Problem,
-    ) -> Iterable[TkC3Problem]:
+    ) -> Sequence[TkC3Problem]:
         span = problem.span
         named_references = list[tuple[str, TokenSeq]]()
         # compute the references that are relevant to this span
@@ -434,15 +441,24 @@ class C3ProblemTokenizer:
             below_chunks = [
                 (f"below chunk {i}", chunk) for i, chunk in enumerate(below_chunks)
             ]
+            all_refs = above_chunks + below_chunks + named_references
+            size_sum = 0
+            kept_refs = list[tuple[str, TokenSeq]]()
+            for (name, chunk) in all_refs:
+                if size_sum + len(chunk) <= self.max_total_ref_tks:
+                    size_sum += len(chunk)
+                    kept_refs.append((name, chunk))
+
             return TkC3Problem(
                 scope_tks + chunk_input,
                 chunk_output,
                 path=span.parent_scopes[-1].earlier().path,
                 change_type=span.change.map(lambda _: None),
-                named_references=above_chunks + below_chunks + named_references,
+                named_references=kept_refs,
                 src_info=problem.src_info,
             )
 
+        problems = list[TkC3Problem]()
         for l in range(len(tk_delta.deltas) + 1):
             finished = l == len(tk_delta.deltas)
             input_growth = len(origin_lines[l]) + 2 if l < len(origin_lines) else 1
@@ -452,7 +468,9 @@ class C3ProblemTokenizer:
                 or len(chunk_input) + input_growth > input_limit
             ):
                 if has_change(chunk_output):
-                    yield get_problem(chunk_input, chunk_output)
+                    problems.append(get_problem(chunk_input, chunk_output))
+                    if len(problems) >= self.max_chunks_per_elem:
+                        break
 
                 if finished:
                     break
@@ -478,6 +496,7 @@ class C3ProblemTokenizer:
             if line_change and line_change[-1] != Del_id:
                 chunk_output.append(Newline_id)
             chunk_lines += 1
+        return problems
 
     def _encode_scope_change(self, c: Change[ChangeScope]) -> TokenSeq:
         if (key := _ObjId(id(c))) in self._scope_cache:
@@ -581,7 +600,6 @@ class C3ProblemTokenizer:
                 lambda i: self._encode_parent_scopes(mod_change, i),
                 self.max_ref_tks,
                 overlap=self.ref_chunk_overlap,
-                max_return_chunks=self.max_chunks_per_ref,
             )
             all_chunks.extend(mod_chunks)
         return all_chunks
