@@ -108,6 +108,12 @@ class Modified(_ChangeBase[E1]):
     def from_unchanged(v: T1) -> "Modified[T1]":
         return Modified(v, v, unchanged=True)
 
+    def __repr__(self):
+        if self.before == self.after:
+            return f"Modified(before=after={repr(self.before)})"
+        else:
+            return f"Modified(before={repr(self.before)}, after={repr(self.after)})"
+
 
 Change = Added[E1] | Deleted[E1] | Modified[E1]
 

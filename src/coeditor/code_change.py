@@ -404,11 +404,10 @@ def edits_from_commit_history(
     history: Sequence[CommitInfo],
     tempdir: Path,
     change_processor: ProjectChangeProcessor[TProb] = NoProcessing(),
-    edit_encoder: Callable[[TProb], Iterable[TEnc]] = lambda x: [x],
     ignore_dirs=DefaultIgnoreDirs,
     silent: bool = False,
     time_limit: float | None = None,
-) -> Sequence[TEnc]:
+) -> Sequence[TProb]:
     """Incrementally compute the edits to a project from the git history.
     Note that this will change the file states in the project directory, so
     you should make a copy of the project before calling this function.
@@ -428,7 +427,6 @@ def edits_from_commit_history(
             tempdir,
             history,
             change_processor,
-            edit_encoder,
             ignore_dirs,
             silent,
             time_limit=time_limit,
@@ -455,14 +453,13 @@ def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
     change_processor: ProjectChangeProcessor[TProb],
-    edit_encoder: Callable[[TProb], Iterable[TEnc]],
     ignore_dirs: set[str],
     silent: bool,
     time_limit: _Second | None,
-) -> Sequence[TEnc]:
+) -> Sequence[TProb]:
     start_time = time.time()
     scripts = dict[RelPath, jedi.Script]()
-    results = list[TEnc]()
+    results = list[TProb]()
 
     def has_timeouted():
         if time_limit and (time.time() - start_time > time_limit):
@@ -635,9 +632,7 @@ def _edits_from_commit_history(
             processed = change_processor.process_change(
                 pchange, pre_analysis, post_analysis
             )
-        with _tlogger.timed("change_encoder"):
-            for change in processed:
-                results.extend(edit_encoder(change))
+            results.extend(processed)
         commit_now = commit_next
         path2module = new_path2module
     return results
