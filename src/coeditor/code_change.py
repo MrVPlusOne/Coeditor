@@ -335,6 +335,7 @@ class EditTarget:
 
 @dataclass(frozen=True)
 class JProjectChange:
+    project_name: str
     changed: Mapping[ModuleName, JModuleChange]
     all_modules: Modified[Collection[JModule]]
     commit_info: "CommitInfo | None"
@@ -626,7 +627,7 @@ def _edits_from_commit_history(
         checkout_commit(commit_next.hash)
 
         modules_mod = Modified(path2module.values(), new_path2module.values())
-        pchange = JProjectChange(changed, modules_mod, commit_next)
+        pchange = JProjectChange(project.name, changed, modules_mod, commit_next)
 
         with _tlogger.timed("process_change"):
             processed = change_processor.process_change(

@@ -39,7 +39,15 @@ def train_model(
     if not eval_only:
         check_save_dir(model_name)
 
-    datasets = make_or_load_datasets(dataset_name, encoder, recreate_data=recreate_data)
+    split2problems = make_or_load_datasets(
+        dataset_name, encoder.change_processor, recreate_data=recreate_data
+    )
+    datasets = {
+        name: TokenizedEditDataset.from_edits(edits)
+        for name, edits in encoder.edit_tokenizer.tokenize_datasets(
+            split2problems
+        ).items()
+    }
 
     config_dict = {
         k: get_modified_args(v)

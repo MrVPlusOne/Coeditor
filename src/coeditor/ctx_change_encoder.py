@@ -359,7 +359,10 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                         relevant_unchanged=get_relevant_unchanged(
                             code_span, relevant_changes
                         ),
-                        src_info={"commit": pchange.commit_info},
+                        src_info={
+                            "project": pchange.project_name,
+                            "commit": pchange.commit_info,
+                        },
                     )
                     problems.append(prob)
                 processed_cspans.append(code_span)
@@ -423,7 +426,6 @@ class C3ProblemTokenizer:
     max_scope_tks: int = 128
     max_lines_to_edit: int = 20
     ref_chunk_overlap: int = 32
-    max_total_ref_tks: int = 512 * 64  # a very large threshold
     max_chunks_per_elem: int = 4
     skip_unchanged_problems: bool = True
 
@@ -495,19 +497,13 @@ class C3ProblemTokenizer:
                 (f"below chunk {i}", chunk) for i, chunk in enumerate(below_chunks)
             ]
             all_refs = above_chunks + below_chunks + named_references
-            size_sum = 0
-            kept_refs = list[tuple[str, TokenSeq]]()
-            for (name, chunk) in all_refs:
-                if size_sum + len(chunk) <= self.max_total_ref_tks:
-                    size_sum += len(chunk)
-                    kept_refs.append((name, chunk))
 
             return TkC3Problem(
                 scope_tks + chunk_input,
                 chunk_output,
                 path=span.headers[-1].path,
                 change_type=span.change.map(lambda _: None),
-                named_references=kept_refs,
+                named_references=all_refs,
                 src_info=problem.src_info,
             )
 
@@ -550,6 +546,26 @@ class C3ProblemTokenizer:
                 chunk_output.append(Newline_id)
             chunk_lines += 1
         return problems
+
+    def tokenize_datasets(
+        self,
+        split2problems: Mapping[str, Sequence[C3Problem]],
+        max_workers: int | None = None,
+    ) -> dict[str, Sequence[TkC3Problem]]:
+        datasets = dict[str, Sequence[TkC3Problem]]()
+        all_problems = join_list(split2problems.values())
+        all_edits = pmap(
+            self.tokenize_problem,
+            all_problems,
+            desc=f"Tokenizing dataset",
+            max_workers=max_workers,
+        )
+        start = 0
+        for name, split in split2problems.items():
+            split_edits = join_list(all_edits[start : start + len(split)])
+            datasets[name] = split_edits
+            start += len(split)
+        return datasets
 
     def _encode_header_change(self, ch: ChangedHeader) -> TokenSeq:
         hchange = ch.change.map(lambda s: s.strip("\n"))

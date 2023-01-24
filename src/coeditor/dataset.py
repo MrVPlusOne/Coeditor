@@ -7,7 +7,6 @@ from coeditor.ctx_change_encoder import (
     C3ProblemGenerator,
     C3ProblemTokenizer,
     JediUsageAnalyzer,
-    TkC3Problem,
     _fix_jedi_cache,
 )
 from coeditor.encoding import TEdit
@@ -24,30 +23,19 @@ import traceback
 
 @dataclass
 class TokenizedEditDataset(Generic[TEdit]):
-    project2edits: dict[Path, list[TEdit]]
+    _edits: list[TEdit]
 
     def __repr__(self) -> str:
-        n_projects = len(self.project2edits)
-        n_edits = sum(len(edits) for edits in self.project2edits.values())
-        return f"TokenizedEditDataset(n_projects={n_projects}, n_edits={n_edits})"
-
-    def subset(self, repos: Iterable[Path]) -> "TokenizedEditDataset":
-        return TokenizedEditDataset({repo: self.project2edits[repo] for repo in repos})
+        n_edits = len(self.all_edits())
+        return f"TokenizedEditDataset(n_edits={n_edits})"
 
     def subset_edits(self, n_edits: int) -> "TokenizedEditDataset":
         return TokenizedEditDataset.from_edits(self.all_edits()[:n_edits])
-
-    def map(self, f: Callable[[TEdit], TEdit]) -> "TokenizedEditDataset[TEdit]":
-        repos = tqdm(self.project2edits.items(), desc="transforming dataset")
-        return TokenizedEditDataset(
-            {repo: [f(e) for e in edits] for repo, edits in repos}
-        )
 
     def overall_stats(self) -> dict:
         all_edits = self.all_edits()
         n_added = sum(isinstance(e.change_type, Added) for e in all_edits)
         basic_stats = {
-            "n_projects": len(self.project2edits),
             "n_edits": len(all_edits),
             "n_additions": n_added,
         }
@@ -61,13 +49,11 @@ class TokenizedEditDataset(Generic[TEdit]):
         return basic_stats | {k: scalar_stats(v) for k, v in extra_stats.items()}
 
     def all_edits(self) -> list[TEdit]:
-        return join_list(self.project2edits.values())
+        return self._edits
 
     @staticmethod
-    def from_edits(
-        edits: Iterable[TEdit], path=Path("all")
-    ) -> "TokenizedEditDataset[TEdit]":
-        return TokenizedEditDataset({path: list(edits)})
+    def from_edits(edits: Iterable[TEdit]) -> "TokenizedEditDataset[TEdit]":
+        return TokenizedEditDataset(list(edits))
 
 
 @dataclass
@@ -80,7 +66,7 @@ class C3EditEncoder:
 
 @dataclass
 class _ProcessingResult:
-    edits: Sequence[TkC3Problem]
+    edits: Sequence[C3Problem]
     stats: dict[str, dict | Any]
 
 
@@ -92,21 +78,20 @@ def _process_commits(
     workdir: Path,
     commits: Sequence[CommitInfo],
     is_training: bool,
-    encoder: C3EditEncoder,
+    change_processor: ProjectChangeProcessor[C3Problem],
 ) -> _ProcessingResult:
     # use process-specific parso cache
     _fix_jedi_cache(workdir)
     coeditor.code_change._tlogger.clear()
-    encoder.change_processor.clear_stats()
-    encoder.change_processor.set_training(is_training)
+    change_processor.clear_stats()
+    change_processor.set_training(is_training)
     try:
         # cannot return here since subprocess will be killed after returning
         edits = edits_from_commit_history(
             root,
             commits,
             tempdir=workdir / "code",
-            change_processor=encoder.change_processor,
-            edit_encoder=encoder.edit_tokenizer.tokenize_problem,
+            change_processor=change_processor,
             silent=True,
             time_limit=time_limit_per_commit * (len(commits) + 10),
         )
@@ -117,18 +102,18 @@ def _process_commits(
         traceback.print_exception(e, limit=-6)
         edits = []
     stats = dict()
-    encoder.change_processor.append_stats(stats)
+    change_processor.append_stats(stats)
     rec_add_dict_to(stats, {"tlogger": coeditor.code_change._tlogger.times})
     return _ProcessingResult(edits, stats)
 
 
 def dataset_from_projects(
     project_roots: Sequence[Path],
-    encoder: C3EditEncoder,
+    change_processor: ProjectChangeProcessor[C3Problem],
     repo_training: Sequence[bool],
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
-) -> "TokenizedEditDataset[TkC3Problem]":
+) -> "Mapping[Path, Sequence[C3Problem]]":
     """
     Create a TokenizedEditDataset from a list of project roots and a given encoder.
     Args:
@@ -164,8 +149,7 @@ def dataset_from_projects(
             workdirs,
             chunked_histories,
             chunk_training,
-            key_args={"encoder": encoder},
-            desc="Create tokenized edits",
+            key_args={"change_processor": change_processor},
             max_workers=workers,
             tqdm_args={"unit": "chunk"},
         )
@@ -174,7 +158,7 @@ def dataset_from_projects(
             shutil.rmtree(workdir)
             print("Workdir removed:", workdir)
 
-    project2edits = dict[Path, list[TkC3Problem]]()
+    project2edits = dict[Path, list[C3Problem]]()
 
     try:
         stats = dict[str, Any]()
@@ -202,15 +186,15 @@ def dataset_from_projects(
         if not isinstance(e, KeyboardInterrupt):
             print("Error while printing stats:", e)
 
-    return TokenizedEditDataset(project2edits)
+    return project2edits
 
 
 def datasets_from_repos(
     repos_root: Path,
-    encoder: C3EditEncoder,
+    change_processor: ProjectChangeProcessor[C3Problem],
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
-) -> dict[str, TokenizedEditDataset[TkC3Problem]]:
+) -> Mapping[str, Sequence[C3Problem]]:
     splits = ["test", "valid", "train"]
     projects = dict[str, list[Path]]()
     split_is_training = dict[str, list[bool]]()
@@ -227,55 +211,52 @@ def datasets_from_repos(
 
     dataset = dataset_from_projects(
         join_list(projects.values()),
-        encoder=encoder,
+        change_processor=change_processor,
         repo_training=join_list(split_is_training.values()),
         max_history_per_repo=max_history_per_repo,
         workers=workers,
     )
-    return {k: dataset.subset(v) for k, v in projects.items()}
+    return {k: join_list(dataset[r] for r in repos) for k, repos in projects.items()}
 
 
 def make_or_load_datasets(
     dataset_name: str,
-    encoder: C3EditEncoder,
+    change_processor: ProjectChangeProcessor[C3Problem],
     recreate_data: bool = False,
     workers: int = DefaultWorkers,
-) -> dict[str, TokenizedEditDataset[TkC3Problem]]:
-    config_str = (
-        repr_modified_args(encoder.change_processor)
-        + "-"
-        + repr_modified_args(encoder.edit_tokenizer)
-    )
+) -> Mapping[str, Sequence[C3Problem]]:
+    config_str = repr_modified_args(change_processor)
+
     save_dir = get_dataset_dir(dataset_name) / config_str
 
     if recreate_data or not save_dir.exists():
         if dataset_name == "SPOT":
             datasets = {
                 "test": dataset_from_projects(
-                    [proj_root()], encoder, [False], workers=workers
+                    [proj_root()], change_processor, [False], workers=workers
                 )
             }
         else:
             datasets = datasets_from_repos(
                 get_dataset_dir(dataset_name) / "repos",
-                encoder,
+                change_processor,
                 workers=workers,
             )
         with timed_action("Saving datasets to disk"):
             save_datasets(datasets, save_dir)
         print("Tokenized dataset saved to:", save_dir)
-        print("Dataset stats:")
-        for group, dataset in datasets.items():
-            print("=" * 20, group, "=" * 20)
-            pretty_print_dict(dataset.overall_stats())
     else:
         with timed_action("Loading datasets from disk"):
             datasets = load_datasets(save_dir)
 
+    size_info = run_command(["du", "-ha", "."], save_dir)
+    print(f"Dataset sizes:")
+    print(size_info)
+
     return datasets
 
 
-def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path) -> None:
+def save_datasets(datasets: Mapping[str, Any], save_dir: Path) -> None:
     for name, dataset in datasets.items():
         pickle_dump(save_dir / f"{name}.pkl", dataset)
     subprocess.run(["du", "-sh", save_dir])
@@ -283,7 +264,7 @@ def save_datasets(datasets: dict[str, TokenizedEditDataset], save_dir: Path) -> 
 
 def load_datasets(
     save_dir: Path, splits=("test", "valid", "train")
-) -> dict[str, TokenizedEditDataset]:
+) -> Mapping[str, Any]:
     return {
         name: pickle_load(path)
         for name in splits

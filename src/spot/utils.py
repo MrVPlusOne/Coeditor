@@ -178,7 +178,7 @@ class _TaggedFunc(Generic[T1]):
 def pmap(
     f: Callable[..., T1],
     *f_args: Any,
-    desc: str = "parallel map",
+    desc: str | None = None,
     key_args: Mapping[str, Any] | None = None,
     max_workers: int | None = None,
     chunksize: int | None = None,
@@ -192,6 +192,9 @@ def pmap(
 
     tqdm_args = dict(tqdm_args) if tqdm_args else {}
     tqdm_args.setdefault("smoothing", 0.0)
+
+    if desc is None:
+        desc = "pmap: " + f.__name__
 
     if key_args is None:
         key_args = {}
