@@ -1629,7 +1629,7 @@ class BatchArgs:
     min_queires: int = 1
     max_queries: int = 8
     max_ref_tks: int = 512
-    max_total_ref_tks: int = 512 * 16
+    max_total_ref_tks: int = 512 * 12
     shuffle_extra_ids: bool = True
 
     def cost_limit(self) -> float:
@@ -1644,7 +1644,7 @@ class BatchArgs:
     @classmethod
     def eval_default(cls) -> Self:
         return BatchArgs(
-            max_total_ref_tks=512 * 32,
+            max_total_ref_tks=512 * 24,
             max_queries=32,
             shuffle_extra_ids=False,
         )

@@ -24,7 +24,7 @@ from .history import (
 import jedi
 import jedi.settings
 from parso.python import tree as ptree
-from parso.tree import NodeOrLeaf
+from parso.tree import NodeOrLeaf, Node
 from jedi.inference.references import recurse_find_python_files
 from jedi.file_io import FileIO, FolderIO
 from jedi.inference.context import ModuleContext
@@ -160,11 +160,11 @@ class ChangeScope:
                 yield StatementSpan(len(spans), stmts, scope)
 
         current_stmts = []
-        content = (
-            tree.children
-            if isinstance(tree, ptree.Module)
-            else cast(ptree.PythonNode, tree.get_suite()).children
-        )
+        container = tree if isinstance(tree, ptree.Module) else tree.get_suite()
+        if isinstance(container, Node):
+            content = container.children
+        else:
+            content = []
         for s in content:
             # we don't create inner scopes for function contents
             if is_func or _is_scope_statement(as_any(s)):

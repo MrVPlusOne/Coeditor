@@ -8,7 +8,6 @@ from train_model import check_save_dir, TokenizedEditDataset
 
 import wandb
 from coeditor.common import *
-from coeditor.encoders import QueryRefEditEncoder
 from coeditor.retrieval_model import (
     AttentionMode,
     RetrievalEditorModel,
@@ -79,7 +78,7 @@ def train_model(
     if not eval_only:
         with timed_action("Warm-up Training"):
             warmup_bargs = copy.deepcopy(batch_args)
-            warmup_bargs.max_total_ref_tks //= 4
+            warmup_bargs.max_total_ref_tks //= 3
             warmup_bargs.min_queires *= 4
             warmup_bargs.max_queries *= 2
 
@@ -134,7 +133,7 @@ if __name__ == "__main__":
     with run_long_task("train_retrieval_model.py"):
         train_model(
             dataset_name="xl",
-            model_variant="-c3-v1",
+            model_variant="-c3-v1.1",
             train_args=TrainingArgs(
                 max_train_epochs=1,
                 quicktest=False,
