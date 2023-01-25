@@ -78,7 +78,7 @@ def is_extra_id(tk: int) -> bool:
 
 def get_extra_id(i: int) -> int:
     assert 0 <= i < N_Extra_Ids
-    return _Tokenizer.additional_special_tokens_ids[N_Extra_Ids - 1 - i]
+    return _min_extra_id + (N_Extra_Ids - 1 - i)
 
 
 def extra_id_to_number(tk: int) -> int:
@@ -301,8 +301,19 @@ class TkDelta:
 
 
 def change_to_tokens(change: Change[str]) -> TokenSeq:
-    diffs = change_to_line_diffs(change)
-    return encode_diffs(diffs)
+    match change:
+        case Modified(before=before, after=after, unchanged=unchanged):
+            if unchanged or before == after:
+                return encode_basic(before)
+            else:
+                diffs = change_to_line_diffs(change)
+                return encode_diffs(diffs)
+        case Added() | Deleted():
+            lines = split_list(encode_basic(change.earlier()), Newline_id)
+            tk = Add_id if isinstance(change, Added) else Del_id
+            return join_list([tk] + line for line in lines)
+        case _:
+            raise AssertionError(f"Not a change type: {change}")
 
 
 def tokens_to_change(tokens: TokenSeq) -> Modified[str]:
@@ -465,23 +476,28 @@ def rearrange_diffs_(diffs: list[str]) -> None:
         diffs[add_end - len(del_block) : add_end] = del_block
 
 
-def encode_diffs(diffs: list[str]) -> TokenSeq:
+def encode_diffs(diffs: Sequence[str]) -> TokenSeq:
     """
     A helper function to encode the diff lines (with '+', '-', or ' ' prefixes)
     into a token sequence with the special <add> and <del> tokens.
     """
-    tokens = TokenSeq()
+    prefixes = list[TokenSeq]()
+    code_lines = list[str]()
     for i, diff in enumerate(diffs):
         if diff.startswith("+"):
-            tokens.append(Add_id)
+            prefixes.append([Add_id])
         elif diff.startswith("-"):
-            tokens.append(Del_id)
+            prefixes.append([Del_id])
         else:
             assert diff.startswith(" ")
-        tokens.extend(_BaseTokenizer.encode(diff[1:], add_special_tokens=False))
-        if i < len(diffs) - 1:
-            tokens.append(Newline_id)
-    return tokens
+            prefixes.append([])
+        code_lines.append(diff[1:])
+    code_tks = _BaseTokenizer.encode("\n".join(code_lines), add_special_tokens=False)
+    code_lines = split_list(code_tks, Newline_id)
+    for i, line in enumerate(code_lines):
+        if prefixes[i]:
+            code_lines[i] = prefixes[i] + line
+    return join_list(code_lines, Newline_id)
 
 
 def extract_edit_change(input_tks: TokenSeq, output_tks: TokenSeq) -> Modified[str]:
@@ -786,12 +802,12 @@ def truncate_section(
     if len(sec) <= limit:
         return sec
 
-    if direction == TruncateAt.Left:
+    if direction.value == TruncateAt.Left.value:
         sec = sec[-limit:]
         if add_bos and sec:
             sec[0] = BOS_id
     else:
-        assert_eq(direction, TruncateAt.Right)
+        assert_eq(direction.value, TruncateAt.Right.value)
         sec = sec[:limit]
         if add_bos and sec:
             sec[-1] = EOS_id

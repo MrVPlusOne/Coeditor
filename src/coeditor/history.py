@@ -92,7 +92,10 @@ class Modified(_ChangeBase[E1]):
     unchanged: bool = False
 
     def map(self, f: Callable[[E1], T2]) -> "Modified[T2]":
-        return Modified(f(self.before), f(self.after))
+        if self.unchanged:
+            return Modified.from_unchanged(f(self.before))
+        else:
+            return Modified(f(self.before), f(self.after))
 
     def earlier(self) -> E1:
         return self.before
