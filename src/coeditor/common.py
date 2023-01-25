@@ -135,14 +135,12 @@ def split_list(
     Split a list into segments by a separator, always ends with an empty list.
     """
     result = list[list[T1]]()
-    buff = list[T1]()
-    for item in lst:
+    ptr = 0
+    for i, item in enumerate(lst):
         if item == sep:
-            result.append(buff)
-            buff = list[T1]()
-        else:
-            buff.append(item)
-    result.append(buff)
+            result.append(lst[ptr:i])
+            ptr = i + 1
+    result.append(lst[ptr:])
     return result
 
 

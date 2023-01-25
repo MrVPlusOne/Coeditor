@@ -14,7 +14,7 @@ from coeditor.encoding import (
     truncate_section,
     truncate_sections,
 )
-from coeditor.history import Added, Change, Modified
+from coeditor.history import Added, Change, CommitInfo, Modified
 from spot.static_analysis import (
     ModuleName,
     ProjectPath,
@@ -77,6 +77,11 @@ class ChangedCodeSpan:
     module: ModuleName
 
 
+class SrcInfo(TypedDict):
+    project: str
+    commit: CommitInfo | None
+
+
 @dataclass(frozen=True)
 class C3Problem:
     "Contextual code change prediction problem."
@@ -86,7 +91,7 @@ class C3Problem:
     # most relevant to least relevant
     relevant_unchanged: Sequence[ChangedCodeSpan]
     # some optional information about how the problem was generated
-    src_info: dict[str, Any]
+    src_info: SrcInfo
 
 
 PyFullName = NewType("PyFullName", str)
@@ -378,7 +383,8 @@ class TkC3Problem(TokenizedEdit):
     change_type: Change[None]
     # most relevant to least relevant
     named_references: Sequence[tuple[str, TokenSeq]]
-    src_info: dict[str, Any]
+    project: str
+    commit: CommitInfo | None
 
     @property
     def references(self) -> Sequence[TokenSeq]:
@@ -402,7 +408,8 @@ class TkC3Problem(TokenizedEdit):
             f"path: {self.path}",
             f"n_references: {len(self.references)}",
             f"total_reference_tks: {sum(len(ref) for ref in self.references)}",
-            f"src_info: {self.src_info}",
+            f"project: {self.project}",
+            f"commit: {self.commit}",
         ]
 
     def stats(self) -> Mapping[str, int | float]:
@@ -412,9 +419,6 @@ class TkC3Problem(TokenizedEdit):
             "n_references": len(self.references),
             "total_reference_tks": sum(len(ref) for ref in self.references),
         }
-
-
-_ObjId = NewType("_ObjId", int)
 
 
 @dataclass
@@ -430,7 +434,7 @@ class C3ProblemTokenizer:
     skip_unchanged_problems: bool = True
 
     def __post_init__(self):
-        self._change_cache = LRUCache[Change[str], TokenSeq](maxsize=5000)
+        self._change_cache = LRUCache[Change[str], TokenSeq](maxsize=500)
 
     def tokenize_problem(
         self,
@@ -504,7 +508,8 @@ class C3ProblemTokenizer:
                 path=span.headers[-1].path,
                 change_type=span.change.map(lambda _: None),
                 named_references=all_refs,
-                src_info=problem.src_info,
+                project=problem.src_info["project"],
+                commit=problem.src_info["commit"],
             )
 
         problems = list[TkC3Problem]()
@@ -547,24 +552,34 @@ class C3ProblemTokenizer:
             chunk_lines += 1
         return problems
 
+    def _tokenize_problems(self, problems: Sequence[C3Problem]) -> list[TkC3Problem]:
+        return join_list(self.tokenize_problem(p) for p in problems)
+
     def tokenize_datasets(
         self,
         split2problems: Mapping[str, Sequence[C3Problem]],
         max_workers: int | None = None,
-    ) -> dict[str, Sequence[TkC3Problem]]:
-        datasets = dict[str, Sequence[TkC3Problem]]()
+    ) -> dict[str, list[TkC3Problem]]:
+        def get_key(p: C3Problem):
+            return (p.src_info["project"], not_none(p.src_info["commit"]).hash)
+
+        # we want problems from the same commit to be sent in groups
+        key2split = {
+            get_key(p): name for name, split in split2problems.items() for p in split
+        }
         all_problems = join_list(split2problems.values())
+        key2problems = groupby(all_problems, lambda p: get_key(p))
+        all_probs = list(key2problems.values())
         all_edits = pmap(
-            self.tokenize_problem,
-            all_problems,
+            self._tokenize_problems,
+            all_probs,
             desc=f"Tokenizing dataset",
+            tqdm_args={"unit": "commit"},
             max_workers=max_workers,
         )
-        start = 0
-        for name, split in split2problems.items():
-            split_edits = join_list(all_edits[start : start + len(split)])
-            datasets[name] = split_edits
-            start += len(split)
+        datasets = {name: list[TkC3Problem]() for name in split2problems}
+        for edits, key in zip(all_edits, key2problems.keys()):
+            datasets[key2split[key]].extend(edits)
         return datasets
 
     def _encode_header_change(self, ch: ChangedHeader) -> TokenSeq:
