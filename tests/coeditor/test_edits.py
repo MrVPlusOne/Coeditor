@@ -1,5 +1,5 @@
 from coeditor.history import *
-from coeditor.encoding import _BaseTokenizer
+from coeditor.encoding import _BaseTokenizer, _Tokenizer
 import pytest
 
 
@@ -394,3 +394,12 @@ def test_code_normalization():
 
     with pytest.raises(AssertionError):
         check_code_equal(ex_code_keyword1, ex_code_keyword3)
+
+
+def test_extra_ids():
+    all_extra_ids = _Tokenizer.additional_special_tokens_ids
+
+    for x in all_extra_ids:
+        assert is_extra_id(x)
+        n = extra_id_to_number(x)
+        assert get_extra_id(n) == x

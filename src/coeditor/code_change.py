@@ -24,7 +24,7 @@ from .history import (
 import jedi
 import jedi.settings
 from parso.python import tree as ptree
-from parso.tree import NodeOrLeaf, Node
+from parso.tree import NodeOrLeaf, BaseNode
 from jedi.inference.references import recurse_find_python_files
 from jedi.file_io import FileIO, FolderIO
 from jedi.inference.context import ModuleContext
@@ -161,7 +161,7 @@ class ChangeScope:
 
         current_stmts = []
         container = tree if isinstance(tree, ptree.Module) else tree.get_suite()
-        if isinstance(container, Node):
+        if isinstance(container, BaseNode):
             content = container.children
         else:
             content = []

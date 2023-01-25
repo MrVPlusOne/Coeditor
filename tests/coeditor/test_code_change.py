@@ -52,8 +52,12 @@ def test_change_scope():
             """
         ),
     ]
-    for i, code in enumerate(global_spans):
-        assert_str_equal(scope.spans[i].code, code)
+    try:
+        for i, code in enumerate(global_spans):
+            assert_str_equal(scope.spans[i].code, code)
+    except Exception:
+        print_err(f"{scope.spans=}")
+        raise
 
     f1_expect = dedent(
         """\
