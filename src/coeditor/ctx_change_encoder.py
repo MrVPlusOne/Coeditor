@@ -513,19 +513,20 @@ class C3ProblemTokenizer:
             if line_change and line_change[-1] != Del_id:
                 chunk_output.append(Newline_id)
 
-        # try move some prev_change_tks into the input
-        above_tks = join_list(origin_lines[:edit_start], Newline_id)
-        above_tks = tk_delta.for_input_range((0, edit_start)).apply_to_input(above_tks)
-        below_tks = join_list(origin_lines[edit_end:], Newline_id)
-        chunk_input, above_tks, below_tks = self._inline_some_context(
-            chunk_input, above_tks, below_tks, input_limit
-        )
-
-        # limit the input size if it's too long (can happen for later chunks)
+        # limit the input size if it's too long
         chunk_input = truncate_section(
             chunk_input, TruncateAt.Right, input_limit, inplace=True
         )
         chunk_output = truncate_output_tks(chunk_input, chunk_output)
+
+        # try move some prev_change_tks into the input
+        above_tks = join_list(origin_lines[:edit_start] + [TokenSeq()], Newline_id)
+        above_tks = tk_delta.for_input_range((0, edit_start)).apply_to_input(above_tks)
+        below_tks = join_list(origin_lines[edit_end:] + [TokenSeq()], Newline_id)
+        chunk_input, above_tks, below_tks = self._inline_some_context(
+            chunk_input, above_tks, below_tks, input_limit
+        )
+
         chunk_output = truncate_section(
             chunk_output,
             TruncateAt.Right,
