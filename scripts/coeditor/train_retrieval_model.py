@@ -10,13 +10,12 @@ from coeditor.common import *
 from coeditor.dataset import C3EditEncoder
 from coeditor.model import DecodingArgs
 from coeditor.retrieval_model import (
-    AttentionMode,
     BatchArgs,
+    C3DataLoader,
     RetrievalEditorModel,
-    SchedulerType,
     TrainingArgs,
 )
-from spot.utils import run_long_task
+from spot.utils import cprint, run_long_task
 
 
 def train_model(
@@ -24,7 +23,7 @@ def train_model(
     model_variant="-sig-analysis-post_usees",
     encoder: C3EditEncoder = C3EditEncoder(),
     batch_args=BatchArgs.train_default(),
-    test_batch_args=BatchArgs.eval_default(),
+    eval_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
     recreate_data: bool = False,
     eval_only: bool = False,
@@ -40,35 +39,29 @@ def train_model(
     if not eval_only:
         check_save_dir(model_name)
 
-    split2problems = make_or_load_datasets(
+    datasets = make_or_load_datasets(
         dataset_name, encoder.change_processor, recreate_data=recreate_data
     )
-    datasets = {
-        name: TokenizedEditDataset.from_edits(edits)
-        for name, edits in encoder.edit_tokenizer.tokenize_datasets(
-            split2problems
-        ).items()
-    }
 
     config_dict = {
         k: get_modified_args(v)
         for k, v in {
-            "data_args": batch_args,
+            "edit_tokenizer": encoder.edit_tokenizer.get_args(),
+            "batch_args": batch_args,
             "train_args": train_args,
             "dec_args": dec_args,
         }.items()
     }
 
     project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
+    if eval_only:
+        project = "eval-" + project
     wandb.init(dir="..", project=project, name=model_name, config=config_dict)
 
     if train_args.quicktest:
         print("Using fewer data for quick test.")
         n_quick_exs = 20
-        for name, dataset in datasets.items():
-            datasets[name] = TokenizedEditDataset.from_edits(
-                dataset.all_edits()[:n_quick_exs]
-            )
+        datasets = {name: data[:n_quick_exs] for name, data in datasets.items()}
 
     if not eval_only:
         model = RetrievalEditorModel.from_code_t5(
@@ -84,46 +77,53 @@ def train_model(
         )
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+    train_tkn = encoder.edit_tokenizer
+    eval_tkn = copy.deepcopy(train_tkn)
+    eval_tkn.max_ref_tks_sum *= 2
+    eval_loader = C3DataLoader(
+        datasets["valid"], eval_tkn, eval_batch_args, shuffle=False, desc="eval"
+    )
+
     if not eval_only:
+        train_loader = C3DataLoader(
+            datasets["train"], train_tkn, batch_args, shuffle=True, desc="training"
+        )
+
         with timed_action("Warm-up Training"):
             warmup_bargs = copy.deepcopy(batch_args)
-            warmup_bargs.max_total_ref_tks //= 3
-            warmup_bargs.min_queires *= 4
+            warmup_bargs.min_queries *= 4
             warmup_bargs.max_queries *= 2
+
+            warm_up_data = random_subset(datasets["train"], len(datasets["train"]) // 4)
+            warmup_tkn = copy.deepcopy(train_tkn)
+            warmup_tkn.max_ref_tks_sum //= 3
+            warmup_loader = C3DataLoader(
+                warm_up_data,
+                warmup_tkn,
+                warmup_bargs,
+                shuffle=True,
+                desc="warm-up training",
+            )
 
             warmup_targs = copy.deepcopy(train_args)
             warmup_targs.learning_rate *= 4
             warmup_targs.max_train_epochs = 1
-            all_edits = datasets["train"].all_edits()
-            warmup_edits = random_subset(all_edits, len(all_edits) // 4)
-            model.train_on_data(
-                model_name,
-                TokenizedEditDataset.from_edits(warmup_edits),
-                datasets["valid"],
-                warmup_targs,
-                batch_args=warmup_bargs,
-                eval_batch_args=test_batch_args,
-            )
+            model.train_on_data(model_name, warmup_loader, eval_loader, warmup_targs)
         with timed_action("Fine-tune Training"):
-            model.train_on_data(
-                model_name,
-                datasets["train"],
-                datasets["valid"],
-                train_args,
-                batch_args=batch_args,
-                eval_batch_args=test_batch_args,
-            )
+            model.train_on_data(model_name, train_loader, eval_loader, train_args)
 
     model.to("cuda")
     with timed_action("Loss Evaluation"):
-        eval_result = model.eval_loss_on_data(datasets["test"], test_batch_args)
+        eval_result = model.eval_loss_on_loader(eval_loader)
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
 
     max_saved_samples = 300
 
     with timed_action("Accuracy Evaluation"):
-        dec_result = model.predict_on_data(datasets["test"], test_batch_args, dec_args)
+        dec_result = model.predict_on_data(
+            datasets["test"], eval_tkn, eval_batch_args, dec_args
+        )
         pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
         exact_acc, exact_correct_map = dec_result.exact_match_accuracy()
         wandb.log({"test/exact-acc": exact_acc.average()})
@@ -132,7 +132,7 @@ def train_model(
         dec_result.save_examples_to_dir(
             out_dir, random_subset(exact_correct_map, max_saved_samples)
         )
-        print("Exact-match samples saved to:", out_dir)
+        cprint("blue", "Exact-match samples saved to:", out_dir)
 
     return model
 
@@ -141,13 +141,13 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_retrieval_model.py"):
         train_model(
-            dataset_name="xl",
-            model_variant="-c3-v1.1",
+            dataset_name="small",
+            model_variant="-c3-v1.2",
             train_args=TrainingArgs(
                 max_train_epochs=1,
-                quicktest=False,
+                quicktest=True,
             ),
             encoder=C3EditEncoder(),
             recreate_data=False,
-            eval_only=False,
+            eval_only=True,
         )

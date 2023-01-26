@@ -1,5 +1,6 @@
 import copy
 import logging
+import shutil
 from textwrap import indent
 
 import torch
@@ -40,7 +41,7 @@ from transformers.models.t5.modeling_t5 import (
 )
 from transformers.trainer import EvalLoopOutput
 
-from coeditor.ctx_change_encoder import TkC3Problem
+from coeditor.ctx_change_encoder import C3Problem, C3ProblemTokenizer, TkC3Problem
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import EditRequest, apply_output_tks_to_change
 from coeditor.encoding import (
@@ -50,13 +51,16 @@ from coeditor.encoding import (
     EOS_id,
     Newline_id,
     PAD_id,
+    TkDelta,
     _Tokenizer,
+    change_tks_to_original_delta,
     change_to_tokens,
     decode_tokens,
     encode_basic,
     get_tk_id,
     is_extra_id,
     random_extra_id_map,
+    tokens_to_change,
 )
 from coeditor.history import Change, Modified
 from coeditor.model import (
@@ -101,10 +105,48 @@ class RetrievalModelPrediction(ModelPrediction):
     references: list[TokenSeq]
 
 
-class RetrievalDecodingResult(DatasetDecodingResult[TkC3Problem]):
+@dataclass
+class RetrievalDecodingResult:
+    eval_args: dict
+    problems: Sequence[C3Problem]
+    predictions: Sequence[RetrievalModelPrediction]
+
+    def __post_init__(self):
+        assert_eq(len(self.problems), len(self.predictions))
+
+    def exact_match_accuracy(self) -> tuple[CountedSum, dict[int, bool]]:
+        ex2correct = dict[int, bool]()
+        for i, mp in enumerate(self.predictions):
+            prob = self.problems[i]
+            change_tks = prob.span.change_tks.tolist()
+            original, _ = change_tks_to_original_delta(change_tks)
+            pred_delta = TkDelta.from_output_tks(mp["output_ids"])
+            label_delta = TkDelta.from_output_tks(mp["labels"])
+            assert isinstance(prob.edit_lines, range)
+            line_shift = prob.edit_lines.start
+            pred_code = pred_delta.shifted(line_shift).apply_to_input(original)
+            label_code = label_delta.shifted(line_shift).apply_to_input(original)
+            is_correct = code_equal(decode_tokens(pred_code), decode_tokens(label_code))
+            ex2correct[i] = is_correct
+        correct_count = CountedSum(sum(ex2correct.values()), len(ex2correct))
+        return correct_count, ex2correct
+
+    def save_examples_to_dir(self, out_dir: Path, ex2correct: dict[int, bool]) -> None:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        (out_dir / "correct").mkdir(parents=True, exist_ok=True)
+        (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
+
+        for ex_id, correct in tqdm(ex2correct.items(), desc="saving examples"):
+            ex = self.predictions[ex_id]
+            compare_str = self.show_prediction(self.problems[ex_id], ex)
+            out_file = (
+                out_dir / ("correct" if correct else "incorrect") / f"ex-{ex_id}.txt"
+            )
+            out_file.write_text(compare_str)
+
     @classmethod
     def show_prediction(
-        cls, edit: TkC3Problem | None, pred: RetrievalModelPrediction
+        cls, edit: C3Problem | None, pred: RetrievalModelPrediction
     ) -> str:
         def show_label(i: int):
             return f" <{i}>" if i <= 9 else f"<{i}>"
@@ -212,35 +254,19 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def train_on_data(
         self,
         training_name: str,
-        train_data: TokenizedEditDataset,
-        eval_data: TokenizedEditDataset,
+        train_loader: "C3DataLoader",
+        eval_loader: "C3DataLoader",
         train_args: "TrainingArgs",
-        batch_args: "BatchArgs",
-        eval_batch_args: "BatchArgs",
     ) -> None:
         train_dir = get_model_dir(trained=False) / training_name
-
-        train_edits = train_data.all_edits()
-        eval_edits = eval_data.all_edits()
-        assert len(train_edits) > 0, "No training edits provided."
-
-        train_lodader = edits_to_dataloader(
-            train_edits, args=batch_args, shuffle=True, desc="Training Epoch"
-        )
-        eval_loader = edits_to_dataloader(
-            eval_edits,
-            args=eval_batch_args,
-            shuffle=False,
-            desc="Eval Epoch",
-            tqdm_args={"disable": True},
-        )
+        eval_loader.tqdm_args = {"disable": True}
 
         model = self
         # model = torch.compile(self.to("cuda"))  # pytorch doesn't support python 3.11 yet.
 
         class DynamicTrainer(Seq2SeqTrainer):
             def get_train_dataloader(self):
-                return train_lodader
+                return train_loader
 
             def get_eval_dataloader(self, eval_dataset):
                 return eval_loader
@@ -253,7 +279,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 ignore_keys: Optional[List[str]] = None,
                 metric_key_prefix: str = "eval",
             ) -> EvalLoopOutput:
-                metrics = model.eval_loss_on_loader(dataloader)
+                metrics = model.eval_loss_on_loader(as_any(dataloader))
                 n_samples = metrics["loss_per_ex"].weight
                 metrics = {
                     f"{metric_key_prefix}_{k}": v.mean() for k, v in metrics.items()
@@ -265,8 +291,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
                     num_samples=n_samples,
                 )
 
-        epoch_steps = len(train_lodader)
-        print("Number of training batches (estimate):", epoch_steps)
+        epoch_steps = len(train_loader)
+        cprint("blue", "Number of training batches (estimate):", epoch_steps)
         trainer_args = Seq2SeqTrainingArguments(
             output_dir=str(train_dir),
             overwrite_output_dir=True,
@@ -299,29 +325,14 @@ class RetrievalEditorModel(T5PreTrainedModel):
         self.save(save_dir)
         print("Model saved to:", save_dir)
 
-    def eval_loss_on_data(
-        self, data: TokenizedEditDataset, batch_args: "BatchArgs"
-    ) -> dict[str, WeightedSum]:
-        batch_args = copy.deepcopy(batch_args)
-        batch_args.shuffle_extra_ids = False
-        eval_loader = edits_to_dataloader(
-            data.all_edits(),
-            args=batch_args,
-            shuffle=False,
-            desc="Eval Epoch",
-        )
-        return self.eval_loss_on_loader(eval_loader)
-
     @torch.no_grad()
     @torch.autocast("cuda")
-    def eval_loss_on_loader(self, dataloader):
+    def eval_loss_on_loader(self, dataloader: "C3DataLoader"):
         core = self
         previous = core.training
         core.eval()
         metrics = dict[str, WeightedSum]()
-        for batch in tqdm(
-            dataloader, desc="evaluate loss", unit="batch", smoothing=0.0
-        ):
+        for batch in dataloader.__iter__():
             batch["input_ids"] = batch["input_ids"].to(core.device)
             batch["labels"] = batch["labels"].to(core.device)
             outputs = core.forward(**batch)
@@ -342,7 +353,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
     @torch.autocast("cuda")
     def predict_on_data(
         self,
-        eval_data: TokenizedEditDataset,
+        eval_problems: Sequence[C3Problem],
+        tokenizer: C3ProblemTokenizer,
         batch_args: "BatchArgs",
         dec_args: DecodingArgs,
     ):
@@ -350,13 +362,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
             warnings.warn(
                 "Shuffling extra ids during eval can lead to incorrect results."
             )
-        eval_edits = eval_data.all_edits()
-        eval_loader = _BatchSampler(
-            eval_edits, batch_args, shuffle=False, desc="Decoding Epoch"
+
+        eval_loader = C3DataLoader(
+            eval_problems, tokenizer, batch_args, shuffle=False, desc="predict_on_data"
         )
 
         gen_args = dec_args.to_model_args()
-        batch_elems = list[ModelPrediction]()
+        batch_elems = list[RetrievalModelPrediction]()
         for batch in eval_loader:  # type: ignore
             out_tks = self.generate(
                 batch["input_ids"].to(self.device),
@@ -379,7 +391,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 batch_elems.append(e)
         return RetrievalDecodingResult(
             eval_args={"batch_args": batch_args, "dec_args": dec_args},
-            edits=eval_edits,
+            problems=eval_problems,
             predictions=batch_elems,
         )
 
@@ -516,24 +528,6 @@ class RetrievalEditorModel(T5PreTrainedModel):
             labels = 5 * torch.ones(1, 128, dtype=torch.long, device=self.device)
             with torch.autocast("cuda"):
                 self.forward(as_any(input_ids), references, labels=as_any(labels))
-
-    def run_on_edits(self, edits: Sequence[TkC3Problem], batch_args: "BatchArgs"):
-        train_edits = edits
-        assert len(train_edits) > 0, "No training edits provided."
-
-        random.seed(42)
-        train_lodader = edits_to_dataloader(
-            train_edits, args=batch_args, shuffle=True, desc="Training Epoch"
-        )
-        for batch in train_lodader.__iter__():
-            out = self.forward(
-                input_ids=batch["input_ids"].to(self.device),
-                references=batch["references"],
-                query_ref_list=batch["query_ref_list"],
-                labels=batch["labels"].to(self.device),
-            )
-            assert out.loss is not None
-            out.loss.backward()
 
     def forward(
         self,
@@ -912,6 +906,13 @@ class RetrivalEncoder:
         - ref_masks: for each query, a list of reference indices. If none,
         assume all references are accessible to all queries.
         """
+
+        def to_long_tensor(data):
+            return cast(
+                LongTensor,
+                torch.tensor(data, dtype=torch.long).to(device),
+            )
+
         if references is None:
             references = []
 
@@ -930,10 +931,7 @@ class RetrivalEncoder:
             # use bidirectional implementation
             queries = [cast(LongTensor, input_ids[i, :l]) for i, l in enumerate(q_lens)]
             refs = [
-                [
-                    cast(LongTensor, torch.tensor(references[rid]).to(device))
-                    for rid in rids
-                ]
+                [to_long_tensor(references[rid]) for rid in rids]
                 for rids in query_ref_list
             ]
             hidden_rows = self.bidirectional_forward(queries, refs)
@@ -1623,18 +1621,9 @@ def retrieval_cost_model(ref_size: int, query_size: int, output_size: int) -> fl
 
 @dataclass
 class BatchArgs:
-    max_output_tks: int = 256
-    max_query_tks: int = 512
-    min_queires: int = 1
+    min_queries: int = 1
     max_queries: int = 8
-    max_ref_tks: int = 512
-    max_total_ref_tks: int = 512 * 12
     shuffle_extra_ids: bool = True
-
-    def cost_limit(self) -> float:
-        return self.min_queires * retrieval_cost_model(
-            self.max_total_ref_tks, self.max_query_tks, self.max_output_tks
-        )
 
     @classmethod
     def train_default(cls) -> Self:
@@ -1643,7 +1632,6 @@ class BatchArgs:
     @classmethod
     def eval_default(cls) -> Self:
         return BatchArgs(
-            max_total_ref_tks=512 * 24,
             max_queries=32,
             shuffle_extra_ids=False,
         )
@@ -1654,34 +1642,93 @@ class BatchArgs:
         return args
 
 
-def tk_edits_to_batches(
-    query_edits: Sequence[TkC3Problem],
-    args: BatchArgs,
-    silent: bool = False,
-) -> list[dict]:
-    def process_edit(e: TkC3Problem):
-        labels = e.output_tks
+@dataclass
+class C3DataLoader:
+    all_probs: Sequence[C3Problem]
+    tokenizer: C3ProblemTokenizer
+    batch_args: BatchArgs
+    shuffle: bool
+    desc: str
+    tqdm_args: dict | None = None
+    chunk_size: int = 1000
+    workers: int = 10
 
+    def __post_init__(self):
+        n_batches, batch_stats = self.estimate_batch_stats()
+        self._len_est = n_batches
+        self._batch_stast = batch_stats
+        self.epochs = 0
+
+    def __len__(self) -> int:
+        return self._len_est
+
+    def _to_tokenized(self, probs: Sequence[C3Problem]) -> Iterable[TkC3Problem]:
+        for i in range(0, len(probs), self.chunk_size):
+            group = probs[i : i + self.chunk_size]
+            yield from pmap(
+                self.tokenizer.tokenize_problem, group, tqdm_args={"disable": True}
+            )
+
+    def estimate_batch_stats(self):
+        probs = list(self.all_probs)
+        if self.shuffle:
+            random.shuffle(probs)
+        batches = self._problems_to_batches(self._to_tokenized(probs))
+        bsizes = list[int]()
+        for b in batches:
+            bsizes.append(len(b["input_ids"]))
+        batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
+        return len(bsizes), batch_stats
+
+    def __iter__(self) -> Iterable[dict]:
+        probs = list(self.all_probs)
+        if self.shuffle:
+            random.shuffle(probs)
+        batches = self._problems_to_batches(self._to_tokenized(probs))
+
+        tqdm_args = self.tqdm_args or {"smoothing": 0.0}
+        for b in tqdm(
+            batches,
+            total=self._len_est,
+            desc=self.desc + f" (epoch={self.epochs})",
+            **tqdm_args,
+        ):
+            input_ids = pad_token_seqs(b["input_ids"])
+            labels = pad_token_seqs(b["labels"], pad_id=-100)
+            yield {
+                "input_ids": input_ids,
+                "references": b["references"],
+                "query_ref_list": b["query_ref_list"],
+                "labels": labels,
+            }
+        self.epochs += 1
+
+    def _post_process(self, e: TkC3Problem):
+        max_output_tks = self.tokenizer.max_output_tks
+        shuffle_extra_ids = self.batch_args.shuffle_extra_ids
+        labels = e.output_tks
         labels = wrap_bos(labels)
 
-        if len(labels) > args.max_output_tks:
-            labels = labels[: args.max_output_tks]
+        if len(labels) > max_output_tks:
+            labels = labels[:max_output_tks]
 
         input_ids = e.input_tks
 
-        if args.shuffle_extra_ids and random.random() < 0.5:
+        if shuffle_extra_ids and random.random() < 0.5:
             id_map = random_extra_id_map()
             input_ids = [id_map.get(tk, tk) for tk in input_ids]
             labels = [id_map.get(tk, tk) for tk in labels]
 
         return input_ids, labels
 
-    cost_limit = args.cost_limit()
-    warned_batch_size = False
+    def _cost_limit(self) -> float:
+        min_queries = self.batch_args.min_queries
+        tkn = self.tokenizer
+        return min_queries * retrieval_cost_model(
+            tkn.max_ref_tks_sum, tkn.max_query_tks, tkn.max_output_tks
+        )
 
-    def edits_to_batches(
-        edits: Sequence[TkC3Problem],
-    ) -> Iterable[dict]:
+    def _problems_to_batches(self, problems: Iterable[TkC3Problem]) -> Iterable[dict]:
         def pack_batch(rows: list[dict]):
             assert rows, "empty batch found"
             input_ids = [x["input_tks"] for x in rows]
@@ -1698,35 +1745,33 @@ def tk_edits_to_batches(
                 "labels": labels,
             }
 
+        tkn = self.tokenizer
+        cost_limit = self._cost_limit()
+        warned_batch_size = False
         # sample references for each query
         current_batch = []
         current_cost = 0
-        for edit in tqdm(edits, desc="edits_to_batches", disable=silent):
-            all_refs = [x[1] for x in edit.named_references]
-            ref_size_sum = 0
-            ref_selected = list[TokenSeq]()
-            for ref in all_refs:
-                if ref_size_sum + len(ref) <= args.max_total_ref_tks:
-                    ref_selected.append(ref)
-                    ref_size_sum += len(ref)
-            input_tks, output_tks = process_edit(edit)
+        for tk_prob in problems:
+            all_refs = [x[1] for x in tk_prob.named_references]
+            ref_size_sum = sum(len(ref) for ref in all_refs)
+            assert ref_size_sum <= tkn.max_ref_tks_sum, f"{ref_size_sum=}"
+            input_tks, output_tks = self._post_process(tk_prob)
             cost = retrieval_cost_model(
-                ref_size=sum(len(x) for x in ref_selected),
+                ref_size=ref_size_sum,
                 query_size=len(input_tks),
                 output_size=len(output_tks),
             )
             row = {
                 "input_tks": input_tks,
                 "output_tks": output_tks,
-                "references": ref_selected,
+                "references": [x.tolist() for x in all_refs],
             }
-            nonlocal warned_batch_size
             if cost > cost_limit and not warned_batch_size:
                 warned_batch_size = True
                 warnings.warn("Batch cost limit is too small.")
             if (not current_batch) or (
                 cost + current_cost <= cost_limit
-                and len(current_batch) < args.max_queries
+                and len(current_batch) < self.batch_args.max_queries
             ):
                 current_batch.append(row)
                 current_cost += cost
@@ -1736,72 +1781,6 @@ def tk_edits_to_batches(
                 current_cost = cost
         if current_batch:
             yield pack_batch(current_batch)
-
-    batches = list[dict]()
-    bsizes = list[int]()
-    for batch in edits_to_batches(query_edits):
-        batches.append(batch)
-        bsizes.append(len(batch["input_ids"]))
-
-    batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
-    if not silent:
-        cprint("blue", f"num batches: {len(batches)},", f"batch stats: {batch_stats}")
-
-    return batches
-
-
-@dataclass
-class _BatchSampler:
-    all_edits: list[TkC3Problem]
-    batch_args: BatchArgs
-    shuffle: bool
-    desc: str
-    tqdm_args: dict | None = None
-
-    def __post_init__(self):
-        if self.shuffle:
-            random.shuffle(self.all_edits)
-        self._len_est = self.estimate_n_batches()
-        self.epochs = 0
-
-    def __len__(self) -> int:
-        return self._len_est
-
-    def estimate_n_batches(self) -> int:
-        batches = tk_edits_to_batches(self.all_edits, self.batch_args, silent=True)
-        return len(batches)
-
-    def __iter__(self) -> Iterable[Mapping]:
-        if self.shuffle:
-            random.shuffle(self.all_edits)
-        batches = tk_edits_to_batches(self.all_edits, self.batch_args)
-        if self.shuffle:
-            random.shuffle(batches)
-
-        tqdm_args = self.tqdm_args or {"smoothing": 0.0}
-        for b in tqdm(batches, desc=self.desc + f" {self.epochs}", **tqdm_args):
-            input_ids = pad_token_seqs(b["input_ids"])
-            labels = pad_token_seqs(b["labels"], pad_id=-100)
-            yield {
-                "input_ids": input_ids,
-                "references": b["references"],
-                "query_ref_list": b["query_ref_list"],
-                "labels": labels,
-            }
-        self.epochs += 1
-
-
-def edits_to_dataloader(
-    edits: Sequence[TkC3Problem],
-    args: BatchArgs,
-    desc: str,
-    shuffle: bool = False,
-    tqdm_args: dict | None = None,
-):
-    assert edits
-    return _BatchSampler(
-        list(edits), args, shuffle=shuffle, desc=desc, tqdm_args=tqdm_args
-    )
 
 
 def pad_token_seqs(seqs: Sequence[TokenSeq], pad_id=None) -> LongTensor:

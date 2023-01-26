@@ -659,7 +659,7 @@ def get_changed_spans(
         for span in old_scope.spans:
             code = span.code
             line_range = (line, line + len(code.split("\n")))
-            if subdelta := delta.for_input_range(line_range):
+            if subdelta := delta.for_input_range(line_range).shifted(-line):
                 new_code = subdelta.apply_to_input(code)
                 change = Modified(code, new_code)
                 yield ChangedSpan(

@@ -73,12 +73,12 @@ def is_extra_id(tk: int) -> bool:
     return _min_extra_id <= tk <= _max_extra_id
 
 
-def get_extra_id(i: int) -> int:
+def get_extra_id(i: int) -> Token:
     assert 0 <= i < N_Extra_Ids
     return _min_extra_id + (N_Extra_Ids - 1 - i)
 
 
-def extra_id_to_number(tk: int) -> int:
+def extra_id_to_number(tk: Token) -> int:
     assert is_extra_id(tk)
     return _max_extra_id - tk
 
@@ -150,11 +150,14 @@ class StrDelta:
     def for_input_range(self, line_range: tuple[int, int]) -> Self:
         """Compute the delta for the given line range."""
         a, b = line_range
-        new_delta = {k - a: v for k, v in self._deltas.items() if a <= k < b}
+        new_delta = {k: v for k, v in self._deltas.items() if a <= k < b}
         return StrDelta(new_delta)
 
+    def shifted(self, shift_lines: int) -> Self:
+        return StrDelta({k + shift_lines: v for k, v in self._deltas.items()})
+
     def __bool__(self) -> bool:
-        return bool(self._deltas)
+        return self.num_changes() > 0
 
     def to_tk_delta(self) -> "TkDelta":
         deltas = dict[int, tuple[TokenSeq, ...]]()
@@ -265,11 +268,36 @@ class TkDelta:
     def for_input_range(self, line_range: tuple[int, int]) -> Self:
         """Compute the delta for the given line range."""
         a, b = line_range
-        new_delta = {k - a: v for k, v in self._deltas.items() if a <= k < b}
+        new_delta = {k: v for k, v in self._deltas.items() if a <= k < b}
         return TkDelta(new_delta)
 
+    def shifted(self, shift_lines: int) -> Self:
+        return TkDelta({k + shift_lines: v for k, v in self._deltas.items()})
+
+    @staticmethod
+    def from_output_tks(tks: TokenSeq) -> "TkDelta":
+        ad_tks = (Add_id, Del_id)
+
+        def seg_to_tuple(seg: TokenSeq) -> tuple[TokenSeq]:
+            result = list[TokenSeq]()
+            ptr = 0
+            for i, x in enumerate(seg):
+                if i > 0 and x in ad_tks:
+                    if seg[ptr] in ad_tks:
+                        result.append(seg[ptr:i])
+                    ptr = i
+            if ptr < len(seg) and seg[ptr] in ad_tks:
+                result.append(seg[ptr:])
+            return tuple(result)
+
+        segs = output_ids_as_seqs(tks)
+        deltas = {
+            extra_id_to_number(k): seg_to_tuple(seg) for k, seg in segs.items() if seg
+        }
+        return TkDelta(deltas)
+
     def __bool__(self) -> bool:
-        return bool(self._deltas)
+        return self.num_changes() > 0
 
     def to_str_delta(self) -> StrDelta:
         deltas = dict[int, tuple[str, ...]]()

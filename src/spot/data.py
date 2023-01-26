@@ -999,6 +999,10 @@ class ChunkedDataset:
                 )
 
 
+_min_extra_id = DefaultTokenizer.additional_special_tokens_ids[0]
+_max_extra_id = DefaultTokenizer.additional_special_tokens_ids[-1]
+
+
 def output_ids_as_seqs(output_ids: Iterable[Token]) -> dict[Token, TokenSeq]:
     """Parse the CodeT5 model's output as a series of key-value pairs.
     <pad>, <mask>, or <s> or </s> tokens are filtered out."""
@@ -1006,15 +1010,13 @@ def output_ids_as_seqs(output_ids: Iterable[Token]) -> dict[Token, TokenSeq]:
     key = None
     seqs = dict[Token, TokenSeq]()
     tokenizer = DefaultTokenizer
-    min_tk = tokenizer.additional_special_tokens_ids[0]
-    max_tk = tokenizer.additional_special_tokens_ids[-1]
     bos_tk = tokenizer.bos_token_id
     eos_tk = tokenizer.eos_token_id
 
     for tk in output_ids:
         if tk <= 0 or tk == bos_tk or tk == eos_tk:
             continue  # pad, mask token, or sequence token
-        if min_tk <= tk <= max_tk:
+        if _min_extra_id <= tk <= _max_extra_id:
             if key is not None:
                 seqs[key] = buff
             buff = TokenSeq()

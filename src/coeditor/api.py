@@ -40,7 +40,6 @@ from coeditor.retrieval_model import (
     RetrievalDecodingResult,
     RetrievalEditorModel,
     RetrievalModelPrediction,
-    tk_edits_to_batches,
 )
 from spot.data import output_ids_as_seqs
 from spot.static_analysis import (

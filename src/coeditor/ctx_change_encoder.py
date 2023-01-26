@@ -34,6 +34,7 @@ from spot.static_analysis import (
     ProjectPath,
     sort_modules_by_imports,
 )
+from spot.utils import scalar_stats
 
 from .code_change import (
     ChangedSpan,
@@ -103,6 +104,13 @@ class C3Problem:
     change_type: Change[None]
     src_info: SrcInfo
 
+    def meta_data_lines(self) -> list[str]:
+        return [
+            f"path: {self.span.headers[-1].path}",
+            f"project: {self.src_info['project']}",
+            f"commit: {self.src_info['commit']}",
+        ]
+
 
 PyFullName = NewType("PyFullName", str)
 
@@ -140,7 +148,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     VERSION = "2.1"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
-    max_lines_to_edit: int = 20
+    max_lines_to_edit: int = 25
     max_problems_per_elem: int = 4
 
     def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
@@ -275,7 +283,19 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             # add statement spans
             for stmt_span in stmt_spans:
                 ancestors = stmt_span.scope.ancestors()
-                body_code = stmt_span.code
+                stmts = stmt_span.statements
+                match stmts:
+                    case [
+                        ptree.PythonNode(
+                            type="simple_stmt",
+                            children=[ptree.String(), ptree.Newline()],
+                        ),
+                        *rest,
+                    ]:
+                        if not rest:
+                            continue
+                        stmts = rest
+                body_code = "".join(s.get_code() for s in stmts).lstrip("\n")
                 cspan = ChangedCodeSpan(
                     [to_header(Modified.from_unchanged(s)) for s in ancestors],
                     TkArray.new(encode_basic(body_code)),
@@ -462,14 +482,38 @@ class TkC3Problem(TokenizedEdit):
         }
 
 
+class C3TokenizerArgs(TypedDict):
+    max_ref_tks: int
+    max_query_tks: int
+    max_output_tks: int
+    max_scope_tks: int
+    max_ref_tks_sum: int
+    ref_chunk_overlap: int
+
+
 @dataclass
 class C3ProblemTokenizer:
-    VERSION = "2.0"
+    VERSION = "2.2"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
     max_scope_tks: int = 128
+    max_ref_tks_sum: int = 512 * 12
     ref_chunk_overlap: int = 32
+
+    def get_args(self):
+        return C3TokenizerArgs(
+            max_ref_tks=self.max_ref_tks,
+            max_query_tks=self.max_query_tks,
+            max_output_tks=self.max_output_tks,
+            max_scope_tks=self.max_scope_tks,
+            max_ref_tks_sum=self.max_ref_tks_sum,
+            ref_chunk_overlap=self.ref_chunk_overlap,
+        )
+
+    @classmethod
+    def from_args(cls, args: C3TokenizerArgs) -> Self:
+        return cls(**args)
 
     def __post_init__(self):
         self._offset_cache = LRUCache[int, TkArray](maxsize=100)
@@ -479,14 +523,6 @@ class C3ProblemTokenizer:
         problem: C3Problem,
     ) -> TkC3Problem:
         span = problem.span
-        named_references = list[tuple[str, TkArray]]()
-        # compute the references that are relevant to this span
-        relevant_chunks = self._group_encode_changed_refs(problem.relevant_changes)
-        for i, chunk in enumerate(relevant_chunks):
-            named_references.append((f"changed ref {i}", TkArray.new(chunk)))
-        relevant_chunks = self._group_encode_unchanged_refs(problem.relevant_unchanged)
-        for i, chunk in enumerate(relevant_chunks):
-            named_references.append((f"unchanged ref {i}", TkArray.new(chunk)))
 
         original: TokenSeq
         tk_delta: TkDelta
@@ -559,14 +595,35 @@ class C3ProblemTokenizer:
             (f"below chunk {i}", TkArray.new(chunk))
             for i, chunk in enumerate(below_chunks)
         ]
-        all_refs = above_chunks + below_chunks + named_references
+        all_refs = above_chunks + below_chunks
+        ref_size_sum = sum(len(ref) for _, ref in all_refs)
+
+        # compute the references that are relevant to this span
+        if ref_size_sum < self.max_ref_tks_sum:
+            changed = self._group_encode_changed_refs(problem.relevant_changes)
+            for i, chunk in enumerate(changed):
+                all_refs.append((f"changed ref {i}", TkArray.new(chunk)))
+            ref_size_sum += sum(len(x) for x in changed)
+        if ref_size_sum < self.max_ref_tks_sum:
+            unchanged = self._group_encode_unchanged_refs(problem.relevant_unchanged)
+            for i, chunk in enumerate(unchanged):
+                all_refs.append((f"unchanged ref {i}", TkArray.new(chunk)))
+
+        # take until we hit the limit
+        ref_size_sum = 0
+        kept_refs = list[tuple[str, TkArray]]()
+        for (name, ref) in all_refs:
+            if ref_size_sum + len(ref) > self.max_ref_tks_sum:
+                continue
+            ref_size_sum += len(ref)
+            kept_refs.append((name, ref))
 
         return TkC3Problem(
             TkArray.new(scope_tks + chunk_input),
             TkArray.new(chunk_output),
             path=span.headers[-1].path,
             change_type=problem.change_type,
-            named_references=all_refs,
+            named_references=kept_refs,
             project=problem.src_info["project"],
             commit=problem.src_info["commit"],
         )
@@ -659,6 +716,19 @@ class C3ProblemTokenizer:
             )
             all_chunks.extend(mod_chunks)
         return all_chunks
+
+    def _compute_stats(self, problems: Sequence[C3Problem]):
+        all_stats = pmap(self._tokenize_stats, problems)
+        if not all_stats:
+            return dict()
+        keys = all_stats[0].keys()
+        stats = dict[str, dict]()
+        for k in keys:
+            stats[k] = scalar_stats([s[k] for s in all_stats])
+        return stats
+
+    def _tokenize_stats(self, problem: C3Problem):
+        return self.tokenize_problem(problem).stats()
 
     def __repr__(self):
         return repr_modified_args(self)
