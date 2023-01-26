@@ -349,6 +349,15 @@ class TestChangeIdentities:
                     )
                 )
 
+            origin1, tk_delta1 = change_tks_to_original_delta(c_tokens)
+            if origin1 != tk_before:
+                print("origin diff:\n")
+                print(
+                    show_string_diff(decode_tokens(origin1), decode_tokens(tk_before))
+                )
+
+            assert tk_delta1.apply_to_input(origin1) == tk_after
+
 
 def test_code_normalization():
     def check_code_equal(code1: str, code2: str):

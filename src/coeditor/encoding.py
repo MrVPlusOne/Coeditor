@@ -125,15 +125,14 @@ class StrDelta:
     (starting with a '+') followed by optionally a `-` line
     (for deleting the current line)."""
 
-    deltas: Sequence[tuple[str, ...]]
+    _deltas: Mapping[int, tuple[str, ...]]
 
     def apply_to_input(self, input: str):
         lines = input.split("\n")
-        assert len(lines) <= len(self.deltas)
         new_lines = list[str]()
-        for line, delta in zip(lines, self.deltas):
+        for i, line in enumerate(lines):
             deleted = False
-            if delta:
+            if delta := self._deltas.get(i):
                 for action in delta:
                     if action[0] == "+":
                         new_lines.append(action[1:])
@@ -141,28 +140,28 @@ class StrDelta:
                         deleted = True
             if not deleted:
                 new_lines.append(line)
-        if len(self.deltas) == len(lines) + 1:
-            delta = self.deltas[-1]
+        if delta := self._deltas.get(len(lines)):
             for action in delta:
                 if action[0] == "+":
                     new_lines.append(action[1:])
         return "\n".join(new_lines)
 
     def __repr__(self):
-        line_diffs = "\n".join(f"  {l}: {a}" for l, a in enumerate(self.deltas) if a)
+        line_diffs = "\n".join(f"  {l}: {a}" for l, a in enumerate(self._deltas) if a)
         return f"StrDelta(\n{line_diffs}\n)"
 
     def for_input_range(self, line_range: tuple[int, int]) -> Self:
         """Compute the delta for the given line range."""
-        new_delta = self.deltas[line_range[0] : line_range[1]]
+        a, b = line_range
+        new_delta = {k - a: v for k, v in self._deltas.items() if a <= k < b}
         return StrDelta(new_delta)
 
     def __bool__(self) -> bool:
-        return any(bool(a) for a in self.deltas)
+        return bool(self._deltas)
 
     def to_tk_delta(self) -> "TkDelta":
-        deltas = []
-        for line_delta in self.deltas:
+        deltas = dict[int, tuple[TokenSeq, ...]]()
+        for k, line_delta in self._deltas.items():
             line_tk_delta = list[TokenSeq]()
             for action in line_delta:
                 if action[0] == "+":
@@ -171,8 +170,12 @@ class StrDelta:
                     line_tk_delta.append([Del_id])
                 else:
                     raise ValueError(f"Invalid action: {action}")
-            deltas.append(tuple(line_tk_delta))
+            deltas[k] = tuple(line_tk_delta)
         return TkDelta(deltas)
+
+    def num_changes(self) -> int:
+        "Return the number of changed lines in the delta."
+        return sum(len(a) for a in self._deltas.values())
 
 
 def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
@@ -198,19 +201,9 @@ def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
             input_lines.append(diff_line[1:])
     if line_delta:
         deltas[len(input_lines)] = tuple(line_delta)
-        last_change_l = len(input_lines)
-    else:
-        last_change_l = len(input_lines) - 1
 
-    str_delta = StrDelta([deltas.get(i, ()) for i in range(last_change_l + 1)])
-
+    str_delta = StrDelta(deltas)
     input = "\n".join(input_lines)
-    delta_size = len(str_delta.deltas)
-    if not (delta_size - 1 <= count_lines(input) <= delta_size):
-        print_err("input:", repr(input))
-        print_err("deltas:", str_delta.deltas)
-        print_err("diffs:", diffs)
-        raise AssertionError("Invalid delta output.")
     return input, str_delta
 
 
@@ -218,15 +211,14 @@ def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
 class TkDelta:
     """The Tokenized version of :class:`StrDelta`."""
 
-    deltas: Sequence[tuple[TokenSeq, ...]]
+    _deltas: Mapping[int, tuple[TokenSeq, ...]]
 
     def apply_to_input(self, input: TokenSeq):
         lines = split_list(input, Newline_id)
-        assert len(lines) <= len(self.deltas)
         new_lines = list[TokenSeq]()
-        for line, delta in zip(lines, self.deltas):
+        for i, line in enumerate(lines):
             deleted = False
-            if delta:
+            if delta := self._deltas.get(i):
                 for action in delta:
                     if action[0] == Add_id:
                         new_lines.append(action[1:])
@@ -234,25 +226,22 @@ class TkDelta:
                         deleted = True
             if not deleted:
                 new_lines.append(line)
-        if len(self.deltas) == len(lines) + 1:
-            delta = self.deltas[-1]
+        if delta := self._deltas.get(len(lines)):
             for action in delta:
                 if action[0] == Add_id:
                     new_lines.append(action[1:])
         return join_list(new_lines, Newline_id)
 
+    def get_line_change(self, line: int) -> tuple[TokenSeq, ...]:
+        return self._deltas.get(line, ())
+
     def to_change_tks(self, input: TokenSeq) -> TokenSeq:
-        lines = split_list(input, Newline_id) if input else []
-        if len(lines) > len(self.deltas):
-            print_err(f"{self.deltas=}")
-            print_err(f"{input=}")
-            raise ValueError(
-                f"Input is longer than delta: {len(lines)=} > {len(self.deltas)=}"
-            )
+        lines = split_list(input, Newline_id)
+
         new_lines = list[TokenSeq]()
-        for line, delta in zip(lines, self.deltas):
+        for i, line in enumerate(lines):
             deleted = False
-            if delta:
+            if delta := self._deltas.get(i):
                 for action in delta:
                     if action[0] == Add_id:
                         new_lines.append(action)
@@ -262,8 +251,7 @@ class TkDelta:
                 new_lines.append([Del_id] + line)
             else:
                 new_lines.append(line)
-        if len(self.deltas) == len(lines) + 1:
-            delta = self.deltas[-1]
+        if delta := self._deltas.get(len(lines)):
             for action in delta:
                 if action[0] == Add_id:
                     new_lines.append(action)
@@ -271,24 +259,25 @@ class TkDelta:
 
     def __repr__(self):
         line_diffs = "\n".join(
-            f"  {l}: {tuple(map(decode_tokens, a))}"
-            for l, a in enumerate(self.deltas)
+            f"  {k}: {tuple(map(decode_tokens, a))}"
+            for k, a in self._deltas.items()
             if a
         )
         return f"TkDelta(\n{line_diffs}\n)"
 
     def for_input_range(self, line_range: tuple[int, int]) -> Self:
         """Compute the delta for the given line range."""
-        new_delta = self.deltas[line_range[0] : line_range[1]]
+        a, b = line_range
+        new_delta = {k - a: v for k, v in self._deltas.items() if a <= k < b}
         return TkDelta(new_delta)
 
     def __bool__(self) -> bool:
-        return any(bool(a) for a in self.deltas)
+        return bool(self._deltas)
 
     def to_str_delta(self) -> StrDelta:
-        deltas = []
-        for line_delta in self.deltas:
-            line_str_delta = []
+        deltas = dict[int, tuple[str, ...]]()
+        for k, line_delta in self._deltas.items():
+            line_str_delta = list[str]()
             for action in line_delta:
                 if action[0] == Add_id:
                     line_str_delta.append(f"+{decode_tokens(action[1:])}")
@@ -296,8 +285,40 @@ class TkDelta:
                     line_str_delta.append("-")
                 else:
                     raise ValueError(f"Invalid action: {decode_tokens(action)}")
-            deltas.append(tuple(line_str_delta))
+            deltas[k] = tuple(line_str_delta)
         return StrDelta(deltas)
+
+    def num_changes(self) -> int:
+        "Return the number of changed lines in the delta."
+        return StrDelta.num_changes(cast(StrDelta, self))
+
+
+def change_tks_to_original_delta(change: TokenSeq) -> tuple[TokenSeq, TkDelta]:
+    diffs = split_list(change, Newline_id)
+    input_lines: list[TokenSeq] = []
+    line_delta: list[TokenSeq] = []
+    deltas = dict[int, tuple[TokenSeq, ...]]()
+
+    for diff_line in diffs:
+        if diff_line and diff_line[0] == Add_id:
+            line_delta.append(diff_line)
+        elif diff_line and diff_line[0] == Del_id:
+            line_delta.append([Del_id])
+            deltas[len(input_lines)] = tuple(line_delta)
+            del diff_line[:1]
+            input_lines.append(diff_line)
+            line_delta = []
+        else:
+            if line_delta:
+                deltas[len(input_lines)] = tuple(line_delta)
+                line_delta = []
+            input_lines.append(diff_line)
+    if line_delta:
+        deltas[len(input_lines)] = tuple(line_delta)
+
+    str_delta = TkDelta(deltas)
+    input = join_list(input_lines, Newline_id)
+    return input, str_delta
 
 
 def change_to_tokens(change: Change[str]) -> TokenSeq:
@@ -798,17 +819,24 @@ def truncate_section(
     direction: TruncateAt,
     limit: int,
     add_bos: bool = True,
+    inplace: bool = False,
 ) -> TokenSeq:
     if len(sec) <= limit:
         return sec
 
     if direction.value == TruncateAt.Left.value:
-        sec = sec[-limit:]
+        if inplace:
+            del sec[:-limit]
+        else:
+            sec = sec[-limit:]
         if add_bos and sec:
             sec[0] = BOS_id
     else:
         assert_eq(direction.value, TruncateAt.Right.value)
-        sec = sec[:limit]
+        if inplace:
+            del sec[limit:]
+        else:
+            sec = sec[:limit]
         if add_bos and sec:
             sec[-1] = EOS_id
     return sec
@@ -818,6 +846,7 @@ def truncate_sections(
     total_limit: int,
     *sections: tuple[TokenSeq, TruncateAt],
     add_bos: bool,
+    inplace: bool = False,
 ) -> tuple[TokenSeq, ...]:
     """Truncate a list of token sequences to fit within a total length limit.
     Earlier sections have priority over later sections.
@@ -841,7 +870,7 @@ def truncate_sections(
         remaining -= inc
 
     return tuple(
-        truncate_section(tks, truncate_dir, section_lens[i], add_bos)
+        truncate_section(tks, truncate_dir, section_lens[i], add_bos, inplace=inplace)
         for i, (tks, truncate_dir) in enumerate(sections)
     )
 

@@ -2,11 +2,14 @@ from coeditor.encoders import has_change
 from coeditor.encoding import (
     Del_id,
     Newline_id,
+    TkDelta,
     TokenizedEdit,
     TruncateAt,
     break_into_chunks,
+    change_tks_to_original_delta,
     change_to_line_diffs,
     change_to_tokens,
+    decode_tokens,
     encode_basic,
     get_extra_id,
     line_diffs_to_original_delta,
@@ -22,6 +25,8 @@ from spot.static_analysis import (
     ModuleHierarchy,
 )
 from .common import *
+from .tk_array import TkArray
+
 import jedi, parso
 from parso.python import tree
 from jedi.api import helpers, convert_names, classes
@@ -51,7 +56,7 @@ class ChangedHeader:
     This format does not store parent syntax nodes and is more suitable for serialization.
     """
 
-    change: Change[str]
+    change_tks: TkArray
     # below are pre-edit attributes
     type: str
     line_range: LineRange
@@ -60,7 +65,7 @@ class ChangedHeader:
     def __repr__(self) -> str:
         return (
             f"ChangedHeader(path={self.path}, range={self.line_range}, "
-            f"change={self.change})"
+            f"change={self.change_tks})"
         )
 
 
@@ -71,7 +76,7 @@ class ChangedCodeSpan:
     """
 
     headers: Sequence[ChangedHeader]
-    change: Change[str]
+    change_tks: TkArray
     # below are pre-edit attributes
     line_range: LineRange
     module: ModuleName
@@ -86,11 +91,14 @@ class SrcInfo(TypedDict):
 class C3Problem:
     "Contextual code change prediction problem."
     span: ChangedCodeSpan
+    # the lines to be edited
+    edit_lines: Collection[int]
     # most relevant to least relevant
     relevant_changes: Sequence[ChangedCodeSpan]
     # most relevant to least relevant
     relevant_unchanged: Sequence[ChangedCodeSpan]
     # some optional information about how the problem was generated
+    change_type: Change[None]
     src_info: SrcInfo
 
 
@@ -127,9 +135,11 @@ class LineUsageAnalysis:
 
 
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
-    VERSION = "2.0"
+    VERSION = "2.1"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
+    max_lines_to_edit: int = 20
+    max_problems_per_elem: int = 4
 
     def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
         if analyzer is None:
@@ -248,13 +258,13 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             for f_scope in func_scopes:
                 ancestors = f_scope.ancestors()
                 stmts = f_scope.spans[-1].statements
-                body_code = stmts[-1].get_code().strip("\n")
+                body_code = stmts[-1].get_code()
                 if len(stmts) > 1:
                     ellipsis = "    " * (len(ancestors) - 1) + "# ...\n"
                     body_code = ellipsis + body_code
                 cspan = ChangedCodeSpan(
-                    [_to_header(Modified.from_unchanged(s)) for s in ancestors],
-                    Modified.from_unchanged(body_code),
+                    [to_header(Modified.from_unchanged(s)) for s in ancestors],
+                    TkArray.new(encode_basic(body_code)),
                     f_scope.spans[-1].line_range,
                     f_scope.path.module,
                 )
@@ -265,8 +275,8 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 ancestors = stmt_span.scope.ancestors()
                 body_code = stmt_span.code
                 cspan = ChangedCodeSpan(
-                    [_to_header(Modified.from_unchanged(s)) for s in ancestors],
-                    Modified.from_unchanged(body_code),
+                    [to_header(Modified.from_unchanged(s)) for s in ancestors],
+                    TkArray.new(encode_basic(body_code)),
                     stmt_span.line_range,
                     stmt_span.scope.path.module,
                 )
@@ -278,9 +288,6 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         def get_relevant_unchanged(
             this_change: ChangedCodeSpan, other_changes: Collection[ChangedCodeSpan]
         ):
-            if isinstance(this_change.change, Added):
-                # nothing to analyze
-                return []
             module = this_change.module
             line_usages = mod2usages[module]
             # parent defs are also considered as used
@@ -325,11 +332,12 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
         header_cache = dict[ProjectPath, ChangedHeader]()
 
-        def _to_header(cs: Change[ChangeScope]) -> ChangedHeader:
+        def to_header(cs: Change[ChangeScope]) -> ChangedHeader:
             path = cs.earlier().path
             if (ch := header_cache.get(path)) is None:
+                header_change = cs.map(lambda s: s.header_code.strip("\n"))
                 ch = ChangedHeader(
-                    cs.map(lambda s: s.header_code),
+                    TkArray.new(change_to_tokens(header_change)),
                     cs.earlier().tree.type,
                     cs.earlier().header_line_range,
                     cs.earlier().path,
@@ -343,9 +351,18 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             if (mchange := pchange.changed.get(m)) is None:
                 continue
             for span in mchange.changed.values():
+                original, delta = line_diffs_to_original_delta(
+                    change_to_line_diffs(span.change)
+                )
+                change_tks = change_to_tokens(span.change)
+                n_lines = count_lines(original)
+
+                def change_counts(r: range) -> int:
+                    return delta.for_input_range((r.start, r.stop)).num_changes()
+
                 code_span = ChangedCodeSpan(
-                    headers=[_to_header(cs) for cs in span.parent_scopes],
-                    change=span.change,
+                    headers=[to_header(cs) for cs in span.parent_scopes],
+                    change_tks=TkArray.new(change_tks),
                     line_range=span.line_range,
                     module=span.path.module,
                 )
@@ -358,18 +375,32 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 if should_mk_problem:
                     # latest changes are more relevant
                     relevant_changes = list(reversed(processed_cspans))
-                    prob = C3Problem(
-                        code_span,
-                        relevant_changes=relevant_changes,
-                        relevant_unchanged=get_relevant_unchanged(
-                            code_span, relevant_changes
-                        ),
-                        src_info={
-                            "project": pchange.project_name,
-                            "commit": pchange.commit_info,
-                        },
+                    relevant_unchanged = get_relevant_unchanged(
+                        code_span, relevant_changes
                     )
-                    problems.append(prob)
+                    src_info: SrcInfo = {
+                        "project": pchange.project_name,
+                        "commit": pchange.commit_info,
+                    }
+                    edit_ranges = list[range]()
+                    for i in range(0, n_lines, self.max_lines_to_edit):
+                        r = range(i, min(n_lines, i + self.max_lines_to_edit))
+                        c = change_counts(r)
+                        if c > 0:
+                            edit_ranges.append(r)
+                        if len(edit_ranges) >= self.max_problems_per_elem:
+                            break
+
+                    for r in edit_ranges:
+                        prob = C3Problem(
+                            code_span,
+                            r,
+                            relevant_changes=relevant_changes,
+                            relevant_unchanged=relevant_unchanged,
+                            change_type=span.change.map(lambda _: None),
+                            src_info=src_info,
+                        )
+                        problems.append(prob)
                 processed_cspans.append(code_span)
         return problems
 
@@ -377,31 +408,39 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 @dataclass(frozen=True)
 class TkC3Problem(TokenizedEdit):
     "Tokenized contextual code change prediction problem."
-    input_tks: TokenSeq
-    output_tks: TokenSeq
+    input: TkArray
+    output: TkArray
     path: ProjectPath
     change_type: Change[None]
     # most relevant to least relevant
-    named_references: Sequence[tuple[str, TokenSeq]]
+    named_references: Sequence[tuple[str, TkArray]]
     project: str
     commit: CommitInfo | None
 
     @property
-    def references(self) -> Sequence[TokenSeq]:
-        return [ref for name, ref in self.named_references]
+    def references(self) -> Sequence[TkArray]:
+        return [ref for _, ref in self.named_references]
 
     def __repr__(self):
         return f"TkC3Problem(path={self.path}, type={self.change_type.as_char()}, stats={self.stats()})"
 
     @property
-    def main_tks(self):
+    def input_tks(self) -> TokenSeq:
+        return self.input.tolist()
+
+    @property
+    def output_tks(self) -> TokenSeq:
+        return self.output.tolist()
+
+    @property
+    def main_tks(self) -> TokenSeq:
         return self.input_tks
 
     def show(self) -> str:
         return self.show_prediction(None)
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
-        return {name: ref for name, ref in self.named_references}
+        return {name: ref.tolist() for name, ref in self.named_references}
 
     def meta_data_lines(self) -> list[str]:
         return [
@@ -423,184 +462,130 @@ class TkC3Problem(TokenizedEdit):
 
 @dataclass
 class C3ProblemTokenizer:
-    VERSION = "1.0"
+    VERSION = "2.0"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
     max_scope_tks: int = 128
-    max_lines_to_edit: int = 20
     ref_chunk_overlap: int = 32
-    max_chunks_per_elem: int = 4
-    skip_unchanged_problems: bool = True
 
     def __post_init__(self):
-        self._change_cache = LRUCache[Change[str], TokenSeq](maxsize=500)
+        self._offset_cache = LRUCache[int, TkArray](maxsize=100)
 
     def tokenize_problem(
         self,
         problem: C3Problem,
-    ) -> Sequence[TkC3Problem]:
+    ) -> TkC3Problem:
         span = problem.span
-        named_references = list[tuple[str, TokenSeq]]()
+        named_references = list[tuple[str, TkArray]]()
         # compute the references that are relevant to this span
         relevant_chunks = self._group_encode_changed_refs(problem.relevant_changes)
         for i, chunk in enumerate(relevant_chunks):
-            named_references.append((f"changed ref {i}", chunk))
+            named_references.append((f"changed ref {i}", TkArray.new(chunk)))
         relevant_chunks = self._group_encode_unchanged_refs(problem.relevant_unchanged)
         for i, chunk in enumerate(relevant_chunks):
-            named_references.append((f"unchanged ref {i}", chunk))
+            named_references.append((f"unchanged ref {i}", TkArray.new(chunk)))
 
-        diffs = change_to_line_diffs(span.change)
-        original, delta = line_diffs_to_original_delta(diffs)
-        origin_lines = split_list(encode_basic(original), Newline_id)
-        tk_delta = delta.to_tk_delta()
-        chunk_id = 0
-        chunk_start_l = 0
+        original: TokenSeq
+        tk_delta: TkDelta
+        original, tk_delta = change_tks_to_original_delta(span.change_tks.tolist())
+        origin_lines = split_list(original, Newline_id)
+        assert isinstance(problem.edit_lines, range), "Only support range for now"
+        edit_start = problem.edit_lines[0]
+        edit_end = problem.edit_lines[-1] + 1
         scope_tks = self._encode_headers(span.headers, 0)
-        chunk_input = TokenSeq()
         input_limit = self.max_query_tks - len(scope_tks)
-        chunk_lines = 0
+
+        chunk_input = TokenSeq()
         chunk_output = TokenSeq()
-        prev_change_tks = TokenSeq()
 
-        def get_problem(chunk_input, chunk_output):
-            # try move some prev_change_tks into the input
-            above_tks = prev_change_tks
-            below_tks = join_list(origin_lines[l:], Newline_id)
-            chunk_input, above_tks, below_tks = self._inline_some_context(
-                chunk_input, above_tks, below_tks, input_limit
-            )
-
-            # limit the input size if it's too long (can happen for later chunks)
-            chunk_input = truncate_section(chunk_input, TruncateAt.Right, input_limit)
-            chunk_output = truncate_output_tks(chunk_input, chunk_output)
-            chunk_output = truncate_section(
-                chunk_output, TruncateAt.Right, self.max_output_tks, add_bos=False
-            )
-
-            above_chunks = break_into_chunks(
-                above_tks,
-                lambda i: self._encode_headers(span.headers, -1 - i),
-                chunk_size=self.max_ref_tks,
-                overlap=self.ref_chunk_overlap,
-                right_to_left=True,
-            )
-            if finished:
-                below_chunks = []
-            else:
-                below_chunks = break_into_chunks(
-                    below_tks,
-                    lambda i: self._encode_headers(span.headers, i + 1),
-                    chunk_size=self.max_ref_tks,
-                    overlap=self.ref_chunk_overlap,
-                )
-            above_chunks = [
-                (f"above chunk {i}", chunk) for i, chunk in enumerate(above_chunks)
-            ]
-            below_chunks = [
-                (f"below chunk {i}", chunk) for i, chunk in enumerate(below_chunks)
-            ]
-            all_refs = above_chunks + below_chunks + named_references
-
-            return TkC3Problem(
-                scope_tks + chunk_input,
-                chunk_output,
-                path=span.headers[-1].path,
-                change_type=span.change.map(lambda _: None),
-                named_references=all_refs,
-                project=problem.src_info["project"],
-                commit=problem.src_info["commit"],
-            )
-
-        problems = list[TkC3Problem]()
-        for l in range(len(tk_delta.deltas) + 1):
-            finished = l == len(tk_delta.deltas)
-            input_growth = len(origin_lines[l]) + 2 if l < len(origin_lines) else 1
-            if (
-                finished
-                or chunk_lines >= self.max_lines_to_edit
-                or len(chunk_input) + input_growth > input_limit
-            ):
-                if has_change(chunk_output):
-                    problems.append(get_problem(chunk_input, chunk_output))
-                    if len(problems) >= self.max_chunks_per_elem:
-                        break
-
-                if finished:
-                    break
-
-                chunk_main_input = join_list(origin_lines[chunk_start_l:l], Newline_id)
-                chunk_main_delta = tk_delta.for_input_range((chunk_start_l, l))
-                chunk_main_change = chunk_main_delta.to_change_tks(chunk_main_input)
-                prev_change_tks.extend(chunk_main_change)
-                prev_change_tks.append(Newline_id)
-                chunk_id += 1
-                chunk_input = TokenSeq()
-                chunk_lines = 0
-                chunk_output = TokenSeq()
-                chunk_start_l = l
-
-            chunk_input.append(get_extra_id(chunk_lines))
+        for i in range(len(problem.edit_lines)):
+            chunk_input.append(get_extra_id(i))
+            l = edit_start + i
             if l < len(origin_lines):
                 chunk_input.extend(origin_lines[l])
                 chunk_input.append(Newline_id)
-            line_change = join_list(tk_delta.deltas[l], Newline_id)
-            chunk_output.append(get_extra_id(chunk_lines))
+            line_change = join_list(tk_delta.get_line_change(l), Newline_id)
+            chunk_output.append(get_extra_id(i))
             chunk_output.extend(line_change)
             if line_change and line_change[-1] != Del_id:
                 chunk_output.append(Newline_id)
-            chunk_lines += 1
-        return problems
 
-    def _tokenize_problems(self, problems: Sequence[C3Problem]) -> list[TkC3Problem]:
-        return join_list(self.tokenize_problem(p) for p in problems)
-
-    def tokenize_datasets(
-        self,
-        split2problems: Mapping[str, Sequence[C3Problem]],
-        max_workers: int | None = None,
-    ) -> dict[str, list[TkC3Problem]]:
-        def get_key(p: C3Problem):
-            return (p.src_info["project"], not_none(p.src_info["commit"]).hash)
-
-        # we want problems from the same commit to be sent in groups
-        key2split = {
-            get_key(p): name for name, split in split2problems.items() for p in split
-        }
-        all_problems = join_list(split2problems.values())
-        key2problems = groupby(all_problems, lambda p: get_key(p))
-        all_probs = list(key2problems.values())
-        all_edits = pmap(
-            self._tokenize_problems,
-            all_probs,
-            desc=f"Tokenizing dataset",
-            tqdm_args={"unit": "commit"},
-            max_workers=max_workers,
+        # try move some prev_change_tks into the input
+        above_tks = join_list(origin_lines[:edit_start], Newline_id)
+        above_tks = tk_delta.for_input_range((0, edit_start)).apply_to_input(above_tks)
+        below_tks = join_list(origin_lines[edit_end:], Newline_id)
+        chunk_input, above_tks, below_tks = self._inline_some_context(
+            chunk_input, above_tks, below_tks, input_limit
         )
-        datasets = {name: list[TkC3Problem]() for name in split2problems}
-        for edits, key in zip(all_edits, key2problems.keys()):
-            datasets[key2split[key]].extend(edits)
-        return datasets
 
-    def _encode_header_change(self, ch: ChangedHeader) -> TokenSeq:
-        hchange = ch.change.map(lambda s: s.strip("\n"))
-        tks = truncate_section(
-            change_to_tokens(hchange), TruncateAt.Left, self.max_scope_tks
+        # limit the input size if it's too long (can happen for later chunks)
+        chunk_input = truncate_section(
+            chunk_input, TruncateAt.Right, input_limit, inplace=True
         )
-        return tks
+        chunk_output = truncate_output_tks(chunk_input, chunk_output)
+        chunk_output = truncate_section(
+            chunk_output,
+            TruncateAt.Right,
+            self.max_output_tks,
+            add_bos=False,
+            inplace=True,
+        )
+
+        above_chunks = break_into_chunks(
+            above_tks,
+            lambda i: self._encode_headers(span.headers, -1 - i),
+            chunk_size=self.max_ref_tks,
+            overlap=self.ref_chunk_overlap,
+            right_to_left=True,
+        )
+        if not below_tks:
+            below_chunks = []
+        else:
+            below_chunks = break_into_chunks(
+                below_tks,
+                lambda i: self._encode_headers(span.headers, i + 1),
+                chunk_size=self.max_ref_tks,
+                overlap=self.ref_chunk_overlap,
+            )
+        above_chunks = [
+            (f"above chunk {i}", TkArray.new(chunk))
+            for i, chunk in enumerate(above_chunks)
+        ]
+        below_chunks = [
+            (f"below chunk {i}", TkArray.new(chunk))
+            for i, chunk in enumerate(below_chunks)
+        ]
+        all_refs = above_chunks + below_chunks + named_references
+
+        return TkC3Problem(
+            TkArray.new(scope_tks + chunk_input),
+            TkArray.new(chunk_output),
+            path=span.headers[-1].path,
+            change_type=problem.change_type,
+            named_references=all_refs,
+            project=problem.src_info["project"],
+            commit=problem.src_info["commit"],
+        )
 
     def _encode_headers(
         self, scope_changes: Sequence[ChangedHeader], offset: int
     ) -> TokenSeq:
-        scope_tks = join_list(
-            (self._encode_header_change(c) for c in scope_changes), Newline_id
-        )
+        segs = [c.change_tks.tolist() for c in scope_changes]
         if offset != 0:
-            scope_tks.extend(encode_basic(f"\n# offset: {offset}\n"))
-        else:
-            scope_tks.append(Newline_id)
-        scope_tks = truncate_section(scope_tks, TruncateAt.Left, self.max_scope_tks)
+            segs.append(self._get_offset_tks(offset).tolist())
+        segs.append([])
+        scope_tks = join_list(segs, Newline_id)
+        scope_tks = truncate_section(
+            scope_tks, TruncateAt.Left, self.max_scope_tks, inplace=True
+        )
         return scope_tks
+
+    def _get_offset_tks(self, offset: int) -> TkArray:
+        if (tks := self._offset_cache.get(offset)) is None:
+            tks = TkArray.new(encode_basic(f"# offset: {offset}"))
+            self._offset_cache[offset] = tks
+        return tks
 
     def _inline_some_context(
         self,
@@ -635,12 +620,6 @@ class C3ProblemTokenizer:
             input = truncated_above + input + truncated_below
         return input, above_ctx, below_ctx
 
-    def _encode_change(self, change: Change[str]) -> TokenSeq:
-        if (change_tks := self._change_cache.get(change)) is None:
-            change_tks = change_to_tokens(change)
-            self._change_cache[change] = change_tks
-        return change_tks
-
     def _group_encode_unchanged_refs(
         self, elems: Sequence[ChangedCodeSpan]
     ) -> Sequence[TokenSeq]:
@@ -653,7 +632,7 @@ class C3ProblemTokenizer:
         all_chunks = list[TokenSeq]()
         for change_group in module2changes.values():
             change_group.sort(key=lambda c: c.line_range[0])
-            file_tks = TokenSeq()
+            segs = list[TokenSeq]()
             # we'll add module as the chunk header, so we start within the module
             last_scope = change_group[0].headers[:1]
             for c in change_group:
@@ -663,16 +642,14 @@ class C3ProblemTokenizer:
                         header_diff.append(h)
                 if header_diff:
                     header_tks = self._encode_headers(header_diff, 0)
-                    file_tks.extend(header_tks)
-                body_tks = self._encode_change(c.change.map(lambda c: c.strip("\n")))
-                file_tks.extend(body_tks)
-                file_tks.append(Newline_id)
-                file_tks.append(Newline_id)
+                    segs.append(header_tks)
+                segs.append(c.change_tks.tolist())
+                segs.append([Newline_id, Newline_id])
                 last_scope = c.headers
-
+            segs.append([Newline_id])
             mod_change = change_group[0].headers[:1]
             mod_chunks = break_into_chunks(
-                file_tks,
+                join_list(segs),
                 lambda i: self._encode_headers(mod_change, i),
                 self.max_ref_tks,
                 overlap=self.ref_chunk_overlap,
