@@ -3,10 +3,10 @@ import shutil
 from pathlib import Path
 
 import pytest
+
 from spot.static_analysis import FunctionSignature, mask_types
 from spot.tokenized_src import PreprocessArgs
 from spot.type_check import MypyResult, PythonType, remove_top_optional
-
 from spot.type_env import (
     AnnotCat,
     AnnotPath,
@@ -23,11 +23,11 @@ from spot.type_env import (
     type_inf_env,
 )
 from spot.utils import (
+    SpecialNames,
     as_any,
     assert_eq,
-    proj_root,
-    SpecialNames,
     cst,
+    proj_root,
     read_file,
     write_file,
 )

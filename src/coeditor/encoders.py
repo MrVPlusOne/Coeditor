@@ -1,11 +1,12 @@
 import logging
+
 from coeditor.encoding import (
     Add_id,
     BOS_id,
     CtxEncoder,
     Del_id,
-    EOS_id,
     EditEncoder,
+    EOS_id,
     Newline_id,
     TokenizedEdit,
     TruncateAt,
@@ -31,6 +32,8 @@ from spot.static_analysis import (
     show_element,
     stub_from_module,
 )
+
+from .common import *
 from .history import (
     Added,
     Change,
@@ -42,7 +45,6 @@ from .history import (
     show_change,
     to_modified_function,
 )
-from .common import *
 
 TQueryEdit = TypeVar("TQueryEdit")
 

@@ -1,5 +1,7 @@
-from abc import abstractmethod, ABC
+from abc import ABC, abstractmethod
+
 import numpy as np
+
 from coeditor.common import *
 from coeditor.encoding import TruncateAt, decode_tokens, truncate_section
 

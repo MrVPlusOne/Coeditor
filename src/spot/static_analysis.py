@@ -2,25 +2,26 @@
 # project-level static analysis
 
 import copy
-from functools import cache, lru_cache, cached_property
 import enum
+from functools import cache, cached_property, lru_cache
 
 from libcst import MetadataWrapper
-
-from spot import PythonType
-from .type_check import parse_type_expr
-from .type_env import AccuracyMetric, AnnotCat, AnnotPath, type_accuracies
-
-from .utils import *
+from libcst._metadata_dependent import LazyValue
 from libcst.metadata import (
     CodeRange,
-    QualifiedNameProvider,
-    QualifiedName,
-    QualifiedNameSource,
     PositionProvider,
+    QualifiedName,
+    QualifiedNameProvider,
+    QualifiedNameSource,
 )
-from libcst._metadata_dependent import LazyValue
-from pyrsistent import pmap as persist_map, PMap
+from pyrsistent import PMap
+from pyrsistent import pmap as persist_map
+
+from spot import PythonType
+
+from .type_check import parse_type_expr
+from .type_env import AccuracyMetric, AnnotCat, AnnotPath, type_accuracies
+from .utils import *
 
 ModuleName = str
 ElemPath = str

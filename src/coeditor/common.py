@@ -1,48 +1,49 @@
-from argparse import ArgumentError
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+import ast
+import asyncio
+import enum
+import html
+import itertools
 import json
+import math
+import numbers
 import os
 import random
+import subprocess
 import sys
+import textwrap
+import warnings
+from argparse import ArgumentError
+from concurrent.futures import Executor, ProcessPoolExecutor
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from textwrap import dedent
 from typing import *
 
 import libcst as cst
-import textwrap
-from textwrap import dedent
-from pathlib import Path
+from IPython.display import HTML, display
 from tqdm import tqdm
-import subprocess
-import enum
+
+from spot.static_analysis import split_dots
 from spot.utils import (
     DefaultWorkers,
+    PickleCache,
+    TimeLogger,
+    as_any,
     assert_eq,
-    groupby,
-    show_expr,
     compute_line_diffs,
+    get_modified_args,
+    groupby,
+    not_none,
+    pfilter,
+    pickle_dump,
+    pickle_load,
+    pmap,
+    repr_modified_args,
+    show_expr,
     show_string_diff,
     timed_action,
-    TimeLogger,
-    pmap,
-    pfilter,
-    pickle_load,
-    pickle_dump,
-    as_any,
-    not_none,
-    get_modified_args,
-    repr_modified_args,
-    PickleCache,
 )
-from spot.static_analysis import split_dots
-from IPython.display import display, HTML
-import html
-import asyncio
-from concurrent.futures import Executor, ProcessPoolExecutor
-import numbers
-import ast
-import warnings
-import math
-import itertools
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")

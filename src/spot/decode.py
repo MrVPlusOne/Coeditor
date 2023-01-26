@@ -1,5 +1,5 @@
-from copy import deepcopy
 import multiprocessing
+from copy import deepcopy
 
 from datasets import Dataset
 
@@ -8,11 +8,11 @@ from .data import (
     CtxArgs,
     SrcCheckResult,
     SrcChunkInfo,
-    TokenizedSrcSet,
     TokenizedSrc,
+    TokenizedSrcSet,
     code_to_check_from_preds,
-    src_to_chunks_,
     feedbacks_to_tokenized_src,
+    src_to_chunks_,
 )
 from .model import DatasetPredResult, DecodingArgs, ModelWrapper, dynamic_dataloader
 from .type_check import (

@@ -3,15 +3,19 @@ import difflib
 import io
 import logging
 import math
+import multiprocessing
 import os
 import pickle
 import shutil
+import textwrap
 import time
+import warnings
 from abc import ABC, abstractmethod
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import *
 
@@ -20,11 +24,7 @@ import numpy as np
 import pandas as pd
 from IPython.display import display
 from libcst.metadata import CodePosition, CodeRange
-import multiprocessing
-import textwrap
 from termcolor import colored
-from functools import cache
-import warnings
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm

@@ -1,5 +1,6 @@
 from spot.model import DatasetPredResult
 from spot.type_check import PythonType
+
 from .data import TokenizedSrcSet
 from .static_analysis import (
     ElemSignature,

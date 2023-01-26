@@ -14,10 +14,10 @@ from .function_dataset import (
 )
 from .model import DatasetPredResult, ModelWrapper
 from .static_analysis import (
+    ElemPath,
     ElemSignature,
     FunctionSignature,
     ModuleName,
-    ElemPath,
     ProjectPath,
     PythonElem,
     PythonFunction,
@@ -29,11 +29,7 @@ from .static_analysis import (
 )
 from .tokenized_src import PreprocessArgs, TokenSeq, tokenized_src_from_segs
 from .type_check import PythonType, parse_type_str
-from .type_env import (
-    AccuracyMetric,
-    AnnotPath,
-    collect_user_annotations,
-)
+from .type_env import AccuracyMetric, AnnotPath, collect_user_annotations
 from .utils import *
 
 

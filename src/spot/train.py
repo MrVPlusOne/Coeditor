@@ -7,7 +7,6 @@ from typing import *
 
 import torch
 import torch.nn as nn
-
 from torch.optim import AdamW
 from transformers import DataCollatorForSeq2Seq
 from transformers.modeling_outputs import Seq2SeqLMOutput
@@ -97,8 +96,9 @@ def train_spot_model(
     use_small_model=False,
 ) -> ModelWrapper:
     import pytorch_lightning as pl  # type: ignore
-    from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint # type: ignore
-    from pytorch_lightning.loggers import WandbLogger # type: ignore
+    from pytorch_lightning.callbacks import EarlyStopping  # type: ignore
+    from pytorch_lightning.callbacks import ModelCheckpoint
+    from pytorch_lightning.loggers import WandbLogger  # type: ignore
 
     class TrainModelWrapper(pl.LightningModule):
         "A pytorch lightening module that handles training and evaluation of the SPOT model."

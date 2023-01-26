@@ -1,34 +1,31 @@
 # utils to encode and decode code changes into CodeT5 format.
 
-from abc import ABC, abstractmethod
 import asyncio
-from dataclasses import field
-import difflib
 import copy
+import difflib
 import random
-
+from abc import ABC, abstractmethod
+from dataclasses import field
 from textwrap import indent
-from spot.static_analysis import (
-    ProjectPath,
-    PythonElem,
-    PythonFunction,
-    show_element,
-)
+
+from nltk.translate.bleu_score import sentence_bleu
+
 import spot.utils
 from spot.data import output_ids_as_seqs
+from spot.static_analysis import ProjectPath, PythonElem, PythonFunction, show_element
+
 from .common import *
 from .history import (
-    Change,
-    Modified,
     Added,
+    Change,
     Deleted,
+    Modified,
     ModuleEdit,
     ProjectEdit,
     analyze_edits,
     get_change_path,
     show_change,
 )
-from nltk.translate.bleu_score import sentence_bleu
 
 """
 Only use this when we want to avoid encoding <add> and <del> as special tokens.

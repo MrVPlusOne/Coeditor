@@ -1,10 +1,10 @@
 # %%
 
-import os
 import asyncio
+import os
 from typing import *
 
-from spot.utils import not_none, proj_root, get_dataroot
+from spot.utils import get_dataroot, not_none, proj_root
 
 os.chdir(proj_root())
 
@@ -13,14 +13,11 @@ datadir = get_dataroot()
 # %%
 # experiment configurations
 
-from spot.data import (
-    get_tk_dataset_name,
-    load_tokenized_srcsets,
-    TypeCheckSettings,
-)
+from termcolor import colored
+
+from spot.data import TypeCheckSettings, get_tk_dataset_name, load_tokenized_srcsets
 from spot.model import CtxArgs, DecodingArgs, ModelSPOT, ModelWrapper
 from spot.train import TrainingConfig, TypeCheckArgs
-from termcolor import colored
 
 use_type_checker = False
 
@@ -55,12 +52,13 @@ tk_dataset = load_tokenized_srcsets(
 )
 
 
+import torch
+
+from spot.dagger import DAggerModel
+
 # %%
 # initialize the model
-from spot.model import load_model_spot, DefaultTokenizer
-from spot.model import ModelWrapper
-from spot.dagger import DAggerModel
-import torch
+from spot.model import DefaultTokenizer, ModelWrapper, load_model_spot
 
 train_dec_args = DecodingArgs(
     max_batch_cost=8 * config.ctx_size,
@@ -84,12 +82,14 @@ dmodel = DAggerModel(wrapper, use_type_checker=use_type_checker)
 # pretty_print_dict(eval_r.accuracies)
 
 
+import shutil
+
+import wandb
+
 # %%
 # train the model
 from spot.dagger import DAggerArgs
 from spot.utils import run_long_task
-import wandb
-import shutil
 
 ckpt_dir = datadir / f"checkpoints/running/{model_name}"
 
@@ -126,7 +126,7 @@ with run_long_task("DAgger training"):
 
 # %%
 # post-train full evaluation
-from spot.utils import pretty_print_dict, pretty_show_dict, PickleCache
+from spot.utils import PickleCache, pretty_print_dict, pretty_show_dict
 from spot.visualization import string_to_html
 
 test_dec_args = DecodingArgs(
@@ -158,6 +158,7 @@ wandb.log({"test/accuracies": wandb_string(pretty_show_dict(eval_r.accuracies))}
 # %%
 # compute valid set performance
 import re
+
 from spot.utils import not_none
 
 validset = tk_dataset["valid"][0:-1:3]

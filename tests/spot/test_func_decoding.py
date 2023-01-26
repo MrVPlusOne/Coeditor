@@ -1,15 +1,12 @@
+import copy
 from pathlib import Path
-from spot.utils import *
-
-from spot.static_analysis import (
-    cst,
-    to_abs_import_path as to_abs,
-)
-from spot.function_dataset import FunctionSignature
 
 import pytest
-import copy
 
+from spot.function_dataset import FunctionSignature
+from spot.static_analysis import cst
+from spot.static_analysis import to_abs_import_path as to_abs
+from spot.utils import *
 from spot.utils import assert_eq, groupby, not_none, show_string_diff
 
 

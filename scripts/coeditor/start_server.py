@@ -1,15 +1,16 @@
-from coeditor.common import *
-from coeditor.retrieval_model import RetrievalEditorModel, AttentionMode
-from coeditor.api import (
-    ChangeDetectionConfig,
-    EditPredictionService,
-    QueryRefEditEncoder,
-    BatchArgs,
-    DecodingArgs,
-)
 import traceback
 
-from jsonrpcserver import Success, method, serve, InvalidParams, Result, Error
+from jsonrpcserver import Error, InvalidParams, Result, Success, method, serve
+
+from coeditor.api import (
+    BatchArgs,
+    ChangeDetectionConfig,
+    DecodingArgs,
+    EditPredictionService,
+    QueryRefEditEncoder,
+)
+from coeditor.common import *
+from coeditor.retrieval_model import AttentionMode, RetrievalEditorModel
 
 
 def start_server(

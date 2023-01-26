@@ -3,11 +3,12 @@ import random
 from typing import *
 
 import wandb
+from prepare_data import make_or_load_datasets
+
 from coeditor.common import *
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import AnalysisBasedEditEncoder, CstBasedEditEncoder, EditEncoder
 from coeditor.model import *
-from prepare_data import make_or_load_datasets
 from spot.model import input_cost_model
 from spot.utils import run_long_task
 

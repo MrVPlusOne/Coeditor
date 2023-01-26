@@ -3,12 +3,15 @@
 import io
 import logging
 import sys
+import textwrap
+
 import torch
-from coeditor.common import *
 from libcst.metadata import CodePosition, CodeRange
+
+from coeditor.common import *
 from coeditor.encoders import (
-    QueryRefEditEncoder,
     EditRequest,
+    QueryRefEditEncoder,
     apply_output_tks_to_change,
     change_tks_to_query_context,
 )
@@ -22,7 +25,6 @@ from coeditor.encoding import (
     is_extra_id,
     tokens_to_change,
 )
-
 from coeditor.history import (
     Added,
     Modified,
@@ -51,8 +53,6 @@ from spot.static_analysis import (
     remove_comments,
 )
 from spot.utils import add_line_numbers
-
-import textwrap
 
 DropComment = bool
 

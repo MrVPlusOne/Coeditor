@@ -1,3 +1,13 @@
+import jedi
+import jedi.cache
+import jedi.parser_utils
+import parso
+import parso.cache
+from cachetools import LRUCache
+from jedi.api import classes, convert_names, helpers
+from parso.python import tree
+from parso.python import tree as ptree
+
 from coeditor.encoders import has_change
 from coeditor.encoding import (
     Del_id,
@@ -19,35 +29,27 @@ from coeditor.encoding import (
 )
 from coeditor.history import Added, Change, CommitInfo, Modified
 from spot.static_analysis import (
+    ModuleHierarchy,
     ModuleName,
     ProjectPath,
     sort_modules_by_imports,
-    ModuleHierarchy,
 )
-from .common import *
-from .tk_array import TkArray
 
-import jedi, parso
-from parso.python import tree
-from jedi.api import helpers, convert_names, classes
 from .code_change import (
-    ChangeScope,
     ChangedSpan,
+    ChangeScope,
     JModule,
+    JModuleChange,
     JProjectChange,
     LineRange,
     ProjectChangeProcessor,
     ProjectState,
-    JModuleChange,
     ScopeTree,
     StatementSpan,
     line_range,
 )
-from parso.python import tree as ptree
-from cachetools import LRUCache
-import jedi.cache
-import jedi.parser_utils
-import parso.cache
+from .common import *
+from .tk_array import TkArray
 
 
 @dataclass(frozen=True)

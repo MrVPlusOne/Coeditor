@@ -1,11 +1,12 @@
 import json
+import subprocess
+
 from spot.experiments.utils import SupportedSyntax
+from spot.function_dataset import collect_public_api_labels
 from spot.static_analysis import LabelInfo, ModuleName, PythonProject
 from spot.type_check import PythonType, parse_type_expr, parse_type_str
 from spot.type_env import AccuracyMetric, type_accuracies
 from spot.utils import *
-from spot.function_dataset import collect_public_api_labels
-import subprocess
 
 JSON = dict
 

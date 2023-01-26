@@ -9,9 +9,12 @@ from typing import *
 
 import torch
 import wandb
+from termcolor import colored
+
+from spot.experiments.typet5 import TypeT5Configs
 from spot.function_dataset import data_project_from_dir
 from spot.model import ModelWrapper
-from spot.train import TrainingConfig, PreprocessArgs
+from spot.train import PreprocessArgs, TrainingConfig
 from spot.type_env import AccuracyMetric
 from spot.utils import (
     assert_eq,
@@ -29,8 +32,6 @@ from spot.utils import (
     write_file,
 )
 from spot.visualization import string_to_html
-from termcolor import colored
-from spot.experiments.typet5 import TypeT5Configs
 
 os.chdir(proj_root())
 
@@ -84,12 +85,8 @@ if not load_results:
 
 # %%
 
-from spot.function_decoding import (
-    DecodingOrders,
-    EvalResult,
-    RolloutCtx,
-)
 from spot.experiments.typet5 import accs_as_table_row
+from spot.function_decoding import DecodingOrders, EvalResult, RolloutCtx
 
 ctx_args = model.args.ctx_args
 ctx_args.max_labels = 16
@@ -161,9 +158,10 @@ with run_long_task("Evaluating different decoding strategy", notify=not load_res
         accs_as_table_row(accs)
 
 
+import prettytable as pt
+
 # %%
 from prettytable import PrettyTable
-import prettytable as pt
 
 common_type_names = ModelWrapper.load_common_type_names(get_model_dir() / model_name)
 results_table = PrettyTable()

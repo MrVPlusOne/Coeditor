@@ -1,33 +1,25 @@
-from abc import ABC, abstractmethod
 import copy
-from functools import cached_property
-import time
-import warnings
 import shutil
 import sys
-from coeditor.encoding import change_to_line_diffs, line_diffs_to_original_delta
-from spot.static_analysis import (
-    ElemPath,
-    ModuleName,
-    ProjectPath,
-)
-from spot.utils import rec_iter_files
-from .common import *
-from .history import (
-    Change,
-    Added,
-    Modified,
-    Deleted,
-    get_named_changes,
-    CommitInfo,
-)
+import time
+import warnings
+from abc import ABC, abstractmethod
+from functools import cached_property
+
 import jedi
 import jedi.settings
-from parso.python import tree as ptree
-from parso.tree import NodeOrLeaf, BaseNode
-from jedi.inference.references import recurse_find_python_files
 from jedi.file_io import FileIO, FolderIO
 from jedi.inference.context import ModuleContext
+from jedi.inference.references import recurse_find_python_files
+from parso.python import tree as ptree
+from parso.tree import BaseNode, NodeOrLeaf
+
+from coeditor.encoding import change_to_line_diffs, line_diffs_to_original_delta
+from spot.static_analysis import ElemPath, ModuleName, ProjectPath
+from spot.utils import rec_iter_files
+
+from .common import *
+from .history import Added, Change, CommitInfo, Deleted, Modified, get_named_changes
 
 ScopeTree = ptree.Function | ptree.Class | ptree.Module
 PyNode = ptree.PythonBaseNode | ptree.PythonNode

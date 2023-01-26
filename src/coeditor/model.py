@@ -1,44 +1,46 @@
 import copy
-from dataclasses import field
 import logging
 import shutil
+from dataclasses import field
+
 import torch
+from datasets.arrow_dataset import Dataset
+from transformers import (
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
+    SchedulerType,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+)
+from transformers.models.t5.modeling_t5 import (
+    Seq2SeqLMOutput,
+    T5ForConditionalGeneration,
+)
 
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoding import (
     Add_id,
     AnalysisBasedEditEncoder,
     AnalysisBasedTokenizedEdit,
+    BOS_id,
     Del_id,
+    EOS_id,
     TEdit,
     TokenizedEdit,
     _Tokenizer,
     extract_edit_change,
     get_extra_id,
-    is_extra_id,
-    BOS_id,
-    EOS_id,
-    random_extra_id_map,
     get_tk_id,
+    is_extra_id,
+    random_extra_id_map,
 )
 from coeditor.history import Modified
 from spot.data import output_ids_as_seqs
-from spot.model import dynamic_dataloader, DataLoader, input_cost_model
+from spot.model import DataLoader, dynamic_dataloader, input_cost_model
 from spot.static_analysis import ProjectPath
 from spot.utils import show_expr
+
 from .common import *
-from transformers.models.t5.modeling_t5 import (
-    T5ForConditionalGeneration,
-    Seq2SeqLMOutput,
-)
-from transformers import (
-    Seq2SeqTrainingArguments,
-    Seq2SeqTrainer,
-    DataCollatorForSeq2Seq,
-    EarlyStoppingCallback,
-    SchedulerType,
-)
-from datasets.arrow_dataset import Dataset
 
 CodeT5Model = T5ForConditionalGeneration
 

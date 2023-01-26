@@ -1,6 +1,8 @@
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from spot.static_analysis import (
     ModuleHierarchy,
     ModuleName,
@@ -13,8 +15,6 @@ from spot.static_analysis import (
     stub_from_module,
     to_abs_import_path,
 )
-import pytest
-
 from spot.utils import assert_eq, groupby, not_none, show_string_diff
 
 

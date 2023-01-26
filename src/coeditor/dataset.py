@@ -1,5 +1,7 @@
 import shutil
 import tempfile
+import traceback
+
 import coeditor.code_change
 from coeditor.code_change import ProjectChangeProcessor, edits_from_commit_history
 from coeditor.ctx_change_encoder import (
@@ -10,15 +12,10 @@ from coeditor.ctx_change_encoder import (
     _fix_jedi_cache,
 )
 from coeditor.encoding import TEdit
-from spot.utils import scalar_stats
+from coeditor.history import Added, CommitInfo, get_commit_history
+from spot.utils import pretty_print_dict, scalar_stats
+
 from .common import *
-from coeditor.history import (
-    Added,
-    CommitInfo,
-    get_commit_history,
-)
-from spot.utils import pretty_print_dict
-import traceback
 
 
 @dataclass

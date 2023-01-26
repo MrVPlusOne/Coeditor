@@ -1,7 +1,14 @@
 # utils for computing editing history from git commits
 
+import ast
+import copy
+import sys
 from abc import abstractmethod
+from multiprocessing import current_process
+from textwrap import indent
+
 from spot.static_analysis import (
+    CodePosition,
     ElemPath,
     ModuleAnalysis,
     ModuleName,
@@ -14,15 +21,10 @@ from spot.static_analysis import (
     PythonVariable,
     UsageAnalysis,
     remove_comments,
-    CodePosition,
 )
 from spot.utils import show_expr
+
 from .common import *
-from textwrap import indent
-import sys
-import copy
-import ast
-from multiprocessing import current_process
 
 E1 = TypeVar("E1", covariant=True)
 

@@ -2,11 +2,62 @@ import copy
 import logging
 from textwrap import indent
 
+import torch
+import transformers
+from datasets.arrow_dataset import Dataset
 from numpy import zeros_like
-from coeditor.ctx_change_encoder import TkC3Problem
+from torch import BoolTensor, FloatTensor, LongTensor, Tensor, nn
+from torch.utils.checkpoint import checkpoint
+from transformers import (
+    AutoConfig,
+    BatchEncoding,
+    DataCollatorForSeq2Seq,
+    EarlyStoppingCallback,
+    EvalPrediction,
+    SchedulerType,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+)
+from transformers.generation.utils import (
+    BeamSampleEncoderDecoderOutput,
+    LogitsProcessorList,
+    SampleOutput,
+    StoppingCriteriaList,
+)
+from transformers.models.t5.modeling_t5 import (
+    BaseModelOutputWithPastAndCrossAttentions,
+    Seq2SeqLMOutput,
+    T5Attention,
+    T5Block,
+    T5Config,
+    T5ForConditionalGeneration,
+    T5LayerCrossAttention,
+    T5LayerFF,
+    T5LayerNorm,
+    T5LayerSelfAttention,
+    T5PreTrainedModel,
+    T5Stack,
+)
+from transformers.trainer import EvalLoopOutput
 
+from coeditor.ctx_change_encoder import TkC3Problem
 from coeditor.dataset import TokenizedEditDataset
 from coeditor.encoders import EditRequest, apply_output_tks_to_change
+from coeditor.encoding import (
+    Add_id,
+    BOS_id,
+    Del_id,
+    EOS_id,
+    Newline_id,
+    PAD_id,
+    _Tokenizer,
+    change_to_tokens,
+    decode_tokens,
+    encode_basic,
+    get_tk_id,
+    is_extra_id,
+    random_extra_id_map,
+)
 from coeditor.history import Change, Modified
 from coeditor.model import (
     DatasetDecodingResult,
@@ -22,58 +73,6 @@ from spot.static_analysis import ModuleName, ProjectPath
 from spot.utils import cprint, groupby, scalar_stats
 
 from .common import *
-from transformers.models.t5.modeling_t5 import (
-    T5Config,
-    T5Attention,
-    T5LayerNorm,
-    T5Block,
-    T5Stack,
-    T5LayerSelfAttention,
-    T5LayerCrossAttention,
-    T5LayerFF,
-    T5ForConditionalGeneration,
-    BaseModelOutputWithPastAndCrossAttentions,
-    Seq2SeqLMOutput,
-    T5PreTrainedModel,
-)
-import torch
-from torch import BoolTensor, FloatTensor, LongTensor, Tensor
-from torch import nn
-from coeditor.encoding import (
-    Add_id,
-    BOS_id,
-    Del_id,
-    EOS_id,
-    Newline_id,
-    PAD_id,
-    change_to_tokens,
-    decode_tokens,
-    encode_basic,
-    get_tk_id,
-    is_extra_id,
-    random_extra_id_map,
-    _Tokenizer,
-)
-import transformers
-from transformers import (
-    Seq2SeqTrainingArguments,
-    Seq2SeqTrainer,
-    DataCollatorForSeq2Seq,
-    EarlyStoppingCallback,
-    EvalPrediction,
-    BatchEncoding,
-    AutoConfig,
-    SchedulerType,
-)
-from transformers.generation.utils import (
-    SampleOutput,
-    LogitsProcessorList,
-    StoppingCriteriaList,
-    BeamSampleEncoderDecoderOutput,
-)
-from transformers.trainer import EvalLoopOutput
-from datasets.arrow_dataset import Dataset
-from torch.utils.checkpoint import checkpoint
 
 CheckNaN: bool = False
 

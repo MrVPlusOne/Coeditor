@@ -1,6 +1,7 @@
-from coeditor.history import *
-from coeditor.encoding import _BaseTokenizer, _Tokenizer
 import pytest
+
+from coeditor.encoding import _BaseTokenizer, _Tokenizer
+from coeditor.history import *
 
 
 def module_from_code(code: str, mname: ModuleName = "ex_module"):
