@@ -8,30 +8,30 @@ def test_change_scope():
     code1 = dedent(
         """\
         import os
-        
+
         x = 1
         y = x + 1
-        
+
         def f1():
             global x
             x *= 5
             return x
-            
+
         if __name__ == "__main__":
             print(f1() + x)
-                
+
         @annotated
         def f2():
             return 1
-            
+
         @dataclass
         class A:
             attr1: int
-            
+
             @staticmethod
             def method1():
                 return 1
-                
+
             class B:
                 inner_attr1: int
         """
@@ -111,15 +111,15 @@ class TestChangedSpan:
     code1 = dedent(
         """\
         import os
-        
+
         x = 1
         y = x + 1
-        
+
         def f1():
             global x
             x *= 5
             return x
-            
+
         if __name__ == "__main__":
             print(f1() + x)
         """
@@ -146,15 +146,15 @@ class TestChangedSpan:
         code2 = dedent(
             """\
             import os
-            
+
             x = 1
             y = x + 2
-            
+
             def f1():
                 global x
                 x *= 5
                 return x + 1
-                
+
             if __name__ == "__main__":
                 print(f1() + x + 1)
             """
@@ -172,16 +172,16 @@ class TestChangedSpan:
         code2 = dedent(
             """\
             import os
-            
+
             x = 1
             y = x + 1
             z += 1
-            
+
             def f1():
                 global x
                 x *= 5
                 return x
-                
+
             print(f1() + x)
             """
         )
@@ -196,9 +196,9 @@ class TestChangedSpan:
         code2 = dedent(
             """\
             import os
-            
+
             x = 2
-                
+
             if __doc__ == "__main__":
                 print(f1() + x)
                 print("doc")
@@ -216,18 +216,18 @@ class TestChangedSpan:
         code2 = dedent(
             """\
             import os
-            
+
             x = 1
             @wrapped
             def new_f():
                 pass
             y = x + 1
-            
+
             def f1():
                 global x
                 x *= 5
                 return x
-                
+
             if __name__ == "__main__":
                 print(f1() + x)
             """
@@ -242,10 +242,10 @@ class TestChangedSpan:
         code1 = dedent(
             """\
             import os
-            
+
             x = 1
             y = x + 1
-                
+
             if __name__ == "__main__":
                 print(f1() + x)
             """
@@ -254,16 +254,16 @@ class TestChangedSpan:
         code2 = dedent(
             """\
             import os
-            
+
             x = 1
             y = x + 1
-            
+
             @dataclass
             class Foo():
                 "new class"
                 x: int = 1
                 y: int = 2
-                
+
             if __name__ == "__main__":
                 print(f1() + x)
             """
@@ -279,14 +279,14 @@ class TestChangedSpan:
         code2 = dedent(
             """\
             import os
-            
+
             x = 1
-            
+
             def f1():
                 global x
                 x *= 5
                 return x
-                
+
             y = x + 1
             if __name__ == "__main__":
                 print(f1() + x)
@@ -302,17 +302,17 @@ class TestChangedSpan:
         code2 = dedent(
             """\
             import os
-            
+
             x = 1
             # belongs to f1
-            
+
             def f1():
                 "added doc string"
                 global x
                 x *= 5
                 return x + 1
-            
-            # belongs to main    
+
+            # belongs to main
             if __name__ == "__main__":
                 print(f1() + x + 1)  # belongs to print
             """

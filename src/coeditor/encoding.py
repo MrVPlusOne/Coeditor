@@ -39,7 +39,7 @@ Add = "<add>"
 Del = "<del>"
 
 """
-`_BaseTokenizer` extended with <add> and <del> tokens. 
+`_BaseTokenizer` extended with <add> and <del> tokens.
 Note that you should avoid using _Tokenizer.encode(text) directly as it
 will incorrectly eat the spaces around <add> and <del>.
 Use `encode_change` instead.

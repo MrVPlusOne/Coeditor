@@ -65,7 +65,7 @@ def test_annotation_collection():
 def test_self_parameter_annotation():
     code = """
 def foo(self: float, x: int) -> str:
-    return "1"    
+    return "1"
 """
     parsed = cst.parse_module(code)
     _, types = collect_user_annotations(parsed)

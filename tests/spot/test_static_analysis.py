@@ -83,7 +83,7 @@ import B.C
 from D import a, b as c
 from .utils import x
 from ..top import *
-from infer.type import *   
+from infer.type import *
 from . import E
 """
     proj = project_from_code({"root.file1": import_code})
@@ -144,7 +144,7 @@ class A:
 
         def __init__(self):
             self.x = 1
-        
+
 
     class B2:
         x: str
@@ -188,7 +188,7 @@ class A(typing.Generic[T1]): # keep
     x = 0
     def __init__(self, x: T1):
         self.x = x
-    
+
 def some_f() -> number: # drop
     return 1
 """
@@ -228,14 +228,14 @@ def gf_with_inner(x):
 class C:
     def __init__(self, x):
         self.x = x
-    
+
     def foo(self, y):
         return self.x + y
 
     @staticmethod
     def s_method(x):
         return x + 1
-    
+
 """
     code2 = """
 # root.file2
@@ -313,7 +313,7 @@ from .file1 import *
 def usage1(x):
     gf(5)
     C(5)
-    
+
 """
 
     code4 = """
@@ -421,7 +421,7 @@ from . import file1
 
 def usage5():
     file1.gf(5)
-    
+
 """
 
     project = project_from_code(
@@ -455,11 +455,11 @@ def inc(x=Count):
 def test_type_usages():
     code1 = """
 class Arg:
-    pass    
+    pass
 
 class Namespace:
     pass
-    
+
 class Struct:
     def __init__(self, arg: Arg):
         self.arg = arg
@@ -826,7 +826,7 @@ def use():
     B(1, 2)
     C(1, 2)
 
-def use2():    
+def use2():
     D(1)
     E(1,2,3)
 """
@@ -940,12 +940,12 @@ def test1(fix1, fix2):
 
     code_conf = """
 # root.conftest
-import pytest  
+import pytest
 
 @pytest.fixture(scope="session")
 def use_gfix():
     return 1
-    
+
 """
 
     code2 = """
@@ -956,10 +956,10 @@ def test_global_fix(fix1, use_gfix):
 """
 
     code_out = """
-# test_out    
+# test_out
 def test_global_fix(fix1, use_gfix):
     # both fix1 and use_gfix should not be visible
-    return fix1 + use_gfix 
+    return fix1 + use_gfix
 """
 
     project = project_from_code(
@@ -1015,7 +1015,7 @@ def f1(x, y):
     )
 
 @annotation
-def f2(x, y, z):    
+def f2(x, y, z):
     return x + y + z
 
 class A:

@@ -12,7 +12,7 @@ def test_module_edit_creation():
         """\
         def to_change():
             return 1
-            
+
         def to_delete():
             return 2
         """
@@ -62,7 +62,7 @@ def test_project_edit_creation1():
         ),
         "code2": dedent(
             """\
-            # some comments    
+            # some comments
             """
         ),
     }
@@ -74,7 +74,7 @@ def test_project_edit_creation1():
             """\
             def to_change(x):
                 return x
-            
+
             def no_change():
                 # new comment
                 return 2
@@ -153,10 +153,10 @@ def test_project_edit_creation2():
         "code1": dedent(
             """\
             import new_module
-            
+
             def y():
                 return 2
-            
+
 
             def x():
                 return 1
@@ -247,7 +247,7 @@ class TestChangeIdentities:
                 def f2():
                     f1()
                     return f_new() + a
-                
+
                 new_var = 0
                 """
             ),
@@ -384,9 +384,9 @@ def test_code_normalization():
     check_code_equal(ex_code, ex_code_compact)
     ex_code_lose = dedent(
         """\
-            
+
         def f1(x,y):
-        
+
             return f1(
                 x+1,
                 y-1
