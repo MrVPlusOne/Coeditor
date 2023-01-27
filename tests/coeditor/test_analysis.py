@@ -1,8 +1,8 @@
 import jedi
 import pytest
 
+from coeditor.c3problem import JediUsageAnalyzer, PyDefinition, PyFullName
 from coeditor.common import *
-from coeditor.encoder import JediUsageAnalyzer, PyDefinition, PyFullName
 from spot.utils import proj_root
 
 testcase_root = proj_root() / "tests" / "coeditor" / "testcases"

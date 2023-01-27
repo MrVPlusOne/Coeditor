@@ -28,8 +28,8 @@ from transformers.models.t5.modeling_t5 import (
 )
 from transformers.trainer import EvalLoopOutput
 
+from coeditor.c3problem import C3Problem, C3ProblemTokenizer, TkC3Problem
 from coeditor.change import Modified
-from coeditor.encoder import C3Problem, C3ProblemTokenizer, TkC3Problem
 from coeditor.encoding import (
     Add_id,
     BOS_id,

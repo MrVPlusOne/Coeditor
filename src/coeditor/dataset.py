@@ -5,15 +5,15 @@ import traceback
 from coeditor import scoped_changes
 from spot.utils import pretty_print_dict, scalar_stats
 
-from .change import Added
-from .common import *
-from .encoder import (
+from .c3problem import (
     C3Problem,
     C3ProblemGenerator,
     C3ProblemTokenizer,
     JediUsageAnalyzer,
     fix_jedi_cache,
 )
+from .change import Added
+from .common import *
 from .encoding import TEdit
 from .git import CommitInfo, get_commit_history
 from .scoped_changes import ProjectChangeProcessor, edits_from_commit_history

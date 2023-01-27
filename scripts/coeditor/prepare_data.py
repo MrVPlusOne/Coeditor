@@ -1,6 +1,6 @@
+from coeditor.c3problem import C3ProblemGenerator
 from coeditor.common import *
 from coeditor.dataset import *
-from coeditor.encoder import C3ProblemGenerator
 from spot.utils import run_long_task
 
 if __name__ == "__main__":
