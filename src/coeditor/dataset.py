@@ -7,7 +7,7 @@ from spot.utils import pretty_print_dict, scalar_stats
 
 from .change import Added
 from .common import *
-from .ctx_change_encoder import (
+from .encoder import (
     C3Problem,
     C3ProblemGenerator,
     C3ProblemTokenizer,

@@ -8,7 +8,7 @@ from prepare_data import make_or_load_datasets
 
 from coeditor.common import *
 from coeditor.dataset import C3EditEncoder
-from coeditor.retrieval_model import (
+from coeditor.model import (
     BatchArgs,
     C3DataLoader,
     DecodingArgs,

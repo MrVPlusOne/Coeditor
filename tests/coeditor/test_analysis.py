@@ -2,7 +2,7 @@ import jedi
 import pytest
 
 from coeditor.common import *
-from coeditor.ctx_change_encoder import JediUsageAnalyzer, PyDefinition, PyFullName
+from coeditor.encoder import JediUsageAnalyzer, PyDefinition, PyFullName
 from spot.utils import proj_root
 
 testcase_root = proj_root() / "tests" / "coeditor" / "testcases"

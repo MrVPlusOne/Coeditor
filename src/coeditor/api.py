@@ -23,7 +23,7 @@ from coeditor.encoding import (
     is_extra_id,
     tokens_to_change,
 )
-from coeditor.retrieval_model import (
+from coeditor.model import (
     BatchArgs,
     DecodingArgs,
     RetrievalDecodingResult,

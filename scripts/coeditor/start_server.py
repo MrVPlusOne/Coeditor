@@ -10,7 +10,7 @@ from coeditor.api import (
     QueryRefEditEncoder,
 )
 from coeditor.common import *
-from coeditor.retrieval_model import AttentionMode, RetrievalEditorModel
+from coeditor.model import AttentionMode, RetrievalEditorModel
 
 
 def start_server(
