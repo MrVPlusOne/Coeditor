@@ -695,11 +695,11 @@ def show_string_diff(str1: str, str2: str, max_ctx: int | None = 6) -> str:
     return "\n".join(omit_lines(diffs))
 
 
-def add_line_numbers(code: str):
+def add_line_numbers(code: str, start: int = 1):
     lines = code.split("\n")
     ln_digits = int(math.log(len(lines), 10)) + 1
     format_s = "{ln:" + str(ln_digits) + "d}|  {line}"
-    return "\n".join(format_s.format(ln=i + 1, line=l) for i, l in enumerate(lines))
+    return "\n".join(format_s.format(ln=i + start, line=l) for i, l in enumerate(lines))
 
 
 class CountedAcc(NamedTuple):

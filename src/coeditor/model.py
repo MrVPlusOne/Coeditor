@@ -170,8 +170,7 @@ class RetrievalDecodingResult:
         ex2correct = dict[int, bool]()
         for i, mp in enumerate(self.predictions):
             prob = self.problems[i]
-            change_tks = prob.span.change_tks.tolist()
-            original, _ = change_tks_to_original_delta(change_tks)
+            original = prob.span.original.tolist()
             pred_delta = TkDelta.from_output_tks(mp["output_ids"])
             label_delta = TkDelta.from_output_tks(mp["labels"])
             assert isinstance(prob.edit_lines, range)
@@ -350,7 +349,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             overwrite_output_dir=True,
             evaluation_strategy="epoch",
             save_strategy="epoch",
-            logging_steps=max(1, epoch_steps // 10),
+            logging_steps=max(1, min(1000, epoch_steps // 10)),
             num_train_epochs=train_args.max_train_epochs,
             save_total_limit=2,
             lr_scheduler_type=train_args.lr_scheduler_type,

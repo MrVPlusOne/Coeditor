@@ -8,7 +8,9 @@ from coeditor._utils import pretty_print_dict, scalar_stats
 from .c3problem import (
     C3Problem,
     C3ProblemGenerator,
+    C3ProblemSimpleSplit,
     C3ProblemTokenizer,
+    C3ProblemTransformer,
     JediUsageAnalyzer,
     fix_jedi_cache,
 )
@@ -58,6 +60,9 @@ class TokenizedEditDataset(Generic[TEdit]):
 class C3EditEncoder:
     change_processor: ProjectChangeProcessor[C3Problem] = field(
         default_factory=C3ProblemGenerator
+    )
+    problem_tranformer: C3ProblemTransformer = field(
+        default_factory=C3ProblemSimpleSplit
     )
     edit_tokenizer: C3ProblemTokenizer = field(default_factory=C3ProblemTokenizer)
 
@@ -192,7 +197,7 @@ def datasets_from_repos(
     change_processor: ProjectChangeProcessor[C3Problem],
     max_history_per_repo: int = 1000,
     workers: int = DefaultWorkers,
-) -> Mapping[str, Sequence[C3Problem]]:
+) -> dict[str, Sequence[C3Problem]]:
     splits = ["test", "valid", "train"]
     projects = dict[str, list[Path]]()
     split_is_training = dict[str, list[bool]]()
@@ -230,8 +235,10 @@ def make_or_load_datasets(
     if recreate_data or not save_dir.exists():
         if dataset_name == "SPOT":
             datasets = {
-                "test": dataset_from_projects(
-                    [proj_root()], change_processor, [False], workers=workers
+                "test": join_list(
+                    dataset_from_projects(
+                        [proj_root()], change_processor, [False], workers=workers
+                    ).values()
                 )
             }
         else:
@@ -261,9 +268,7 @@ def save_datasets(datasets: Mapping[str, Any], save_dir: Path) -> None:
     subprocess.run(["du", "-sh", save_dir])
 
 
-def load_datasets(
-    save_dir: Path, splits=("test", "valid", "train")
-) -> Mapping[str, Any]:
+def load_datasets(save_dir: Path, splits=("test", "valid", "train")) -> dict[str, Any]:
     return {
         name: pickle_load(path)
         for name in splits

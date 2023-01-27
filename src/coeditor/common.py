@@ -12,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 import warnings
+from abc import ABC, abstractmethod
 from argparse import ArgumentError
 from concurrent.futures import Executor, ProcessPoolExecutor
 from contextlib import contextmanager
@@ -27,6 +28,7 @@ from ._utils import (
     DefaultWorkers,
     PickleCache,
     TimeLogger,
+    add_line_numbers,
     as_any,
     assert_eq,
     compute_line_diffs,
@@ -37,6 +39,7 @@ from ._utils import (
     pickle_dump,
     pickle_load,
     pmap,
+    pretty_print_dict,
     repr_modified_args,
     show_string_diff,
     split_dots,
@@ -155,7 +158,18 @@ def join_list(
     return result
 
 
+SEP = "-" * 80
 HtmlCode = str
+
+
+def print_sections(
+    sections: list[tuple[str, str]],
+    sep: str = SEP,
+) -> None:
+    for title, content in sections:
+        print(sep)
+        print(f"{title}:")
+        print(content)
 
 
 def short_str(text: str, limit: int = 27) -> str:

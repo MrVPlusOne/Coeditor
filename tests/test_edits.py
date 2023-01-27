@@ -204,6 +204,63 @@ class TestChangeIdentities:
 
             assert tk_delta1.apply_to_input(origin1) == tk_after
 
+    def test_delta_decomposition(self):
+        for name, c in self.cases.items():
+            original, delta = TkDelta.from_change_tks(change_to_tokens(c))
+            expect = delta.apply_to_input(original)
+            keys = tuple(delta.keys())
+            for _ in range(10):
+                n_keys = int(len(keys) * random.random())
+                sub_keys = random_subset(keys, n_keys)
+                delta1, delta2 = delta.decompose_for_input(sub_keys)
+                step1 = delta1.apply_to_input(original)
+                step2 = delta2.apply_to_input(step1)
+                if step2 != expect:
+                    print_err(f"{sub_keys=}")
+                    print_err("Original", SEP)
+                    print_err(decode_tokens(original))
+                    print_err("Expect", SEP)
+                    print_err(decode_tokens(expect))
+                    print_err("delta1", SEP)
+                    print_err(delta1)
+                    print_err("step1", SEP)
+                    print_err(decode_tokens(step1))
+                    print_err("delta2", SEP)
+                    print_err(delta2)
+                    print_err("step2", SEP)
+                    print_err(decode_tokens(step2))
+                    raise AssertionError("Failed for case: " + name)
+
+    def test_get_new_target_lines(self):
+        for name, c in self.cases.items():
+            original, delta = TkDelta.from_change_tks(change_to_tokens(c))
+            n_origin_lines = len(split_list(original, Newline_id))
+            edit_lines = range(n_origin_lines + 1)
+            keys = tuple(delta.keys())
+            for _ in range(10):
+                n_keys = int(len(keys) * random.random())
+                sub_keys = random_subset(keys, n_keys)
+                sub_keys.sort()
+                delta1, delta2 = delta.decompose_for_change(sub_keys)
+                new_edit_lines = delta1.get_new_target_lines(edit_lines)
+                new_edit_set = set(new_edit_lines)
+                for l in delta2.changed_lines():
+                    if l not in new_edit_set and l != n_origin_lines:
+                        print_err(f"{edit_lines=}")
+                        print_err("original", SEP)
+                        print_err(add_line_numbers(decode_tokens(original), start=0))
+                        print_err(SEP)
+                        print_err(f"{delta=}")
+                        print_err(f"{sub_keys=}")
+                        print_err(f"{delta1=}")
+                        print_err("step1", SEP)
+                        step1 = delta1.to_change_tks(original)
+                        print_err(add_line_numbers(decode_tokens(step1), start=0))
+                        print_err(SEP)
+                        print_err(f"{new_edit_lines=}")
+                        print_err(f"{delta2=}")
+                        raise AssertionError(f"{l=} not in {new_edit_lines=}")
+
 
 def test_code_normalization():
     def check_code_equal(code1: str, code2: str):

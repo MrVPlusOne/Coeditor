@@ -1,3 +1,6 @@
+import copy
+import dataclasses
+
 import jedi
 import jedi.cache
 import jedi.parser_utils
@@ -13,6 +16,7 @@ from coeditor._utils import scalar_stats
 from .change import Added, Change, Modified
 from .common import *
 from .encoding import (
+    Add_id,
     Del_id,
     Newline_id,
     TkDelta,
@@ -72,7 +76,8 @@ class ChangedCodeSpan:
     """
 
     headers: Sequence[ChangedHeader]
-    change_tks: TkArray
+    original: TkArray
+    delta: TkDelta
     # below are pre-edit attributes
     line_range: LineRange
     module: ModuleName
@@ -88,7 +93,7 @@ class C3Problem:
     "Contextual code change prediction problem."
     span: ChangedCodeSpan
     # the lines to be edited
-    edit_lines: Collection[int]
+    edit_lines: Sequence[int]
     # most relevant to least relevant
     relevant_changes: Sequence[ChangedCodeSpan]
     # most relevant to least relevant
@@ -96,6 +101,7 @@ class C3Problem:
     # some optional information about how the problem was generated
     change_type: Change[None]
     src_info: SrcInfo
+    transformations: tuple[str, ...] = ()
 
     def meta_data_lines(self) -> list[str]:
         return [
@@ -138,11 +144,15 @@ class LineUsageAnalysis:
 
 
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
-    VERSION = "2.2"
+    """
+    ### Change log
+    - v2.3: always generate problems with full editing range and move the problem
+    splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
+    """
+
+    VERSION = "2.3"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
-    max_lines_to_edit: int = 25
-    max_problems_per_elem: int = 4
 
     def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
         if analyzer is None:
@@ -268,6 +278,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 cspan = ChangedCodeSpan(
                     [to_header(Modified.from_unchanged(s)) for s in ancestors],
                     TkArray.new(encode_basic(body_code)),
+                    TkDelta.empty(),
                     f_scope.spans[-1].line_range,
                     f_scope.path.module,
                 )
@@ -292,6 +303,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 cspan = ChangedCodeSpan(
                     [to_header(Modified.from_unchanged(s)) for s in ancestors],
                     TkArray.new(encode_basic(body_code)),
+                    TkDelta.empty(),
                     stmt_span.line_range,
                     stmt_span.scope.path.module,
                 )
@@ -369,15 +381,12 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 original, delta = line_diffs_to_original_delta(
                     change_to_line_diffs(span.change)
                 )
-                change_tks = change_to_tokens(span.change)
                 n_lines = count_lines(original)
-
-                def change_counts(r: range) -> int:
-                    return delta.for_input_range((r.start, r.stop)).num_changes()
 
                 code_span = ChangedCodeSpan(
                     headers=[to_header(cs) for cs in span.parent_scopes],
-                    change_tks=TkArray.new(change_tks),
+                    original=TkArray.new(encode_basic(original)),
+                    delta=delta.to_tk_delta(),
                     line_range=span.line_range,
                     module=span.path.module,
                 )
@@ -397,26 +406,109 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                         "project": pchange.project_name,
                         "commit": pchange.commit_info,
                     }
-                    edit_ranges = list[range]()
-                    for i in range(0, n_lines, self.max_lines_to_edit):
-                        r = range(i, min(n_lines, i + self.max_lines_to_edit))
-                        c = change_counts(r)
-                        if c > 0:
-                            edit_ranges.append(r)
-                        if len(edit_ranges) >= self.max_problems_per_elem:
-                            break
+                    prob = C3Problem(
+                        code_span,
+                        range(0, n_lines + 1),  # one additional line for appending
+                        relevant_changes=relevant_changes,
+                        relevant_unchanged=relevant_unchanged,
+                        change_type=span.change.map(lambda _: None),
+                        src_info=src_info,
+                    )
+                    problems.append(prob)
 
-                    for r in edit_ranges:
-                        prob = C3Problem(
-                            code_span,
-                            r,
-                            relevant_changes=relevant_changes,
-                            relevant_unchanged=relevant_unchanged,
-                            change_type=span.change.map(lambda _: None),
-                            src_info=src_info,
-                        )
-                        problems.append(prob)
                 processed_cspans.append(code_span)
+        return problems
+
+
+class C3ProblemTransformer(ABC):
+    "A strategy to generate new C3 problems from the orginal ones."
+
+    @abstractmethod
+    def transform(self, prob: C3Problem) -> Iterable[C3Problem]:
+        ...
+
+
+class C3ProblemSimpleSplit(C3ProblemTransformer):
+    "Simply split the problem into fixed-sized editing ranges."
+    max_lines_to_edit: int = 25
+    max_split_factor: int = 4
+
+    def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
+        delta = prob.span.delta
+        l_range = prob.edit_lines
+        assert isinstance(l_range, range)
+        start, stop = l_range.start, l_range.stop
+        problems = list[C3Problem]()
+        new_trans = prob.transformations + ("split",)
+        for i in range(start, stop, self.max_lines_to_edit):
+            j = min(i + self.max_lines_to_edit, stop)
+            sub_delta = delta.for_input_range((i, j))
+            if sub_delta.num_changes() > 0:
+                sub_prob = dataclasses.replace(
+                    prob, edit_lines=range(i, j), transformations=new_trans
+                )
+                problems.append(sub_prob)
+            if len(problems) >= self.max_split_factor:
+                break
+        return problems
+
+
+class C3ProblemChangeDropout(C3ProblemTransformer):
+    """Split the problem into fixed-sized editing ranges like `C3ProblemSimpleSplit`,
+    but also randomly keep some subset of changes in the input."""
+
+    max_lines_to_edit: int = 25
+    max_split_factor: int = 4
+    # the probability of dropping out some changes into the input
+    dropout_prob: float = 0.5
+    # when dropping the changes into the input, the biggest ratio of changes to drop
+    max_dropout_ratio: float = 0.5
+
+    def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
+        original = prob.span.original
+        delta = prob.span.delta
+        l_range = prob.edit_lines
+        assert isinstance(l_range, range)
+        start, stop = l_range.start, l_range.stop
+        problems = list[C3Problem]()
+        for i in range(start, stop, self.max_lines_to_edit):
+            j = min(i + self.max_lines_to_edit, stop)
+            sub_delta = delta.for_input_range((i, j))
+            if sub_delta.num_changes() == 0:
+                continue
+            grouped_keys = sub_delta.change_groups()
+            should_dropout = (
+                len(grouped_keys) >= 2 and random.random() < self.dropout_prob
+            )
+            if should_dropout:
+                n_to_drop = int(
+                    len(grouped_keys) * random.random() * self.max_dropout_ratio
+                )
+                assert n_to_drop < len(grouped_keys)
+                keys_to_drop = join_list(random_subset(grouped_keys, n_to_drop))
+            else:
+                keys_to_drop = []
+            if keys_to_drop:
+                _, delta2 = sub_delta.decompose_for_change(keys_to_drop)
+                if delta2.num_changes() == 0:
+                    continue
+                delta1, delta2 = delta.decompose_for_change(keys_to_drop)
+                new_original = TkArray.new(delta1.to_change_tks(original.tolist()))
+                new_trans = prob.transformations + ("split", "dropout")
+                new_span = dataclasses.replace(
+                    prob.span, original=new_original, delta=delta2
+                )
+                edit_lines = delta1.get_new_target_lines(range(i, j))
+            else:
+                new_trans = prob.transformations + ("split",)
+                new_span = prob.span
+                edit_lines = range(i, j)
+            sub_prob = dataclasses.replace(
+                prob, span=new_span, edit_lines=edit_lines, transformations=new_trans
+            )
+            problems.append(sub_prob)
+            if len(problems) >= self.max_split_factor:
+                break
         return problems
 
 
@@ -517,30 +609,35 @@ class C3ProblemTokenizer:
     ) -> TkC3Problem:
         span = problem.span
 
-        original: TokenSeq
-        tk_delta: TkDelta
-        original, tk_delta = change_tks_to_original_delta(span.change_tks.tolist())
+        original: TokenSeq = span.original.tolist()
+        tk_delta: TkDelta = span.delta
         origin_lines = split_list(original, Newline_id)
-        assert isinstance(problem.edit_lines, range), "Only support range for now"
         edit_start = problem.edit_lines[0]
-        edit_end = problem.edit_lines[-1] + 1
         scope_tks = self._encode_headers(span.headers, 0)
         input_limit = self.max_query_tks - len(scope_tks)
 
         chunk_input = TokenSeq()
         chunk_output = TokenSeq()
+        last_line = edit_start
 
-        for i in range(len(problem.edit_lines)):
+        for i, l in enumerate(problem.edit_lines):
+            for line in origin_lines[last_line + 1 : l]:
+                chunk_input.extend(line)
+                chunk_input.append(Newline_id)
+
             chunk_input.append(get_extra_id(i))
-            l = edit_start + i
             if l < len(origin_lines):
                 chunk_input.extend(origin_lines[l])
                 chunk_input.append(Newline_id)
+                last_line = l
             line_change = join_list(tk_delta.get_line_change(l), Newline_id)
             chunk_output.append(get_extra_id(i))
             chunk_output.extend(line_change)
             if line_change and line_change[-1] != Del_id:
                 chunk_output.append(Newline_id)
+            if len(chunk_input) > input_limit:
+                break
+        edit_stop = last_line + 1
 
         # limit the input size if it's too long
         chunk_input = truncate_section(
@@ -550,8 +647,8 @@ class C3ProblemTokenizer:
 
         # try move some prev_change_tks into the input
         above_tks = join_list(origin_lines[:edit_start] + [TokenSeq()], Newline_id)
-        above_tks = tk_delta.for_input_range((0, edit_start)).apply_to_input(above_tks)
-        below_tks = join_list(origin_lines[edit_end:] + [TokenSeq()], Newline_id)
+        above_tks = tk_delta.for_input_range((0, edit_start)).to_change_tks(above_tks)
+        below_tks = join_list(origin_lines[edit_stop:] + [TokenSeq()], Newline_id)
         chunk_input, above_tks, below_tks = self._inline_some_context(
             chunk_input, above_tks, below_tks, input_limit
         )
@@ -696,7 +793,8 @@ class C3ProblemTokenizer:
                 if header_diff:
                     header_tks = self._encode_headers(header_diff, 0)
                     segs.append(header_tks)
-                segs.append(c.change_tks.tolist())
+                c_tks = c.delta.to_change_tks(c.original.tolist())
+                segs.append(c_tks)
                 segs.append([Newline_id, Newline_id])
                 last_scope = c.headers
             segs.append([Newline_id])

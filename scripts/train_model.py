@@ -7,6 +7,7 @@ import wandb
 from prepare_data import make_or_load_datasets
 
 from coeditor._utils import cprint, run_long_task
+from coeditor.c3problem import C3Problem
 from coeditor.common import *
 from coeditor.dataset import C3EditEncoder
 from coeditor.model import (
@@ -76,6 +77,12 @@ def train_model(
             "the Huggingface Trainer will use all visible GPUs for training."
         )
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+    def transform_data(data: Sequence[C3Problem]) -> list[C3Problem]:
+        transformed = pmap(encoder.problem_tranformer.transform, data, chunksize=1000)
+        return join_list(transformed)
+
+    datasets = {split: transform_data(data) for split, data in datasets.items()}
 
     train_tkn = encoder.edit_tokenizer
     eval_tkn = copy.deepcopy(train_tkn)
@@ -161,11 +168,11 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_model.py"):
         train_model(
-            dataset_name="tiny",
+            dataset_name="xl",
             model_variant="-c3-v1.3",
             train_args=TrainingArgs(
                 max_train_epochs=1,
-                quicktest=True,
+                quicktest=False,
             ),
             encoder=C3EditEncoder(),
             recreate_data=False,

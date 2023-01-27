@@ -226,11 +226,31 @@ def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
     return input, str_delta
 
 
+# (line, action id)
+DeltaKey = NewType("DeltaKey", tuple[int, int])
+
+
 @dataclass(frozen=True)
 class TkDelta:
     """The Tokenized version of :class:`StrDelta`."""
 
     _deltas: Mapping[int, tuple[TokenSeq, ...]]
+
+    def changed_lines(self) -> Collection[int]:
+        return self._deltas.keys()
+
+    def keys(self) -> Iterable[DeltaKey]:
+        for k, _ in self.items():
+            yield k
+
+    def items(self) -> Iterable[tuple[DeltaKey, TokenSeq]]:
+        for l, acts in self._deltas.items():
+            for i, act in enumerate(acts):
+                yield DeltaKey((l, i)), act
+
+    def __getitem__(self, key: DeltaKey) -> TokenSeq:
+        line, i = key
+        return self._deltas[line][i]
 
     def apply_to_input(self, input: TokenSeq):
         lines = split_list(input, Newline_id)
@@ -278,9 +298,7 @@ class TkDelta:
 
     def __repr__(self):
         line_diffs = "\n".join(
-            f"  {k}: {tuple(map(decode_tokens, a))}"
-            for k, a in self._deltas.items()
-            if a
+            f"  {k}: {tuple(map(decode_tokens, a))}" for k, a in self._deltas.items()
         )
         return f"TkDelta(\n{line_diffs}\n)"
 
@@ -292,6 +310,127 @@ class TkDelta:
 
     def shifted(self, shift_lines: int) -> Self:
         return TkDelta({k + shift_lines: v for k, v in self._deltas.items()})
+
+    def decompose_for_input(
+        self, first_keys: Collection[DeltaKey]
+    ) -> tuple[Self, Self]:
+        """
+        Decompose the delta into two deltas such that applying them sequentially
+        using `apply_to_input` is equivalent to applying the original delta.
+        """
+        key_set = set(first_keys)
+        acts1 = dict[int, list[TokenSeq]]()
+        acts2 = dict[int, list[TokenSeq]]()
+        l_shift = 0
+        for l, acts in self._deltas.items():
+            for i, act in enumerate(acts):
+                key = DeltaKey((l, i))
+                if key in key_set:
+                    acts1.setdefault(l, []).append(act)
+                    l_shift += 1 if act[0] == Add_id else -1
+                else:
+                    acts2.setdefault(l + l_shift, []).append(act)
+        delta1 = TkDelta({k: tuple(v) for k, v in acts1.items()})
+        delta2 = TkDelta({k: tuple(v) for k, v in acts2.items()})
+        return delta1, delta2
+
+    def decompose_for_change(
+        self, first_keys: Collection[DeltaKey]
+    ) -> tuple[Self, Self]:
+        """
+        Decompose the delta into two deltas such that applying them sequentially
+        using `to_change_tks` is equivalent to applying the original delta.
+        """
+
+        key_set = set(first_keys)
+        acts1 = dict[int, list[TokenSeq]]()
+        acts2 = dict[int, list[TokenSeq]]()
+        l_shift = 0
+        for l, acts in self._deltas.items():
+            for i, act in enumerate(acts):
+                key = DeltaKey((l, i))
+                if key in key_set:
+                    acts1.setdefault(l, []).append(act)
+                    if act[0] == Add_id:
+                        l_shift += 1
+                    else:
+                        assert act[0] == Del_id
+                        # the additions cannot be applied to a <del> line
+                        if prev_acts := acts2.pop(l + l_shift, None):
+                            acts2[l + l_shift + 1] = prev_acts
+                else:
+                    acts2.setdefault(l + l_shift, []).append(act)
+        delta1 = TkDelta({k: tuple(v) for k, v in acts1.items()})
+        delta2 = TkDelta({k: tuple(v) for k, v in acts2.items()})
+        return delta1, delta2
+
+    def change_groups(self) -> Sequence[Sequence[DeltaKey]]:
+        """Group individual changes into logical groups using heuristics.
+        Currently, this only groups a <del> immediately followed by an <add>,
+        as well as contiguous <del> blocks."""
+
+        def is_key_type(key_id: int, type: Token):
+            if key_id >= len(keys):
+                return False
+            return self[keys[key_id]][0] == type
+
+        def is_next(key1: int, key2: int):
+            if key2 >= len(keys):
+                return False
+            l1 = keys[key1][0]
+            l2 = keys[key2][0]
+            return l1 == l2 or (l2 == l1 + 1)
+
+        groups = list[tuple[DeltaKey, ...]]()
+        keys = tuple(self.keys())
+        i = 0
+        while i < len(keys):
+            # case 1: <del> immediately followed by <add>
+            if (
+                is_next(i, i + 1)
+                and is_key_type(i, Del_id)
+                and is_key_type(i + 1, Add_id)
+            ):
+                groups.append((keys[i], keys[i + 1]))
+                i += 2
+                continue
+            # case 2: contiguous <del> blocks
+            if is_key_type(i, Del_id):
+                del_block = [keys[i]]
+                i += 1
+                while (
+                    i < len(keys)
+                    and is_next(i - 1, i)
+                    and is_key_type(i, Del_id)
+                    and not is_key_type(i + 1, Add_id)
+                ):
+                    del_block.append(keys[i])
+                    i += 1
+                if del_block:
+                    groups.append(tuple(del_block))
+                    continue
+            # case 3: single action
+            groups.append((keys[i],))
+            i += 1
+        assert_eq(join_list(groups), list(keys))
+        return groups
+
+    def get_new_target_lines(self, lines: Sequence[int]) -> Sequence[int]:
+        """Given a list of lines to edit, return the corresponding new lines to edit
+        after applying this delta."""
+        new_edit_lines = list[int]()
+        offset = 0
+        for l in lines:
+            deleted = False
+            for act in self.get_line_change(l):
+                if act[0] == Add_id:
+                    new_edit_lines.append(l + offset)
+                    offset += 1
+                elif act[0] == Del_id:
+                    deleted = True
+            if not deleted:
+                new_edit_lines.append(l + offset)
+        return tuple(new_edit_lines)
 
     @staticmethod
     def from_output_tks(tks: TokenSeq) -> "TkDelta":
@@ -335,6 +474,15 @@ class TkDelta:
     def num_changes(self) -> int:
         "Return the number of changed lines in the delta."
         return StrDelta.num_changes(cast(StrDelta, self))
+
+    @staticmethod
+    def from_change_tks(change_tks: TokenSeq) -> tuple[TokenSeq, "TkDelta"]:
+        "Return the original input and the delta."
+        return change_tks_to_original_delta(change_tks)
+
+    @staticmethod
+    def empty() -> "TkDelta":
+        return TkDelta({})
 
 
 def change_tks_to_original_delta(change: TokenSeq) -> tuple[TokenSeq, TkDelta]:
@@ -735,6 +883,14 @@ class TokenizedEdit(ABC):
         def show_label(i: int):
             return f" <{i}>" if i <= 9 else f"<{i}>"
 
+        def show_content(tks: TokenSeq):
+            if tks and tks[0] == Add_id:
+                return "+ " + decode_tokens(tks[1:])
+            elif tks and tks[0] == Del_id:
+                return "- " + decode_tokens(tks[1:])
+            else:
+                return "  " + decode_tokens(tks)
+
         def show_extra_tokens(tks: TokenSeq, main_tk_lines: dict[Token, TokenSeq]):
             segs = output_ids_as_seqs(tks)
             lines = []
@@ -742,8 +898,9 @@ class TokenizedEdit(ABC):
                 if not seg:
                     continue  # skip empty lines
                 if seg[-1] == Del_id:
-                    # show the delted line
-                    origin_line = main_tk_lines.get(k, [])
+                    # show the deleted line
+                    origin_line = split_list(main_tk_lines.get(k, []), Newline_id)[0]
+                    origin_line.append(Newline_id)
                     seg = seg + origin_line
                 label = show_label(id_map.get(k, -1))
                 lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
@@ -754,11 +911,10 @@ class TokenizedEdit(ABC):
         main_lines = list[str]()
         for line_tks in split_list(self.main_tks, Newline_id):
             if line_tks and is_extra_id(line_tks[0]):
-                line = show_label(id_map.get(line_tks[0], -1)) + decode_tokens(
-                    line_tks[1:]
-                )
+                prefix = show_label(id_map.get(line_tks[0], -1))
+                line = prefix + show_content(line_tks[1:])
             else:
-                line = decode_tokens(line_tks)
+                line = "   |" + show_content(line_tks)
             main_lines.append(line)
 
         pred_lines = (
