@@ -1,5 +1,5 @@
 from coeditor.change import Added, Deleted, Modified
-from spot.static_analysis import ModuleName
+from coeditor.common import ModuleName
 from .defs import *
 from typing import *
 

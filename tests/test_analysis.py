@@ -5,7 +5,7 @@ from coeditor._utils import proj_root
 from coeditor.c3problem import JediUsageAnalyzer, PyDefinition, PyFullName
 from coeditor.common import *
 
-testcase_root = proj_root() / "tests" / "coeditor" / "testcases"
+testcase_root = Path(__file__).parent / "testcases"
 
 
 def assert_has_usages(defs: Collection[PyDefinition], *full_names: str):
@@ -44,7 +44,7 @@ def test_anlayzing_defs():
     assert_has_usages(
         analysis.line2usages[21],
         "defs.ChangeScope.path",
-        "spot.static_analysis.ProjectPath",
+        "coeditor.common.ProjectPath",
     )
 
     assert_has_usages(
@@ -62,7 +62,7 @@ def test_anlayzing_defs():
     assert_has_usages(
         analysis.line2usages[24],
         "typing.Mapping",
-        "spot.static_analysis.ProjectPath",
+        "coeditor.common.ProjectPath",
     )
 
     assert_has_usages(
@@ -72,7 +72,7 @@ def test_anlayzing_defs():
 
     assert_has_usages(
         analysis.line2usages[31],
-        "spot.static_analysis.ProjectPath",
+        "coeditor.common.ProjectPath",
         "defs.ScopeTree",
         # "defs.ChangeScope",  # couldn't handle string annotations for now
     )
@@ -119,7 +119,7 @@ def test_anlayzing_usages():
         "usages.JModule.tree",
         "defs.ChangeScope",
         "defs.ChangeScope.from_tree",
-        "spot.static_analysis.ProjectPath",
+        "coeditor.common.ProjectPath",
     )
 
     assert_has_usages(
@@ -134,5 +134,5 @@ def test_anlayzing_usages():
 
     assert_has_usages(
         analysis.line2usages[34],
-        "spot.utils.as_any",
+        "coeditor._utils.as_any",
     )

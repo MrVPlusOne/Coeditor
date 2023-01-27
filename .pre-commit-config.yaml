@@ -1,4 +1,4 @@
-exclude: 'tests/coeditor/testcases'
+exclude: 'tests/testcases'
 
 default_language_version:
     python: python3.11

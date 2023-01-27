@@ -5,7 +5,7 @@ from coeditor.common import *
 from parso.python import tree as ptree
 from coeditor.change import Change
 
-from spot.static_analysis import ProjectPath
+# from coeditor. import ProjectPath
 
 ScopeTree = ptree.Function | ptree.Class | ptree.Module
 ChangedSpan = NewType("ChangedSpan", str)
