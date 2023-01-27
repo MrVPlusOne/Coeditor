@@ -2,20 +2,21 @@ import shutil
 import tempfile
 import traceback
 
-import coeditor.code_change
-from coeditor.code_change import ProjectChangeProcessor, edits_from_commit_history
-from coeditor.ctx_change_encoder import (
+from coeditor import scoped_changes
+from spot.utils import pretty_print_dict, scalar_stats
+
+from .change import Added
+from .common import *
+from .ctx_change_encoder import (
     C3Problem,
     C3ProblemGenerator,
     C3ProblemTokenizer,
     JediUsageAnalyzer,
-    _fix_jedi_cache,
+    fix_jedi_cache,
 )
-from coeditor.encoding import TEdit
-from coeditor.history import Added, CommitInfo, get_commit_history
-from spot.utils import pretty_print_dict, scalar_stats
-
-from .common import *
+from .encoding import TEdit
+from .git import CommitInfo, get_commit_history
+from .scoped_changes import ProjectChangeProcessor, edits_from_commit_history
 
 
 @dataclass
@@ -78,8 +79,8 @@ def _process_commits(
     change_processor: ProjectChangeProcessor[C3Problem],
 ) -> _ProcessingResult:
     # use process-specific parso cache
-    _fix_jedi_cache(workdir)
-    coeditor.code_change._tlogger.clear()
+    fix_jedi_cache(workdir)
+    scoped_changes._tlogger.clear()
     change_processor.clear_stats()
     change_processor.set_training(is_training)
     try:
@@ -100,7 +101,7 @@ def _process_commits(
         edits = []
     stats = dict()
     change_processor.append_stats(stats)
-    rec_add_dict_to(stats, {"tlogger": coeditor.code_change._tlogger.times})
+    rec_add_dict_to(stats, {"tlogger": scoped_changes._tlogger.times})
     return _ProcessingResult(edits, stats)
 
 
@@ -224,7 +225,7 @@ def make_or_load_datasets(
 ) -> Mapping[str, Sequence[C3Problem]]:
     config_str = repr_modified_args(change_processor)
 
-    save_dir = get_dataset_dir(dataset_name) / config_str
+    save_dir = get_dataset_dir(dataset_name) / "processed" / config_str
 
     if recreate_data or not save_dir.exists():
         if dataset_name == "SPOT":
@@ -240,6 +241,7 @@ def make_or_load_datasets(
                 workers=workers,
             )
         with timed_action("Saving datasets to disk"):
+            save_dir.mkdir(parents=True, exist_ok=True)
             save_datasets(datasets, save_dir)
         print("Tokenized dataset saved to:", save_dir)
     else:

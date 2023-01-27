@@ -1,17 +1,17 @@
 import copy
 import os
+import shutil
 import warnings
 
 import wandb
 from prepare_data import make_or_load_datasets
-from train_model import TokenizedEditDataset, check_save_dir
 
 from coeditor.common import *
 from coeditor.dataset import C3EditEncoder
-from coeditor.model import DecodingArgs
 from coeditor.retrieval_model import (
     BatchArgs,
     C3DataLoader,
+    DecodingArgs,
     RetrievalEditorModel,
     TrainingArgs,
 )
@@ -151,3 +151,23 @@ if __name__ == "__main__":
             recreate_data=False,
             eval_only=True,
         )
+
+
+def check_save_dir(model_name: str) -> None:
+    training_dir = get_model_dir(False) / model_name
+    trained_dir = get_model_dir(True) / model_name
+    if training_dir.exists():
+        print(f"Training directory already exists:", training_dir)
+        answer = input("Remove and retrain? (y/n):")
+        if answer.lower().strip() == "y":
+            shutil.rmtree(training_dir)
+            return
+        else:
+            print("Training aborted.")
+            exit(1)
+    if trained_dir.exists():
+        print(f"Saved model already exists:", trained_dir)
+        answer = input("Model will be overriden at the end. Continue? (y/n):")
+        if answer.lower().strip() != "y":
+            print("Training aborted.")
+            exit(1)

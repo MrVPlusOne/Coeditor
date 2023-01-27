@@ -20,7 +20,6 @@ from pathlib import Path
 from textwrap import dedent
 from typing import *
 
-import libcst as cst
 from IPython.display import HTML, display
 from tqdm import tqdm
 
@@ -317,11 +316,7 @@ def normalize_code_by_ast(
         return code
 
 
-def code_equal(code1: str | cst.CSTNode, code2: str | cst.CSTNode) -> bool:
-    if isinstance(code1, cst.CSTNode):
-        code1 = show_expr(code1)
-    if isinstance(code2, cst.CSTNode):
-        code2 = show_expr(code2)
+def code_equal(code1: str, code2: str) -> bool:
     if code1 == code2:
         return True
     code1 = normalize_code_by_ast(code1)
@@ -418,11 +413,11 @@ def assert_str_equal(actual: str, expect: str):
 
 def rec_add_dict_to(
     target: dict[str, Any],
-    value: dict[str, Any],
+    value: Mapping[str, Any],
     value_merger: Callable[[Any, Any], Any] = lambda x, y: x + y,
 ):
     for k, v in value.items():
-        if isinstance(v, dict):
+        if isinstance(v, Mapping):
             if k not in target:
                 target[k] = {}
             rec_add_dict_to(target[k], v, value_merger)

@@ -1,4 +1,4 @@
-from coeditor.history import Added, Deleted, Modified
+from coeditor.change import Added, Deleted, Modified
 from spot.static_analysis import ModuleName
 from .defs import *
 from typing import *

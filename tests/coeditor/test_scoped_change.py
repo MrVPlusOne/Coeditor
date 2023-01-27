@@ -2,8 +2,8 @@ from textwrap import indent
 
 import pytest
 
-from coeditor.code_change import *
 from coeditor.encoding import _BaseTokenizer
+from coeditor.scoped_changes import *
 
 
 def test_change_scope():

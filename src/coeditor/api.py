@@ -1,4 +1,5 @@
 # End-user API as an editing suggestion tool.
+# FIXME: update this with the data pipeline
 
 import io
 import logging
@@ -8,13 +9,10 @@ import textwrap
 import torch
 from libcst.metadata import CodePosition, CodeRange
 
+from coeditor.change import Added, Modified, default_show_diff
 from coeditor.common import *
-from coeditor.encoders import (
-    EditRequest,
-    QueryRefEditEncoder,
-    apply_output_tks_to_change,
-    change_tks_to_query_context,
-)
+from coeditor.dataset import C3EditEncoder
+from coeditor.encoders import apply_output_tks_to_change, change_tks_to_query_context
 from coeditor.encoding import (
     Add_id,
     Del_id,
@@ -25,18 +23,9 @@ from coeditor.encoding import (
     is_extra_id,
     tokens_to_change,
 )
-from coeditor.history import (
-    Added,
-    Modified,
-    ModuleEdit,
-    ProjectEdit,
-    default_show_diff,
-    file_content_from_commit,
-    get_change_path,
-)
-from coeditor.model import DecodingArgs
 from coeditor.retrieval_model import (
     BatchArgs,
+    DecodingArgs,
     RetrievalDecodingResult,
     RetrievalEditorModel,
     RetrievalModelPrediction,
@@ -52,6 +41,8 @@ from spot.static_analysis import (
     remove_comments,
 )
 from spot.utils import add_line_numbers
+
+from .git import file_content_from_commit
 
 DropComment = bool
 
@@ -79,7 +70,7 @@ class ChangeDetectionConfig:
         target_file: Path,
         prev_cache: TimedCache[tuple[ModuleName, DropComment], PythonModule, str],
         now_cache: TimedCache[tuple[ModuleName, DropComment], PythonModule, float],
-    ) -> ProjectEdit:
+    ) -> "ProjectEdit":
         def is_src(path_s: str) -> bool:
             path = Path(path_s)
             return path.suffix == ".py" and all(
@@ -227,7 +218,7 @@ class EditPredictionService:
         project: Path,
         model: RetrievalEditorModel,
         batch_args: BatchArgs = BatchArgs(shuffle_extra_ids=False),
-        encoder: QueryRefEditEncoder = QueryRefEditEncoder(),
+        encoder: C3EditEncoder = C3EditEncoder(),
         dec_args: DecodingArgs = DecodingArgs(),
         config: ChangeDetectionConfig = ChangeDetectionConfig(),
     ) -> None:

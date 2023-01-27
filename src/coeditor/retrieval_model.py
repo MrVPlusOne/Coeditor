@@ -5,26 +5,15 @@ from textwrap import indent
 
 import torch
 import transformers
-from datasets.arrow_dataset import Dataset
-from numpy import zeros_like
 from torch import BoolTensor, FloatTensor, LongTensor, Tensor, nn
-from torch.utils.checkpoint import checkpoint
 from transformers import (
     AutoConfig,
-    BatchEncoding,
-    DataCollatorForSeq2Seq,
     EarlyStoppingCallback,
-    EvalPrediction,
     SchedulerType,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
 )
-from transformers.generation.utils import (
-    BeamSampleEncoderDecoderOutput,
-    LogitsProcessorList,
-    SampleOutput,
-    StoppingCriteriaList,
-)
+from transformers.generation.utils import LogitsProcessorList, StoppingCriteriaList
 from transformers.models.t5.modeling_t5 import (
     BaseModelOutputWithPastAndCrossAttentions,
     Seq2SeqLMOutput,
@@ -32,18 +21,15 @@ from transformers.models.t5.modeling_t5 import (
     T5Block,
     T5Config,
     T5ForConditionalGeneration,
-    T5LayerCrossAttention,
     T5LayerFF,
-    T5LayerNorm,
     T5LayerSelfAttention,
     T5PreTrainedModel,
     T5Stack,
 )
 from transformers.trainer import EvalLoopOutput
 
+from coeditor.change import Modified
 from coeditor.ctx_change_encoder import C3Problem, C3ProblemTokenizer, TkC3Problem
-from coeditor.dataset import TokenizedEditDataset
-from coeditor.encoders import EditRequest, apply_output_tks_to_change
 from coeditor.encoding import (
     Add_id,
     BOS_id,
@@ -53,6 +39,7 @@ from coeditor.encoding import (
     PAD_id,
     TkDelta,
     _Tokenizer,
+    apply_output_tks_to_change,
     change_tks_to_original_delta,
     change_to_tokens,
     decode_tokens,
@@ -60,25 +47,93 @@ from coeditor.encoding import (
     get_tk_id,
     is_extra_id,
     random_extra_id_map,
-    tokens_to_change,
-)
-from coeditor.history import Change, Modified
-from coeditor.model import (
-    DatasetDecodingResult,
-    DecodingArgs,
-    EvalArgs,
-    ModelPrediction,
-    TrainingArgs,
-    compute_loss_metrics,
-    wrap_bos,
 )
 from spot.data import output_ids_as_seqs
-from spot.static_analysis import ModuleName, ProjectPath
+from spot.model import input_cost_model
 from spot.utils import cprint, groupby, scalar_stats
 
 from .common import *
 
 CheckNaN: bool = False
+CodeT5Model = T5ForConditionalGeneration
+
+
+@dataclass
+class DecodingArgs:
+    max_output_tks: int = 512
+    do_sample: bool = False
+    top_p: float = 0.9
+    num_beams: Optional[int] = 1
+    length_penalty: float = 0.0
+    marginalize_samples: int = 1
+
+    def to_model_args(self) -> dict:
+        return {
+            "max_length": self.max_output_tks,
+            "do_sample": self.do_sample,
+            "top_p": self.top_p,
+            "num_beams": self.num_beams,
+            "length_penalty": self.length_penalty,
+        }
+
+
+@dataclass
+class TrainingArgs:
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    max_train_epochs: int = 3
+    reinit_weights: bool = False
+    quicktest: bool = False
+    lr_scheduler_type: SchedulerType = SchedulerType.LINEAR
+
+
+@dataclass
+class EvalArgs:
+    max_batch_cost: float = 2 * input_cost_model(4100, 512)
+
+
+class ModelPrediction(TypedDict):
+    input_ids: TokenSeq
+    output_ids: TokenSeq
+    labels: TokenSeq
+
+
+def compute_loss_metrics(
+    logits: torch.Tensor, labels: torch.Tensor
+) -> Mapping[str, WeightedSum]:
+    logits = logits.permute(0, 2, 1)  # shape: (batch, vocab, seq_len)
+    nlogp = torch.nn.functional.cross_entropy(
+        logits,
+        labels,
+        reduction="none",
+        ignore_index=-100,
+    )  # shape: (batch, seq_len)
+    loss = nlogp.sum().item()
+    ex_prob = torch.exp(-nlogp.sum(dim=1)).sum().item()
+    bsize = logits.size(0)
+    label_tks = (labels != -100).sum().item()
+    return {
+        "loss": WeightedSum(loss / label_tks, 1),
+        "loss_per_tk": WeightedSum(loss, label_tks),
+        "loss_per_ex": WeightedSum(loss, bsize),
+        "prob_per_ex": WeightedSum(ex_prob, bsize),
+    }
+
+
+def wrap_bos(x: TokenSeq) -> TokenSeq:
+    if x:
+        assert x[0] != BOS_id
+    return [BOS_id] + x + [EOS_id]
+
+
+def drop_empty_labels(x: TokenSeq) -> TokenSeq:
+    """Drop the <extra_id>s that are not followed by a code token."""
+    new_seq = TokenSeq()
+    for k, v in output_ids_as_seqs(x).items():
+        if v:
+            new_seq.append(k)
+            new_seq.extend(v)
+    return new_seq
 
 
 def remove_pad_ids(ids: TokenSeq) -> TokenSeq:
@@ -101,7 +156,10 @@ class PredictedChange(NamedTuple):
     n_samples: int
 
 
-class RetrievalModelPrediction(ModelPrediction):
+class RetrievalModelPrediction(TypedDict):
+    input_ids: TokenSeq
+    output_ids: TokenSeq
+    labels: TokenSeq
     references: list[TokenSeq]
 
 
@@ -399,7 +457,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def predict_on_batch(
         self,
         batch: dict,
-        requests: Sequence[EditRequest],
+        requests: Sequence["EditRequest"],
         dec_args: DecodingArgs,
         n_solutions: int = 1,
     ) -> list[list[PredictedChange]]:

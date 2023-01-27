@@ -3,7 +3,7 @@
 from functools import cached_property
 from coeditor.common import *
 from parso.python import tree as ptree
-from coeditor.history import Change
+from coeditor.change import Change
 
 from spot.static_analysis import ProjectPath
 

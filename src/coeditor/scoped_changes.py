@@ -18,8 +18,9 @@ from coeditor.encoding import change_to_line_diffs, line_diffs_to_original_delta
 from spot.static_analysis import ElemPath, ModuleName, ProjectPath
 from spot.utils import rec_iter_files
 
+from .change import Added, Change, Deleted, Modified, get_named_changes
 from .common import *
-from .history import Added, Change, CommitInfo, Deleted, Modified, get_named_changes
+from .git import CommitInfo
 
 ScopeTree = ptree.Function | ptree.Class | ptree.Module
 PyNode = ptree.PythonBaseNode | ptree.PythonNode

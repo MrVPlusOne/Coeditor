@@ -1,31 +1,18 @@
 # utils to encode and decode code changes into CodeT5 format.
 
-import asyncio
 import copy
-import difflib
 import random
 from abc import ABC, abstractmethod
-from dataclasses import field
 from textwrap import indent
 
 from nltk.translate.bleu_score import sentence_bleu
 
 import spot.utils
 from spot.data import output_ids_as_seqs
-from spot.static_analysis import ProjectPath, PythonElem, PythonFunction, show_element
+from spot.static_analysis import ProjectPath
 
+from .change import Added, Change, Deleted, Modified, show_change
 from .common import *
-from .history import (
-    Added,
-    Change,
-    Deleted,
-    Modified,
-    ModuleEdit,
-    ProjectEdit,
-    analyze_edits,
-    get_change_path,
-    show_change,
-)
 
 """
 Only use this when we want to avoid encoding <add> and <del> as special tokens.
@@ -627,75 +614,6 @@ class TokenizedEdit(ABC):
         ]
         return "\n".join(outputs)
 
-    def inline_changes(self, lines: int) -> "TokenizedEdit | None":
-        """Inline the first `lines` lines of the output changes into the main code.
-        Will return None if the remaining changes to be predicted are empty.
-        """
-        out_dict = output_ids_as_seqs(self.output_tks)
-        to_inline = TokenSeq()
-        to_predict = TokenSeq()
-        for i, k in enumerate(out_dict.keys()):
-            if i < lines:
-                to_inline.append(k)
-                to_inline.extend(out_dict[k])
-            else:
-                to_predict.append(k)
-                to_predict.extend(out_dict[k])
-        if not to_predict:
-            # the remaining changes are empty
-            return None
-        main_tks = inline_output_tokens(
-            self.main_tks, to_inline, leave_unpredicted=True
-        )
-        edit = copy.copy(self)
-        edit.main_tks = main_tks
-        edit.output_tks = to_predict
-        return edit
-
-    def inline_signature_changes(self) -> "TokenizedEdit | None":
-        """If this edit is applied on a function, inline all the changes
-        appeared in the function signature."""
-        if EOS_id in self.main_tks:
-            return None
-        change = extract_edit_change(self.main_tks, self.output_tks)
-        try:
-            mod = cst.parse_module(dedent(change.before))
-        except Exception:
-            print("Failed to parse the code:\n" + change.before)
-            raise
-        match mod.body:
-            case [cst.FunctionDef() as f]:
-                f = f.with_changes(body=cst.IndentedBlock([]))
-                f_code = show_expr(f)
-                header_lines = len(f_code.split("\n")) - 1
-                return self.inline_changes(lines=header_lines)
-        return None
-
-    def prefix_from_signature(self) -> TokenSeq:
-        """Get a the prefix of the output_ids corresponding to the function
-        signature changes. This can be used to constrain decoding."""
-        if EOS_id in self.main_tks:
-            return TokenSeq()
-        change = extract_edit_change(self.main_tks, self.output_tks)
-        try:
-            mod = cst.parse_module(dedent(change.before))
-        except Exception:
-            print("Failed to parse the code:\n" + change.before)
-            return TokenSeq()
-        match mod.body:
-            case [cst.FunctionDef() as f]:
-                f = f.with_changes(body=cst.IndentedBlock([]))
-                f_code = show_expr(f)
-                header_lines = len(f_code.split("\n")) - 1
-                out_dict = output_ids_as_seqs(self.output_tks)
-                prefix_tks = TokenSeq()
-                for i, k in enumerate(out_dict.keys()):
-                    if i < header_lines:
-                        prefix_tks.append(k)
-                        prefix_tks.extend(out_dict[k])
-                return prefix_tks
-        return TokenSeq()
-
     import warnings
 
     # turn off redundant BLEU warnings
@@ -900,476 +818,10 @@ def truncate_sections(
     )
 
 
-@dataclass
-class FileBasedTokenizedEdit(TokenizedEdit):
-    main_tks: TokenSeq
-    left_tks: TokenSeq
-    right_tks: TokenSeq
-    output_tks: TokenSeq
-    path: ProjectPath
-    change_type: Change[None]
-    add_truncate_bos: bool
-
-    @property
-    def input_tks(self) -> TokenSeq:
-        return join_list([self.left_tks, self.main_tks, self.right_tks], sep=Newline_id)
-
-    def all_ctxs(self) -> dict[str, TokenSeq]:
-        return {
-            "left context": self.left_tks,
-            "right context": self.right_tks,
-        }
-
-
 # MainPrompt = encode_basic("\n# EDIT:\n")
 MainPrompt = TokenSeq()
 
 TEdit = TypeVar("TEdit", bound=TokenizedEdit)
-
-
-class EditEncoder(Generic[T1], ABC):
-    # If True, will only add BOS and EOS tokens to the truncated sections.
-    add_truncate_bos: bool = True
-
-    @abstractmethod
-    def encode_pedit(
-        self,
-        pedit: ProjectEdit,
-        training: bool,
-    ) -> Iterable[T1]:
-        pass
-
-    def maybe_wrap_bos(self, tks: TokenSeq) -> TokenSeq:
-        "Wrap the tokens with BOS and EOS tokens if `Add_Truncation_BOS` is False."
-        if self.add_truncate_bos:
-            return tks
-        else:
-            return [BOS_id] + tks + [EOS_id]
-
-    def maybe_wrap_bos_code(self, code: str) -> str:
-        "Wrap the tokens with BOS and EOS tokens if `Add_Truncation_BOS` is False."
-        if self.add_truncate_bos:
-            return code
-        else:
-            return f"<s>{code}</s>"
-
-
-@dataclass
-class FileBasedEditEncoder(EditEncoder[FileBasedTokenizedEdit]):
-    n_max_tks: int = 4000
-    add_truncate_bos: bool = True
-
-    def encode_pedit(
-        self,
-        pedit: ProjectEdit,
-        training: bool,
-    ) -> Iterable[FileBasedTokenizedEdit]:
-        for me in pedit.changes.values():
-            yield from self.encode_medit(me)
-
-    def encode_medit(
-        self,
-        medit: ModuleEdit,
-    ) -> Iterable[FileBasedTokenizedEdit]:
-        modifications = medit.modified_functions(ast_must_change=True)
-        if not modifications:
-            return
-        mod_before = medit.before
-        code_before = self.maybe_wrap_bos_code(mod_before.code).split("\n")
-        mod_after = medit.after
-        code_after = self.maybe_wrap_bos_code(mod_after.code).split("\n")
-        mod_name = mod_after.name
-        ctx_lines = self.n_max_tks // 2
-
-        for path, c in modifications.items():
-            after_range = mod_after.location_map[c.after.tree]
-            after_start = after_range.start.line - 1
-            after_end = after_range.end.line
-            before_range = mod_before.location_map[c.before.tree]
-            before_start = before_range.start.line - 1
-            before_end = before_range.end.line
-
-            code_main_before = "\n".join(code_before[before_start:before_end])
-            code_main_after = "\n".join(code_after[after_start:after_end])
-
-            code_above_after = "\n".join(
-                code_after[max(0, after_start - ctx_lines) : after_start]
-            )
-            code_below_after = "\n".join(
-                code_after[after_end : min(len(code_after), after_end + ctx_lines)]
-            )
-
-            code_above_before = "\n".join(
-                code_before[max(0, before_start - ctx_lines) : before_start]
-            )
-            code_below_before = "\n".join(
-                code_before[before_end : min(len(code_before), before_end + ctx_lines)]
-            )
-
-            above_change = Modified(code_above_before, code_above_after)
-            below_change = Modified(code_below_before, code_below_after)
-
-            above_tks = change_to_tokens(above_change)
-            below_tks = change_to_tokens(below_change)
-            input, output = change_to_input_output(
-                Modified(code_main_before.strip("\n"), code_main_after.strip("\n"))
-            )
-
-            main_tks, above_tks, below_tks = truncate_sections(
-                self.n_max_tks - len(MainPrompt) - 1,
-                (input, TruncateAt.Right),
-                (above_tks, TruncateAt.Left),
-                (below_tks, TruncateAt.Right),
-                add_bos=self.add_truncate_bos,
-            )
-            above_tks.extend(MainPrompt)
-            output_tks = truncate_output_tks(main_tks, output)
-            if not output_tks:
-                # can happen if input too long
-                continue
-
-            edit = FileBasedTokenizedEdit(
-                main_tks=main_tks,
-                output_tks=output_tks,
-                left_tks=above_tks,
-                right_tks=below_tks,
-                path=ProjectPath(mod_name, path),
-                change_type=c.map(lambda _: None),
-                add_truncate_bos=self.add_truncate_bos,
-            )
-            yield edit
-
-
-@dataclass
-class CstBasedTokenizedEdit(TokenizedEdit):
-    main_tks: TokenSeq
-    left_tks: TokenSeq
-    right_tks: TokenSeq
-    output_tks: TokenSeq
-    path: ProjectPath
-    change_type: Change[None]
-    elems: set[ProjectPath]
-
-    @property
-    def input_tks(self) -> TokenSeq:
-        return join_list([self.left_tks, self.main_tks, self.right_tks], sep=Newline_id)
-
-    def all_ctxs(self) -> dict[str, TokenSeq]:
-        return {
-            "left context": self.left_tks,
-            "right context": self.right_tks,
-        }
-
-    def truncate_ctx_(self, length: int):
-        ctx_len = length - len(self.main_tks)
-        current_ctx = len(self.left_tks) + len(self.right_tks)
-        assert current_ctx > ctx_len, "Can't truncate to a larger length"
-        ratio = ctx_len / current_ctx
-        n_left = int(len(self.left_tks) * ratio)
-        n_right = ctx_len - n_left
-        self.left_tks = self.left_tks[-n_left:]
-        if self.left_tks:
-            self.left_tks[0] = BOS_id
-        self.right_tks = self.right_tks[:n_right]
-        if self.right_tks:
-            self.right_tks[-1] = EOS_id
-
-
-@dataclass
-class CstBasedEditEncoder(EditEncoder[CstBasedTokenizedEdit]):
-    n_max_tks: int = 4000
-    collapse_unchanged: bool = True
-    add_truncate_bos: bool = True
-    include_additions: bool = False
-
-    def encode_pedit(
-        self,
-        pedit: ProjectEdit,
-        training: bool,
-    ) -> Iterable[CstBasedTokenizedEdit]:
-        def get_selected(
-            elems: Iterable[ProjectPath], elem_lens: Iterable[int], selection_len: int
-        ):
-            for e, e_len in zip(elems, elem_lens):
-                yield e
-                selection_len -= e_len
-                if selection_len <= 0:
-                    break
-            pass
-
-        ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
-        for mname, medit in pedit.changes.items():
-            mod_fs = medit.modified_functions(ast_must_change=True)
-            if training and self.include_additions:
-                mod_fs |= medit.added_functions()
-            if not mod_fs:
-                continue
-
-            sorted_elems = [
-                ProjectPath(mname, p) for p in medit.sorted_elems(include_classes=True)
-            ]
-
-            for i, path in enumerate(sorted_elems):
-                if (c := mod_fs.get(path.path)) is None:
-                    continue
-                body_change = c.map(lambda x: x.header_body_code[1])
-                if (
-                    isinstance(body_change, Modified)
-                    and count_lines(body_change.before) > 99
-                ):
-                    # skip functions that are too long
-                    continue
-                main_tks, output_tks = change_to_input_output(body_change)
-                output_tks = truncate_section(
-                    output_tks, TruncateAt.Right, self.n_max_tks, self.add_truncate_bos
-                )
-                if not output_tks:
-                    print("Body change:\n", body_change)
-                    print("Main change:\n", c.map(lambda x: x.code))
-                    raise RuntimeError("No output tokens")
-                left_etks = [
-                    ctx_encoder.encode_ctx_element(p) for p in sorted_elems[:i]
-                ]
-                right_etks = [
-                    ctx_encoder.encode_ctx_element(p) for p in sorted_elems[i + 1 :]
-                ]
-                header_tks = change_to_tokens(c.map(lambda x: x.header_body_code[0]))
-                main_tks = header_tks + [Newline_id] + main_tks
-                left_ctx = join_list(left_etks, sep=Newline_id)
-                right_ctx = join_list(right_etks, sep=Newline_id)
-                if not self.add_truncate_bos:
-                    left_ctx = [BOS_id] + left_ctx
-                    right_ctx.append(EOS_id)
-                main_tks, left_tks, right_tks = truncate_sections(
-                    self.n_max_tks - len(MainPrompt) - 1,
-                    (main_tks, TruncateAt.Right),
-                    (left_ctx, TruncateAt.Left),
-                    (right_ctx, TruncateAt.Right),
-                    add_bos=self.add_truncate_bos,
-                )
-                output_tks = truncate_output_tks(main_tks, output_tks)
-                if not output_tks:
-                    # can happen if input too long
-                    continue
-
-                selected = {path}
-                for e in get_selected(
-                    reversed(sorted_elems[:i]),
-                    reversed([len(e) for e in left_etks]),
-                    len(left_tks),
-                ):
-                    selected.add(e)
-
-                for e in get_selected(
-                    sorted_elems[i + 1 :],
-                    [len(e) for e in right_etks],
-                    len(right_tks),
-                ):
-                    selected.add(e)
-
-                left_tks.extend(MainPrompt)
-                ex = CstBasedTokenizedEdit(
-                    main_tks=main_tks,
-                    left_tks=left_tks,
-                    right_tks=right_tks,
-                    output_tks=output_tks,
-                    path=path,
-                    change_type=c.map(lambda _: None),
-                    elems=selected,
-                )
-                yield ex
-
-
-@dataclass
-class AnalysisBasedTokenizedEdit(TokenizedEdit):
-    main_tks: TokenSeq
-    left_tks: TokenSeq
-    right_tks: TokenSeq
-    extra_tks: TokenSeq
-    output_tks: TokenSeq
-    path: ProjectPath
-    change_type: Change[None]
-    elems: set[ProjectPath]
-    updated_calls: list[tuple[ProjectPath, Modified[cst.Call]]]
-
-    def meta_data_lines(self) -> list[str]:
-        updated_calls = [f"Call updated: {str(p)}" for p, _ in self.updated_calls]
-        return [f"path: {str(self.path)}", *updated_calls]
-
-    @property
-    def input_tks(self) -> TokenSeq:
-        return join_list(
-            [self.extra_tks, self.left_tks, self.main_tks, self.right_tks],
-            sep=Newline_id,
-        )
-
-    def all_ctxs(self) -> dict[str, TokenSeq]:
-        return {
-            "extra context": self.extra_tks,
-            "left context": self.left_tks,
-            "right context": self.right_tks,
-        }
-
-
-@dataclass
-class AnalysisBasedEditEncoder(EditEncoder[AnalysisBasedTokenizedEdit]):
-    n_max_tks: int = 4000
-    extra_ctx_names: Sequence[str] = ("usees",)
-    collapse_unchanged: bool = True
-    record_type_usages: bool = False
-    add_truncate_bos: bool = True
-
-    # currently not used
-    CtxSepTokens = encode_basic("\n# Usees ends\n")
-
-    def encode_pedit(
-        self,
-        pedit: ProjectEdit,
-        training: bool,
-    ):
-        raise NotImplementedError("Use `encode_pedits` instead.")
-
-    def encode_pedits(
-        self,
-        pedits: Sequence[ProjectEdit],
-        training: bool,
-    ) -> Iterable[AnalysisBasedTokenizedEdit]:
-        analyses = analyze_edits(
-            pedits, record_type_usages=self.record_type_usages, silent=True
-        )
-        # display(UsageAnalysis.TLogger.as_dataframe())
-        cst_encoder = CstBasedEditEncoder(
-            n_max_tks=self.n_max_tks,
-            collapse_unchanged=self.collapse_unchanged,
-            add_truncate_bos=self.add_truncate_bos,
-        )
-        for analysis in analyses:
-            pedit = analysis.pedit
-            ctx_encoder = CtxEncoder(pedit, self.collapse_unchanged)
-            path_to_cxt_edit = {e.path: e for e in analysis.ctx_edits}
-            tk_edits = list(cst_encoder.encode_pedit(pedit, training=training))
-            for edit in tk_edits:
-                ctx_edit = path_to_cxt_edit[edit.path]
-                ctx_changes = [
-                    c
-                    for group in self.extra_ctx_names
-                    for c in ctx_edit.grouped_ctx_changes[group]
-                    if get_change_path(c) not in edit.elems
-                ]
-                if ctx_changes:
-                    extra_ctx_tks = self.maybe_wrap_bos(
-                        ctx_encoder.encode_ctx_changes(ctx_changes)
-                    )
-                else:
-                    extra_ctx_tks = TokenSeq()
-
-                main_tks, extra_tks, left_tks, right_tks = truncate_sections(
-                    self.n_max_tks,
-                    (edit.main_tks, TruncateAt.Right),
-                    (extra_ctx_tks, TruncateAt.Left),
-                    (edit.left_tks, TruncateAt.Left),
-                    (edit.right_tks, TruncateAt.Right),
-                    add_bos=self.add_truncate_bos,
-                )
-
-                yield AnalysisBasedTokenizedEdit(
-                    main_tks=main_tks,
-                    left_tks=left_tks,
-                    right_tks=right_tks,
-                    extra_tks=extra_tks,
-                    output_tks=truncate_output_tks(main_tks, edit.output_tks),
-                    path=edit.path,
-                    change_type=edit.change_type,
-                    elems={get_change_path(c) for c in ctx_changes} | edit.elems,
-                    updated_calls=ctx_edit.updated_calls,
-                )
-
-
-@dataclass
-class CtxEncoder:
-    pedit: ProjectEdit
-    collapse_unchanged: bool
-    collapse_simple_changes: bool = False
-    compress_ctx: int | None = 6
-    indent_in_class: bool = True
-    elem_size_limit: int = 8000
-    cache: dict[ProjectPath, TokenSeq] = field(default_factory=dict)
-
-    def encode_ctx_element(self, ppath: ProjectPath) -> TokenSeq:
-        "Encode a single element in the context. Results are cached."
-        if ppath in self.cache:
-            return self.cache[ppath]
-        pedit = self.pedit
-        can_indent = self.indent_in_class
-
-        def maybe_dedent(x: str):
-            if len(x) > self.elem_size_limit:
-                x = x[: max(0, self.elem_size_limit - 4)] + "</s>"
-            if not can_indent:
-                x = dedent(x)
-            return x
-
-        if (medit := pedit.changes.get(ppath.module)) is None:
-            medit = ModuleEdit.from_no_change(pedit.after.modules[ppath.module])
-        module_after = medit.after
-        path = ppath.path
-
-        if path in medit.all_changes:
-            mod = medit.all_changes[path]
-            elem = mod.before if isinstance(mod, Deleted) else mod.after
-            if (
-                self.collapse_simple_changes
-                and (isinstance(mod, Deleted) or isinstance(mod, Added))
-                and isinstance(elem, PythonFunction)
-            ):
-                # as a special case, we also collapose the body of deleted or added functions
-                f_code = show_element(
-                    collapse_code(elem.tree), can_indent and elem.in_class
-                )
-                f_change = (
-                    Deleted(f_code) if isinstance(mod, Deleted) else Added(f_code)
-                )
-                elem_tks = change_to_tokens(f_change)
-            else:
-                elem_tks = change_to_tokens(mod.map(lambda e: maybe_dedent(e.code)))
-                if self.compress_ctx is not None:
-                    elem_tks = compress_change_tks(elem_tks, self.compress_ctx)
-        elif path in module_after.elems_dict:
-            elem = module_after.elems_dict[path]
-            if self.collapse_unchanged and isinstance(elem, PythonFunction):
-                tree = collapse_code(elem.tree)
-                code = show_element(tree, can_indent and elem.in_class)
-            else:
-                code = maybe_dedent(elem.code)
-            elem_tks = encode_basic(code)
-        else:
-            # FIXME: inner classes are pulled out in this implementation
-            if (elem := module_after.classes_dict.get(path)) is None:
-                elem = pedit.before.modules[ppath.module].classes_dict[path]
-            cls = elem.tree.with_changes(body=cst.IndentedBlock([]))
-            # drop the `pass` part
-            cls_lines = show_element(cls, indent=False).split("\n")[:-1]
-            header_tks = encode_basic("\n".join(cls_lines))
-            elem_tks = [Newline_id] + header_tks
-        if isinstance(elem, PythonFunction):
-            elem_tks.append(Newline_id)
-
-        self.cache[ppath] = elem_tks
-        return elem_tks
-
-    def encode_ctx_changes(self, changes: Sequence[Change[PythonElem]]):
-        # group changes by parents
-        parent2change = spot.utils.groupby(changes, lambda c: get_change_path(c).pop())
-        sorted_paths = list[ProjectPath]()
-        for parent, changes in parent2change.items():
-            if parent.path:
-                sorted_paths.append(parent)
-            for c in changes:
-                sorted_paths.append(get_change_path(c))
-        return join_list(
-            (self.encode_ctx_element(p) for p in sorted_paths),
-            sep=Newline_id,
-        )
 
 
 def compress_change_tks(tks: TokenSeq, max_ctx: int):
@@ -1396,23 +848,6 @@ def compress_change_tks(tks: TokenSeq, max_ctx: int):
     return join_list(new_lines, sep=Newline_id)
 
 
-def collapse_code(tree: cst.CSTNode) -> cst.CSTNode:
-    class Transformer(cst.CSTTransformer):
-        OMIT = cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
-
-        def visit_FunctionDef(self, node) -> Optional[bool]:
-            return False
-
-        def leave_FunctionDef(
-            self, original_node: "cst.FunctionDef", updated_node: "cst.FunctionDef"
-        ):
-            return updated_node.with_changes(body=self.OMIT)
-
-    out = tree.visit(Transformer())
-    assert isinstance(out, cst.CSTNode)
-    return out
-
-
 __ordered_extra_ids = [get_extra_id(i) for i in range(100)]
 __random_extra_ids = [get_extra_id(i) for i in range(100)]
 
@@ -1436,3 +871,34 @@ def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq) -> TokenSeq:
                 out.append(k)
                 out.extend(out_segs[k])
         return out
+
+
+def change_tks_to_query_context(change_tks: TokenSeq, respect_lines: int):
+    lines = split_list(change_tks, Newline_id)
+    spliter = 0
+    result_lines = 0
+    for i, l in enumerate(lines):
+        if l and l[0] == Del_id:
+            pass
+        else:
+            result_lines += 1
+        if result_lines <= respect_lines:
+            spliter = i + 1
+
+    context = join_list(lines[:spliter], Newline_id)
+    query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
+    return query, context
+
+
+def apply_output_tks_to_change(
+    change_tks: TokenSeq,
+    respect_lines: int,
+    out_tks: TokenSeq,
+) -> Modified[str]:
+    (input_tks, _), context = change_tks_to_query_context(change_tks, respect_lines)
+    change_tks = (
+        context
+        + [Newline_id]
+        + inline_output_tokens(input_tks, out_tks, leave_unpredicted=False)
+    )
+    return tokens_to_change(change_tks)

@@ -8,8 +8,17 @@ from jedi.api import classes, convert_names, helpers
 from parso.python import tree
 from parso.python import tree as ptree
 
-from coeditor.encoders import has_change
-from coeditor.encoding import (
+from spot.static_analysis import (
+    ModuleHierarchy,
+    ModuleName,
+    ProjectPath,
+    sort_modules_by_imports,
+)
+from spot.utils import scalar_stats
+
+from .change import Added, Change, Modified
+from .common import *
+from .encoding import (
     Del_id,
     Newline_id,
     TkDelta,
@@ -19,7 +28,6 @@ from coeditor.encoding import (
     change_tks_to_original_delta,
     change_to_line_diffs,
     change_to_tokens,
-    decode_tokens,
     encode_basic,
     get_extra_id,
     line_diffs_to_original_delta,
@@ -27,17 +35,8 @@ from coeditor.encoding import (
     truncate_section,
     truncate_sections,
 )
-from coeditor.history import Added, Change, CommitInfo, Modified
-from spot.static_analysis import (
-    ModuleHierarchy,
-    ModuleName,
-    ProjectPath,
-    sort_modules_by_imports,
-)
-from spot.utils import scalar_stats
-
-from .code_change import (
-    ChangedSpan,
+from .git import CommitInfo
+from .scoped_changes import (
     ChangeScope,
     JModule,
     JModuleChange,
@@ -45,11 +44,8 @@ from .code_change import (
     LineRange,
     ProjectChangeProcessor,
     ProjectState,
-    ScopeTree,
     StatementSpan,
-    line_range,
 )
-from .common import *
 from .tk_array import TkArray
 
 
@@ -856,7 +852,7 @@ def _get_parso_cache_node(grammar, path):
 jedi.parser_utils.get_parso_cache_node = _get_parso_cache_node
 
 
-def _fix_jedi_cache(cache_dir: Path):
+def fix_jedi_cache(cache_dir: Path):
     jedi.parser_utils.get_parso_cache_node = _get_parso_cache_node
     jedi.settings.cache_directory = cache_dir / "jedi_cache"
     parso.cache._default_cache_path = cache_dir / "parso_cache"
