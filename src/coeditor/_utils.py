@@ -19,7 +19,6 @@ from functools import cache
 from pathlib import Path
 from typing import *
 
-import libcst as cst
 import numpy as np
 import pandas as pd
 from IPython.display import display
@@ -28,11 +27,6 @@ from termcolor import colored
 
 # from tqdm.auto import tqdm
 from tqdm import tqdm
-from transformers.models.roberta.tokenization_roberta import RobertaTokenizer
-from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
-
-TokenizerSPOT = RobertaTokenizer
-ModelSPOT = T5ForConditionalGeneration
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
@@ -104,28 +98,6 @@ def mk_testset_from_repos(name="InferTypes4Py", repos: Sequence[Path] | None = N
 
 def raise_error(msg: str) -> T1:  # type: ignore
     raise RuntimeError(msg)
-
-
-def load_model_spot(path) -> ModelSPOT:
-    return cast(ModelSPOT, ModelSPOT.from_pretrained(path))
-
-
-def load_tokenizer_spot() -> TokenizerSPOT:
-    return TokenizerSPOT.from_pretrained("Salesforce/codet5-base")
-
-
-def _turn_off_tokenizer_warning(tokenizer: TokenizerSPOT):
-    tokenizer.deprecation_warnings[
-        "sequence-length-is-longer-than-the-specified-maximum"
-    ] = True
-
-
-DefaultTokenizer = load_tokenizer_spot()
-_turn_off_tokenizer_warning(DefaultTokenizer)
-
-
-def decode_tokens(tks, skip_special_tokens=False):
-    return DefaultTokenizer.decode(tks, skip_special_tokens=skip_special_tokens)
 
 
 def rec_iter_files(
@@ -914,21 +886,6 @@ def move_all_files(src_dir: Path, dest_dir: Path, glob_pattern: str = "**/*"):
         target = dest_dir / f.relative_to(src_dir)
         target.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(f, target)
-
-
-# used for showing cst nodes.
-_EmptyModule = cst.Module([])
-
-
-def show_expr(
-    expr: cst.CSTNode, quoted: bool = False, strip_empty_lines: bool = True
-) -> str:
-    s = _EmptyModule.code_for_node(expr)
-    if strip_empty_lines:
-        s = s.strip("\n")
-    if quoted:
-        s = f"cst'{s}'"
-    return s
 
 
 def cprint(color: str, *elems, **print_args):

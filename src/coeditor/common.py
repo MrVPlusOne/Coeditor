@@ -23,8 +23,7 @@ from typing import *
 from IPython.display import HTML, display
 from tqdm import tqdm
 
-from spot.static_analysis import split_dots
-from spot.utils import (
+from ._utils import (
     DefaultWorkers,
     PickleCache,
     TimeLogger,
@@ -39,8 +38,8 @@ from spot.utils import (
     pickle_load,
     pmap,
     repr_modified_args,
-    show_expr,
     show_string_diff,
+    split_dots,
     timed_action,
 )
 
@@ -428,3 +427,35 @@ def rec_add_dict_to(
                 target[k] = value_merger(target[k], v)
             else:
                 target[k] = v
+
+
+ElemPath = str
+ModuleName = str
+
+
+class ProjectPath(NamedTuple):
+    """The path of a top-level function or method in a project."""
+
+    module: ModuleName
+    path: ElemPath
+
+    def __str__(self) -> str:
+        return f"{self.module}/{self.path}"
+
+    def __repr__(self) -> str:
+        return f"proj'{str(self)}'"
+
+    def append(self, path: ElemPath) -> "ProjectPath":
+        new_path = path if self.path == "" else f"{self.path}.{path}"
+        return ProjectPath(self.module, new_path)
+
+    def pop(self) -> "ProjectPath":
+        p1 = ".".join(split_dots(self.path)[:-1])
+        return ProjectPath(self.module, p1)
+
+    @staticmethod
+    def from_str(s: str) -> "ProjectPath":
+        if "/" not in s:
+            raise ValueError(f"A project path must have one '/': {s}")
+        module, path = s.split("/")
+        return ProjectPath(module, path)

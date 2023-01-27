@@ -6,18 +6,28 @@ from abc import ABC, abstractmethod
 from textwrap import indent
 
 from nltk.translate.bleu_score import sentence_bleu
-
-import spot.utils
-from spot.data import output_ids_as_seqs
-from spot.static_analysis import ProjectPath
+from transformers.models.roberta.tokenization_roberta import RobertaTokenizer
+from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 
 from .change import Added, Change, Deleted, Modified, show_change
 from .common import *
 
+TokenizerType = RobertaTokenizer
+
+
+def _turn_off_tokenizer_warning(tokenizer: TokenizerType):
+    tokenizer.deprecation_warnings[
+        "sequence-length-is-longer-than-the-specified-maximum"
+    ] = True
+
+
 """
 Only use this when we want to avoid encoding <add> and <del> as special tokens.
 """
-_BaseTokenizer = spot.utils.DefaultTokenizer
+_BaseTokenizer = cast(
+    TokenizerType, TokenizerType.from_pretrained("Salesforce/codet5-base")
+)
+_turn_off_tokenizer_warning(_BaseTokenizer)
 
 Add = "<add>"
 Del = "<del>"
@@ -80,6 +90,28 @@ def decode_tokens(tokens: TokenSeq, prettify: bool = False) -> str:
 def encode_basic(text: str, add_special_tokens=False) -> TokenSeq:
     "Encode a string into a token sequence using the base tokenizer."
     return _BaseTokenizer.encode(text, add_special_tokens=add_special_tokens)
+
+
+def output_ids_as_seqs(output_ids: Iterable[Token]) -> dict[Token, TokenSeq]:
+    """Parse the CodeT5 model's output as a series of key-value pairs.
+    <pad>, <mask>, or <s> or </s> tokens are filtered out."""
+    buff = TokenSeq()
+    key = None
+    seqs = dict[Token, TokenSeq]()
+
+    for tk in output_ids:
+        if tk <= 0 or tk == BOS_id or tk == EOS_id:
+            continue  # pad, mask token, or sequence token
+        if _min_extra_id <= tk <= _max_extra_id:
+            if key is not None:
+                seqs[key] = buff
+            buff = TokenSeq()
+            key = tk
+        else:
+            buff.append(tk)
+    if key is not None:
+        seqs[key] = buff
+    return seqs
 
 
 def change_to_line_diffs(change: Change[str]) -> list[str]:
@@ -538,6 +570,140 @@ def extract_edit_change(input_tks: TokenSeq, output_tks: TokenSeq) -> Modified[s
     return tokens_to_change(inlined)
 
 
+class TruncateAt(enum.Enum):
+    Left = 0
+    Right = 1
+
+    def reversed(self) -> Self:
+        if self == TruncateAt.Left:
+            return TruncateAt.Right
+        else:
+            return TruncateAt.Left
+
+
+def break_into_chunks(
+    tks: TokenSeq,
+    header_f: Callable[[int], TokenSeq],
+    chunk_size: int,
+    overlap: int,
+    right_to_left: bool = False,
+    add_bos: bool = True,
+    max_return_chunks: int | None = None,
+) -> list[TokenSeq]:
+    """
+    Break the token sequence into chunks with max size `chunk_size`.
+
+    Arguments:
+    - `tks` (TokenSeq): a sequence of tokens to be broken into chunks
+    - `header_f` (Callable[[int], TokenSeq]): a function that takes in an
+    int (representing the chunk number) and returns a sequence of tokens to be used as
+    the header for that chunk
+    - `chunk_size` (int): the maximum size for each chunk
+    - `overlap` (int): the amount of overlap between consecutive chunks
+    - `right_to_left` (bool, optional, default=False): a flag indicating whether the
+    chunks should be created by going from the right to left
+    - `add_bos` (bool, optional, default=True): a flag indicating whether the beginning
+    and end of each chunk should be marked with special tokens (BOS and EOS)
+    - `max_return_chunks` (int, optional, default=None): the maximum number of chunks
+    to return. If None, all chunks will be returned.
+    """
+    chunks = list[TokenSeq]()
+    i = 0
+    L = len(tks)
+    while i < L:
+        chunk_id = len(chunks)
+        header = header_f(chunk_id)
+        this_overlap = overlap if i > 0 else 0
+        progress = chunk_size - len(header) - this_overlap
+        assert progress > 0, f"Not making progress: {progress = }"
+        body = TokenSeq()
+        if right_to_left:
+            end = L - (i - this_overlap)
+            start = max(0, end - progress)
+        else:
+            start = i - this_overlap
+            end = min(L, start + progress)
+        body.extend(tks[start:end])
+        if add_bos and i > 0:
+            if right_to_left:
+                body[-1] = EOS_id
+            else:
+                body[0] = BOS_id
+        if add_bos and i + progress < L - 1:
+            if right_to_left:
+                body[0] = BOS_id
+            else:
+                body[-1] = EOS_id
+        chunk = header + body
+        assert len(chunk) <= chunk_size
+        chunks.append(chunk)
+        if max_return_chunks is not None and len(chunks) >= max_return_chunks:
+            break
+        i += progress
+    return chunks
+
+
+def truncate_section(
+    sec: TokenSeq,
+    direction: TruncateAt,
+    limit: int,
+    add_bos: bool = True,
+    inplace: bool = False,
+) -> TokenSeq:
+    if len(sec) <= limit:
+        return sec
+
+    if direction.value == TruncateAt.Left.value:
+        if inplace:
+            del sec[:-limit]
+        else:
+            sec = sec[-limit:]
+        if add_bos and sec:
+            sec[0] = BOS_id
+    else:
+        assert_eq(direction.value, TruncateAt.Right.value)
+        if inplace:
+            del sec[limit:]
+        else:
+            sec = sec[:limit]
+        if add_bos and sec:
+            sec[-1] = EOS_id
+    return sec
+
+
+def truncate_sections(
+    total_limit: int,
+    *sections: tuple[TokenSeq, TruncateAt],
+    add_bos: bool,
+    inplace: bool = False,
+) -> tuple[TokenSeq, ...]:
+    """Truncate a list of token sequences to fit within a total length limit.
+    Earlier sections have priority over later sections.
+    """
+
+    # first, reserve equal space to each section
+    section_lens = [total_limit // len(sections) for _ in sections]
+    remaining = total_limit
+    for i, (tks, _) in enumerate(sections):
+        l = min(len(tks), section_lens[i])
+        remaining -= l
+        section_lens[i] = l
+    assert remaining >= 0
+
+    # for the unused space, assign to ealier sections when possible
+    for i, (tks, _) in enumerate(sections):
+        if remaining <= 0:
+            break
+        inc = min(remaining, len(tks) - section_lens[i])
+        section_lens[i] += inc
+        remaining -= inc
+
+    return tuple(
+        truncate_section(tks, truncate_dir, section_lens[i], add_bos, inplace=inplace)
+        for i, (tks, truncate_dir) in enumerate(sections)
+    )
+
+
 class TokenizedEdit(ABC):
     input_tks: TokenSeq
     output_tks: TokenSeq
@@ -683,143 +849,6 @@ class TokenizedEdit(ABC):
             main_keys
         ), f"Output keys not in main keys: {out_keys - main_keys}"
 
-
-class TruncateAt(enum.Enum):
-    Left = 0
-    Right = 1
-
-    def reversed(self) -> Self:
-        if self == TruncateAt.Left:
-            return TruncateAt.Right
-        else:
-            return TruncateAt.Left
-
-
-def break_into_chunks(
-    tks: TokenSeq,
-    header_f: Callable[[int], TokenSeq],
-    chunk_size: int,
-    overlap: int,
-    right_to_left: bool = False,
-    add_bos: bool = True,
-    max_return_chunks: int | None = None,
-) -> list[TokenSeq]:
-    """
-    Break the token sequence into chunks with max size `chunk_size`.
-
-    Arguments:
-    - `tks` (TokenSeq): a sequence of tokens to be broken into chunks
-    - `header_f` (Callable[[int], TokenSeq]): a function that takes in an
-    int (representing the chunk number) and returns a sequence of tokens to be used as
-    the header for that chunk
-    - `chunk_size` (int): the maximum size for each chunk
-    - `overlap` (int): the amount of overlap between consecutive chunks
-    - `right_to_left` (bool, optional, default=False): a flag indicating whether the
-    chunks should be created by going from the right to left
-    - `add_bos` (bool, optional, default=True): a flag indicating whether the beginning
-    and end of each chunk should be marked with special tokens (BOS and EOS)
-    - `max_return_chunks` (int, optional, default=None): the maximum number of chunks
-    to return. If None, all chunks will be returned.
-    """
-    chunks = list[TokenSeq]()
-    i = 0
-    L = len(tks)
-    while i < L:
-        chunk_id = len(chunks)
-        header = header_f(chunk_id)
-        this_overlap = overlap if i > 0 else 0
-        progress = chunk_size - len(header) - this_overlap
-        assert progress > 0, f"Not making progress: {progress = }"
-        body = TokenSeq()
-        if right_to_left:
-            end = L - (i - this_overlap)
-            start = max(0, end - progress)
-        else:
-            start = i - this_overlap
-            end = min(L, start + progress)
-        body.extend(tks[start:end])
-        if add_bos and i > 0:
-            if right_to_left:
-                body[-1] = EOS_id
-            else:
-                body[0] = BOS_id
-        if add_bos and i + progress < L - 1:
-            if right_to_left:
-                body[0] = BOS_id
-            else:
-                body[-1] = EOS_id
-        chunk = header + body
-        assert len(chunk) <= chunk_size
-        chunks.append(chunk)
-        if max_return_chunks is not None and len(chunks) >= max_return_chunks:
-            break
-        i += progress
-    return chunks
-
-
-def truncate_section(
-    sec: TokenSeq,
-    direction: TruncateAt,
-    limit: int,
-    add_bos: bool = True,
-    inplace: bool = False,
-) -> TokenSeq:
-    if len(sec) <= limit:
-        return sec
-
-    if direction.value == TruncateAt.Left.value:
-        if inplace:
-            del sec[:-limit]
-        else:
-            sec = sec[-limit:]
-        if add_bos and sec:
-            sec[0] = BOS_id
-    else:
-        assert_eq(direction.value, TruncateAt.Right.value)
-        if inplace:
-            del sec[limit:]
-        else:
-            sec = sec[:limit]
-        if add_bos and sec:
-            sec[-1] = EOS_id
-    return sec
-
-
-def truncate_sections(
-    total_limit: int,
-    *sections: tuple[TokenSeq, TruncateAt],
-    add_bos: bool,
-    inplace: bool = False,
-) -> tuple[TokenSeq, ...]:
-    """Truncate a list of token sequences to fit within a total length limit.
-    Earlier sections have priority over later sections.
-    """
-
-    # first, reserve equal space to each section
-    section_lens = [total_limit // len(sections) for _ in sections]
-    remaining = total_limit
-    for i, (tks, _) in enumerate(sections):
-        l = min(len(tks), section_lens[i])
-        remaining -= l
-        section_lens[i] = l
-    assert remaining >= 0
-
-    # for the unused space, assign to ealier sections when possible
-    for i, (tks, _) in enumerate(sections):
-        if remaining <= 0:
-            break
-        inc = min(remaining, len(tks) - section_lens[i])
-        section_lens[i] += inc
-        remaining -= inc
-
-    return tuple(
-        truncate_section(tks, truncate_dir, section_lens[i], add_bos, inplace=inplace)
-        for i, (tks, truncate_dir) in enumerate(sections)
-    )
-
-
-# MainPrompt = encode_basic("\n# EDIT:\n")
-MainPrompt = TokenSeq()
 
 TEdit = TypeVar("TEdit", bound=TokenizedEdit)
 

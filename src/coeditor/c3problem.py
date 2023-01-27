@@ -8,13 +8,7 @@ from jedi.api import classes, convert_names, helpers
 from parso.python import tree
 from parso.python import tree as ptree
 
-from spot.static_analysis import (
-    ModuleHierarchy,
-    ModuleName,
-    ProjectPath,
-    sort_modules_by_imports,
-)
-from spot.utils import scalar_stats
+from coeditor._utils import scalar_stats
 
 from .change import Added, Change, Modified
 from .common import *
@@ -38,11 +32,14 @@ from .encoding import (
 from .git import CommitInfo
 from .scoped_changes import (
     ChangeScope,
+    ElemPath,
     JModule,
     JModuleChange,
     JProjectChange,
     LineRange,
+    ModuleName,
     ProjectChangeProcessor,
+    ProjectPath,
     ProjectState,
     StatementSpan,
 )
@@ -839,6 +836,77 @@ def _fast_goto(
     )
 
     return {classes.Name(script._inference_state, d) for d in set(names)}
+
+
+class ModuleHierarchy:
+    def __init__(self):
+        self.children = dict[str, "ModuleHierarchy"]()
+        # maps from implcit relative imports to the modules that they actually refer to
+        self._implicit_imports: dict[tuple[ModuleName, ModuleName], ModuleName] = dict()
+
+    def __repr__(self):
+        return f"ModuleNamespace({self.children})"
+
+    def add_module(self, segs: Sequence[str]) -> None:
+        namespace = self
+        for s in segs:
+            if s in namespace.children:
+                namespace = namespace.children[s]
+            else:
+                namespace.children[s] = ModuleHierarchy()
+                namespace = namespace.children[s]
+
+    def has_module(self, segs: Sequence[str]) -> bool:
+        namespace = self
+        for s in segs:
+            if s in namespace.children:
+                namespace = namespace.children[s]
+            else:
+                return False
+        return True
+
+    def resolve_path(self, segs: Sequence[str]) -> ProjectPath | None:
+        if len(segs) < 2:
+            return None
+        namespace = self
+        matched = 0
+        for s in segs[:-1]:
+            if s in namespace.children:
+                namespace = namespace.children[s]
+                matched += 1
+            else:
+                break
+        if matched == 0:
+            return None
+        return ProjectPath(".".join(segs[:matched]), ".".join(segs[matched:]))
+
+    @staticmethod
+    def from_modules(modules: Iterable[str]) -> "ModuleHierarchy":
+        root = ModuleHierarchy()
+        for m in modules:
+            root.add_module(split_dots(m))
+        return root
+
+
+def sort_modules_by_imports(
+    imports: Mapping[ModuleName, set[ModuleName]]
+) -> list[ModuleName]:
+    "Sort modules topologically according to imports"
+    sorted_modules = list[str]()
+    visited = set[str]()
+
+    def visit(m: str) -> None:
+        if m in visited or m not in imports:
+            return
+        visited.add(m)
+        if m in imports:
+            for m2 in imports[m]:
+                visit(m2)
+        sorted_modules.append(m)
+
+    for m in imports:
+        visit(m)
+    return sorted_modules
 
 
 # fix jedi cache error

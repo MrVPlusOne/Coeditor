@@ -3,7 +3,7 @@ import tempfile
 import traceback
 
 from coeditor import scoped_changes
-from spot.utils import pretty_print_dict, scalar_stats
+from coeditor._utils import pretty_print_dict, scalar_stats
 
 from .c3problem import (
     C3Problem,

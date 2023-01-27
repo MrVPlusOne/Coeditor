@@ -14,12 +14,10 @@ from jedi.inference.references import recurse_find_python_files
 from parso.python import tree as ptree
 from parso.tree import BaseNode, NodeOrLeaf
 
-from coeditor.encoding import change_to_line_diffs, line_diffs_to_original_delta
-from spot.static_analysis import ElemPath, ModuleName, ProjectPath
-from spot.utils import rec_iter_files
-
+from ._utils import rec_iter_files
 from .change import Added, Change, Deleted, Modified, get_named_changes
 from .common import *
+from .encoding import change_to_line_diffs, line_diffs_to_original_delta
 from .git import CommitInfo
 
 ScopeTree = ptree.Function | ptree.Class | ptree.Module

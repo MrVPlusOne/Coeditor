@@ -1,11 +1,7 @@
 # utils for computing editing history from git commits
 
-import ast
 from abc import abstractmethod
 from textwrap import indent
-
-from spot.static_analysis import ProjectPath, PythonFunction, PythonVariable
-from spot.utils import show_expr
 
 from .common import *
 
@@ -153,19 +149,19 @@ def get_named_changes(
     return changes
 
 
-def _select_ast_calls(
-    node: ast.AST, path: ProjectPath
-) -> Generator[ast.Call, None, None]:
-    """Return all call nodes with the mathcing function name in the AST."""
-    segs = split_dots(path.path)
-    if segs[-1] == "__init__":
-        f_name = segs[-2]
-    else:
-        f_name = segs[-1]
-    for n in ast.walk(node):
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-            if n.func.id == f_name:
-                yield n
+# def _select_ast_calls(
+#     node: ast.AST, path: ProjectPath
+# ) -> Generator[ast.Call, None, None]:
+#     """Return all call nodes with the mathcing function name in the AST."""
+#     segs = split_dots(path.path)
+#     if segs[-1] == "__init__":
+#         f_name = segs[-2]
+#     else:
+#         f_name = segs[-1]
+#     for n in ast.walk(node):
+#         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+#             if n.func.id == f_name:
+#                 yield n
 
 
 # def find_refactored_calls(

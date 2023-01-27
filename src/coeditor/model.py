@@ -28,6 +28,7 @@ from transformers.models.t5.modeling_t5 import (
 )
 from transformers.trainer import EvalLoopOutput
 
+from coeditor._utils import cprint, groupby, scalar_stats
 from coeditor.c3problem import C3Problem, C3ProblemTokenizer, TkC3Problem
 from coeditor.change import Modified
 from coeditor.encoding import (
@@ -46,11 +47,9 @@ from coeditor.encoding import (
     encode_basic,
     get_tk_id,
     is_extra_id,
+    output_ids_as_seqs,
     random_extra_id_map,
 )
-from spot.data import output_ids_as_seqs
-from spot.model import input_cost_model
-from spot.utils import cprint, groupby, scalar_stats
 
 from .common import *
 
@@ -85,11 +84,6 @@ class TrainingArgs:
     reinit_weights: bool = False
     quicktest: bool = False
     lr_scheduler_type: SchedulerType = SchedulerType.LINEAR
-
-
-@dataclass
-class EvalArgs:
-    max_batch_cost: float = 2 * input_cost_model(4100, 512)
 
 
 class ModelPrediction(TypedDict):

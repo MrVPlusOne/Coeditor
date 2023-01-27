@@ -6,6 +6,7 @@ import warnings
 import wandb
 from prepare_data import make_or_load_datasets
 
+from coeditor._utils import cprint, run_long_task
 from coeditor.common import *
 from coeditor.dataset import C3EditEncoder
 from coeditor.model import (
@@ -15,7 +16,6 @@ from coeditor.model import (
     RetrievalEditorModel,
     TrainingArgs,
 )
-from spot.utils import cprint, run_long_task
 
 
 def train_model(
@@ -137,22 +137,6 @@ def train_model(
     return model
 
 
-if __name__ == "__main__":
-    os.chdir(proj_root())
-    with run_long_task("train_retrieval_model.py"):
-        train_model(
-            dataset_name="small",
-            model_variant="-c3-v1.2",
-            train_args=TrainingArgs(
-                max_train_epochs=1,
-                quicktest=True,
-            ),
-            encoder=C3EditEncoder(),
-            recreate_data=False,
-            eval_only=True,
-        )
-
-
 def check_save_dir(model_name: str) -> None:
     training_dir = get_model_dir(False) / model_name
     trained_dir = get_model_dir(True) / model_name
@@ -171,3 +155,19 @@ def check_save_dir(model_name: str) -> None:
         if answer.lower().strip() != "y":
             print("Training aborted.")
             exit(1)
+
+
+if __name__ == "__main__":
+    os.chdir(proj_root())
+    with run_long_task("train_model.py"):
+        train_model(
+            dataset_name="xl",
+            model_variant="-c3-v1.3",
+            train_args=TrainingArgs(
+                max_train_epochs=1,
+                quicktest=True,
+            ),
+            encoder=C3EditEncoder(),
+            recreate_data=False,
+            eval_only=False,
+        )

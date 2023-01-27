@@ -9,18 +9,21 @@ import textwrap
 import torch
 from libcst.metadata import CodePosition, CodeRange
 
+from coeditor._utils import add_line_numbers
 from coeditor.change import Added, Modified, default_show_diff
 from coeditor.common import *
 from coeditor.dataset import C3EditEncoder
-from coeditor.encoders import apply_output_tks_to_change, change_tks_to_query_context
 from coeditor.encoding import (
     Add_id,
     Del_id,
+    apply_output_tks_to_change,
+    change_tks_to_query_context,
     change_to_tokens,
     extra_id_to_number,
     get_extra_id,
     inline_output_tokens,
     is_extra_id,
+    output_ids_as_seqs,
     tokens_to_change,
 )
 from coeditor.model import (
@@ -30,17 +33,6 @@ from coeditor.model import (
     RetrievalEditorModel,
     RetrievalModelPrediction,
 )
-from spot.data import output_ids_as_seqs
-from spot.static_analysis import (
-    CommentRemover,
-    ModuleName,
-    PythonElem,
-    PythonFunction,
-    PythonModule,
-    PythonProject,
-    remove_comments,
-)
-from spot.utils import add_line_numbers
 
 from .git import file_content_from_commit
 

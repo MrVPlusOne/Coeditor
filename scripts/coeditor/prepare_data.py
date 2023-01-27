@@ -1,7 +1,7 @@
+from coeditor._utils import run_long_task
 from coeditor.c3problem import C3ProblemGenerator
 from coeditor.common import *
 from coeditor.dataset import *
-from spot.utils import run_long_task
 
 if __name__ == "__main__":
     os.chdir(proj_root())
