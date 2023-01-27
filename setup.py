@@ -1,9 +1,8 @@
 from distutils.core import setup
 
 setup(
-    name="SPOT",
-    version="0.2",
-    packages=["spot"],
+    name="Coeditor",
+    version="0.3",
+    packages=["coeditor"],
     package_dir={"": "src"},
-    license="MIT",
 )

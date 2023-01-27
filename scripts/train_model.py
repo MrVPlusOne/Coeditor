@@ -161,7 +161,7 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_model.py"):
         train_model(
-            dataset_name="xl",
+            dataset_name="tiny",
             model_variant="-c3-v1.3",
             train_args=TrainingArgs(
                 max_train_epochs=1,

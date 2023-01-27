@@ -138,7 +138,7 @@ class LineUsageAnalysis:
 
 
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
-    VERSION = "2.1"
+    VERSION = "2.2"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
     max_lines_to_edit: int = 25
@@ -486,7 +486,7 @@ class C3TokenizerArgs(TypedDict):
 
 @dataclass
 class C3ProblemTokenizer:
-    VERSION = "2.2"
+    VERSION = "2.3"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256

@@ -22,7 +22,6 @@ from typing import *
 import numpy as np
 import pandas as pd
 from IPython.display import display
-from libcst.metadata import CodePosition, CodeRange
 from termcolor import colored
 
 # from tqdm.auto import tqdm
@@ -285,48 +284,48 @@ def issorted(xs: Iterable) -> bool:
     return True
 
 
+CodePosition = NewType("CodePosition", tuple[int, int])
+CodeRange = tuple[CodePosition, CodePosition]
+
+
 def replace_strs_by_pos(original: str, replaces: Sequence[tuple[CodeRange, int, str]]):
     """Replace the parts specificed by `replaces` with the given strings.
     Each entry of `replaces` is a tuple of (code_range, priority, new_str)."""
 
     def as_tuple(p: CodePosition):
-        return (p.line, p.column)
+        return p
 
     lines = original.split("\n")
     out_segs = list[str]()
-    ptr = CodePosition(1, 1)
+    ptr = CodePosition((1, 1))
 
     def advance_to(target: CodePosition, output: bool):
         nonlocal ptr
         if as_tuple(target) <= as_tuple(ptr):
             return
-        assert ptr.line <= target.line, f"ptr: {ptr}, target: {target}"
+        assert ptr[0] <= target[0], f"ptr: {ptr}, target: {target}"
         if output:
-            while ptr.line < target.line:
-                out_segs.append(lines[ptr.line - 1][ptr.column - 1 :])
+            while ptr[0] < target[0]:
+                out_segs.append(lines[ptr[0] - 1][ptr[1] - 1 :])
                 out_segs.append("\n")
-                ptr = CodePosition(ptr.line + 1, 1)
-            assert ptr.line == target.line, f"ptr: {ptr}, target: {target}"
-            out_segs.append(lines[ptr.line - 1][ptr.column - 1 : target.column - 1])
+                ptr = CodePosition((ptr[0] + 1, 1))
+            assert ptr[0] == target[0], f"ptr: {ptr}, target: {target}"
+            out_segs.append(lines[ptr[0] - 1][ptr[1] - 1 : target[1] - 1])
         ptr = target
 
-    replaces_sorted = sorted(replaces, key=lambda x: (as_tuple(x[0].start), x[1]))
-    # for (r1, t1), (r2, t2) in zip(replaces_sorted, replaces_sorted[1:]):
-    #     assert as_tuple(r1.end) <= as_tuple(
-    #         r2.start
-    #     ), f"overlapping ranges:\n   {r1}: {t1}\n   {r2}: {t2}"
+    replaces_sorted = sorted(replaces, key=lambda x: (as_tuple(x[0][0]), x[1]))
 
     while bool(replaces_sorted):
         r, _, rtext = replaces_sorted.pop(0)
         try:
-            advance_to(r.start, True)
+            advance_to(r[0], True)
         except IndexError:
             raise IndexError(
-                f"{r.start} is out of range. Trying to replace with text <<{rtext}>>. Original str:\n<<{original}>>"
+                f"{r[0]} is out of range. Trying to replace with text <<{rtext}>>. Original str:\n<<{original}>>"
             )
-        advance_to(r.end, False)
+        advance_to(r[1], False)
         out_segs.append(rtext)
-    last_pos = CodePosition(len(lines), len(lines[-1]) + 1)
+    last_pos = CodePosition((len(lines), len(lines[-1]) + 1))
     advance_to(last_pos, True)
 
     return "".join(out_segs)
@@ -893,7 +892,7 @@ def cprint(color: str, *elems, **print_args):
 
 
 def show_code_range(crange: CodeRange) -> str:
-    return f"[{crange.start.line}:{crange.start.column+1}--{crange.end.line}:{crange.end.column+1}]"
+    return f"[{crange[0][0]}:{crange[0][1]+1}--{crange[1][0]}:{crange[1][1]+1}]"
 
 
 @cache
