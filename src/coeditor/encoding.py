@@ -418,17 +418,22 @@ class TkDelta:
     def get_new_target_lines(self, lines: Sequence[int]) -> Sequence[int]:
         """Given a list of lines to edit, return the corresponding new lines to edit
         after applying this delta."""
+        if not lines:
+            return tuple()
+        last_line = lines[-1]
+        line_set = set(lines)
         new_edit_lines = list[int]()
         offset = 0
-        for l in lines:
+        for l in range(last_line + 1):
             deleted = False
             for act in self.get_line_change(l):
                 if act[0] == Add_id:
-                    new_edit_lines.append(l + offset)
+                    if l in line_set:
+                        new_edit_lines.append(l + offset)
                     offset += 1
                 elif act[0] == Del_id:
                     deleted = True
-            if not deleted:
+            if not deleted and l in line_set:
                 new_edit_lines.append(l + offset)
         return tuple(new_edit_lines)
 

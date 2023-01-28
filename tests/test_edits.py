@@ -292,6 +292,52 @@ class TestChangeIdentities:
                         raise AssertionError(f"{l=} not in {new_edit_lines=}")
 
 
+def test_edit_lines_transform():
+    ex_code = dedent(
+        """\
+        a
+        b
+        c
+        d
+        e
+        """
+    )
+    ex_delta = StrDelta(
+        {
+            1: ("+1",),
+            2: ("+2",),
+            3: ("-",),
+            4: ("+d1", "+d2", "+d3"),
+        }
+    )
+    after_expect = dedent(
+        """\
+         a
+        +1
+         b
+        +2
+         c
+        -d
+        +d1
+        +d2
+        +d3
+         e
+        """
+    )
+
+    tk_delta = ex_delta.to_tk_delta()
+    all_lines = range(6)
+    new_target_lines = tk_delta.get_new_target_lines(all_lines)
+    expect = (0, 1, 2, 3, 4, 6, 7, 8, 9, 10)
+    assert_eq(new_target_lines, expect)
+
+    later_lines = range(3, 6)
+    new_target_lines = tk_delta.get_new_target_lines(later_lines)
+    # only the last 5 lines should be edited
+    expect = (6, 7, 8, 9, 10)
+    assert_eq(new_target_lines, expect)
+
+
 def test_code_normalization():
     def check_code_equal(code1: str, code2: str):
         if not code_equal(code1, code2):
