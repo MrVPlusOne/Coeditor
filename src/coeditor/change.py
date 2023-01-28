@@ -12,10 +12,12 @@ class _ChangeBase(Generic[E1]):
     def show(self, name: str = "") -> str:
         return show_change(cast("Change", self), name=name)
 
+    @property
     @abstractmethod
     def earlier(self) -> E1:
         ...
 
+    @property
     @abstractmethod
     def later(self) -> E1:
         ...
@@ -28,9 +30,11 @@ class Added(_ChangeBase[E1]):
     def map(self, f: Callable[[E1], T2]) -> "Added[T2]":
         return Added(f(self.after))
 
+    @property
     def earlier(self) -> E1:
         return self.after
 
+    @property
     def later(self) -> E1:
         return self.after
 
@@ -50,9 +54,11 @@ class Deleted(_ChangeBase[E1]):
     def map(self, f: Callable[[E1], T2]) -> "Deleted[T2]":
         return Deleted(f(self.before))
 
+    @property
     def earlier(self) -> E1:
         return self.before
 
+    @property
     def later(self) -> E1:
         return self.before
 
@@ -78,9 +84,11 @@ class Modified(_ChangeBase[E1]):
         else:
             return Modified(f(self.before), f(self.after))
 
+    @property
     def earlier(self) -> E1:
         return self.before
 
+    @property
     def later(self) -> E1:
         return self.after
 

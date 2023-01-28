@@ -5,31 +5,58 @@ from coeditor.encoding import *
 from coeditor.encoding import _BaseTokenizer, _Tokenizer
 
 
-def assert_change_eq(actual: Modified[str], expected: Modified[str], name: str):
-    if actual.before != expected.before:
-        print(f"Failed for case: {name}")
-        print("Expected before:\n", expected.before, "<EOF>")
-        print("Reconstructed before:\n", actual.before, "<EOF>")
+def get_before(change: Change[str]) -> str:
+    if isinstance(change, Modified):
+        return change.before
+    elif isinstance(change, Added):
+        return ""
+    elif isinstance(change, Deleted):
+        return change.before
+    else:
+        raise ValueError(f"Unknown change type: {change}")
+
+
+def get_after(change: Change[str]) -> str:
+    if isinstance(change, Modified):
+        return change.after
+    elif isinstance(change, Added):
+        return change.after
+    elif isinstance(change, Deleted):
+        return ""
+    else:
+        raise ValueError(f"Unknown change type: {change}")
+
+
+def assert_change_eq(actual: Change[str], expected: Change[str], name: str):
+    if get_before(actual) != get_before(expected):
+        print_sections(
+            ("Expected before", get_before(expected)),
+            ("Reconstructed before", get_before(actual)),
+        )
         raise ValueError(f"Failed for case: {name}")
-    if actual.after != expected.after:
-        print(f"Failed for case: {name}")
-        print("Expected after:\n", expected.after, "<EOF>")
-        print("Reconstructed after:\n", actual.after, "<EOF>")
+    if get_after(actual) != get_after(expected):
+        print_sections(
+            ("Expected after", get_after(expected)),
+            ("Reconstructed after", get_after(actual)),
+        )
         raise ValueError(f"Failed for case: {name}")
 
 
 def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
     if actual != expected:
-        print(f"Failed for case: {name}")
-        print("Expected:\n", decode_tokens(expected), "<EOF>")
-        print("Actual:\n", decode_tokens(actual), "<EOF>")
+        print_sections(
+            ("Expected", decode_tokens(expected)),
+            ("Reconstructed", decode_tokens(actual)),
+        )
         raise ValueError(f"Failed for case: {name}")
 
 
 class TestChangeIdentities:
-    cases = {
+    cases: dict[str, Change[str]] = {
         "empty": Modified("", ""),
         "generation": Modified("", "123"),
+        "added": Added("a\nb\nc\n"),
+        "deleted": Deleted("a\nb\nc\n"),
         "no change": Modified(
             dedent(
                 """\
@@ -133,10 +160,12 @@ class TestChangeIdentities:
                 line_diffs = change_to_line_diffs(c)
                 print("line_diffs\n------\n" + "\n".join(line_diffs))
                 before, delta = line_diffs_to_original_delta(line_diffs)
+                print("before:")
+                print(before)
                 print("delta:", delta)
-                assert_str_equal(before, c.before)
+                assert_str_equal(before, get_before(c))
                 after = delta.apply_to_input(before)
-                assert_str_equal(after, c.after)
+                assert_str_equal(after, get_after(c))
             except Exception:
                 print_err(f"Failed for case: {name}")
                 raise
@@ -158,14 +187,15 @@ class TestChangeIdentities:
             assert_tks_eq(
                 in_seq,
                 code_to_input(
-                    _BaseTokenizer.encode(c.before, add_special_tokens=False)
+                    _BaseTokenizer.encode(get_before(c), add_special_tokens=False)
                 ),
                 "change_to_input_output mathese code_to_input: " + name,
             )
 
-            if len(c.before.split("\n")) < N_Extra_Ids:
+            if len(splitlines(get_before(c))) < N_Extra_Ids:
                 inlined = inline_output_tokens(in_seq, out_seq)
-                assert inlined[-1] == Newline_id
+                if inlined:
+                    assert inlined[-1] == Newline_id
                 assert_tks_eq(
                     inlined[:-1], change_to_tokens(c), "inline_output_tokens: " + name
                 )
@@ -182,9 +212,9 @@ class TestChangeIdentities:
             tk_delta = delta.to_tk_delta()
             tk_before = encode_basic(before)
             tk_after = tk_delta.apply_to_input(tk_before)
-            if tk_after != encode_basic(c.after):
+            if tk_after != encode_basic(get_after(c)):
                 print("after diff:\n")
-                print(show_string_diff(c.after, decode_tokens(tk_after)))
+                print(show_string_diff(get_after(c), decode_tokens(tk_after)))
 
             c_tokens = tk_delta.to_change_tks(tk_before)
             if c_tokens != change_to_tokens(c):

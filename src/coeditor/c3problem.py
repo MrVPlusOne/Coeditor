@@ -26,6 +26,7 @@ from .encoding import (
     change_tks_to_original_delta,
     change_to_line_diffs,
     change_to_tokens,
+    decode_tokens,
     encode_basic,
     get_extra_id,
     line_diffs_to_original_delta,
@@ -146,11 +147,12 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
+    - v2.4: fix buggy encoding of `Added` and `Deleted` changes.
     - v2.3: always generate problems with full editing range and move the problem
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "2.3"
+    VERSION = "2.4"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
 
@@ -360,14 +362,14 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         header_cache = dict[ProjectPath, ChangedHeader]()
 
         def to_header(cs: Change[ChangeScope]) -> ChangedHeader:
-            path = cs.earlier().path
+            path = cs.earlier.path
             if (ch := header_cache.get(path)) is None:
                 header_change = cs.map(lambda s: s.header_code.strip("\n"))
                 ch = ChangedHeader(
                     TkArray.new(change_to_tokens(header_change)),
-                    cs.earlier().tree.type,
-                    cs.earlier().header_line_range,
-                    cs.earlier().path,
+                    cs.earlier.tree.type,
+                    cs.earlier.header_line_range,
+                    cs.earlier.path,
                 )
                 header_cache[path] = ch
             return ch
@@ -393,8 +395,8 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 should_mk_problem = (
                     (span.change.as_char() == Modified.as_char())
                     and (self._is_training or span._is_func_body())
-                    and (count_lines(span.change.earlier()) <= self.max_span_lines)
-                    and (count_lines(span.change.later()) <= self.max_span_lines)
+                    and (count_lines(span.change.earlier) <= self.max_span_lines)
+                    and (count_lines(span.change.later) <= self.max_span_lines)
                 )
                 if should_mk_problem:
                     # latest changes are more relevant
@@ -455,12 +457,20 @@ class C3ProblemSimpleSplit(C3ProblemTransformer):
 
 class C3ProblemChangeDropout(C3ProblemTransformer):
     """Split the problem into fixed-sized editing ranges like `C3ProblemSimpleSplit`,
-    but also randomly keep some subset of changes in the input."""
+    but also randomly keep some subset of changes in the input.
+
+    ### Change log
+    - v1.1
+        - Dropout changes using change groups instead of individual change actions.
+        - Perform dropout at entire problem level ratehr than chunk level. This way,
+    changes in later chunks will be visible as well.
+        - Removed `dropout_prob`.
+    """
+
+    VERSION = "1.1"
 
     max_lines_to_edit: int = 25
     max_split_factor: int = 4
-    # the probability of dropping out some changes into the input
-    dropout_prob: float = 0.5
     # when dropping the changes into the input, the biggest ratio of changes to drop
     max_dropout_ratio: float = 0.5
 
@@ -470,46 +480,54 @@ class C3ProblemChangeDropout(C3ProblemTransformer):
         l_range = prob.edit_lines
         assert isinstance(l_range, range)
         start, stop = l_range.start, l_range.stop
-        problems = list[C3Problem]()
+
+        grouped_keys = delta.change_groups()
+        should_dropout = len(grouped_keys) >= 2
+        if should_dropout:
+            n_to_drop = int(
+                len(grouped_keys) * random.random() * self.max_dropout_ratio
+            )
+            assert n_to_drop < len(grouped_keys)
+            keys_to_drop = join_list(random_subset(grouped_keys, n_to_drop))
+        else:
+            keys_to_drop = []
+        if keys_to_drop:
+            delta1, delta2 = delta.decompose_for_change(keys_to_drop)
+            delta2_groups = delta2.change_groups()
+            if not delta2_groups:
+                print_err(f"{delta=}, {keys_to_drop=}, {delta1=}")
+                raise AssertionError("Empty delta2_groups")
+            new_original = TkArray.new(delta1.to_change_tks(original.tolist()))
+            new_trans = prob.transformations + ("split", "dropout")
+            new_span = dataclasses.replace(
+                prob.span, original=new_original, delta=delta2
+            )
+        else:
+            new_trans = prob.transformations + ("split",)
+            new_span = prob.span
+            delta1 = None
+            delta2_groups = delta.change_groups()
+
+        prob_and_n = list[tuple[C3Problem, int]]()
         for i in range(start, stop, self.max_lines_to_edit):
             j = min(i + self.max_lines_to_edit, stop)
-            sub_delta = delta.for_input_range((i, j))
-            if sub_delta.num_changes() == 0:
-                continue
-            grouped_keys = sub_delta.change_groups()
-            should_dropout = (
-                len(grouped_keys) >= 2 and random.random() < self.dropout_prob
-            )
-            if should_dropout:
-                n_to_drop = int(
-                    len(grouped_keys) * random.random() * self.max_dropout_ratio
+            edit_lines = range(i, j)
+            if delta1 is not None:
+                edit_lines = delta1.get_new_target_lines(edit_lines)
+            line_set = set(edit_lines)
+            n_groups = sum(any(key[0] in line_set for key in g) for g in delta2_groups)
+            if n_groups > 0:
+                sub_prob = dataclasses.replace(
+                    prob,
+                    span=new_span,
+                    edit_lines=edit_lines,
+                    transformations=new_trans,
                 )
-                assert n_to_drop < len(grouped_keys)
-                keys_to_drop = join_list(random_subset(grouped_keys, n_to_drop))
-            else:
-                keys_to_drop = []
-            if keys_to_drop:
-                _, delta2 = sub_delta.decompose_for_change(keys_to_drop)
-                if delta2.num_changes() == 0:
-                    continue
-                delta1, delta2 = delta.decompose_for_change(keys_to_drop)
-                new_original = TkArray.new(delta1.to_change_tks(original.tolist()))
-                new_trans = prob.transformations + ("split", "dropout")
-                new_span = dataclasses.replace(
-                    prob.span, original=new_original, delta=delta2
-                )
-                edit_lines = delta1.get_new_target_lines(range(i, j))
-            else:
-                new_trans = prob.transformations + ("split",)
-                new_span = prob.span
-                edit_lines = range(i, j)
-            sub_prob = dataclasses.replace(
-                prob, span=new_span, edit_lines=edit_lines, transformations=new_trans
-            )
-            problems.append(sub_prob)
-            if len(problems) >= self.max_split_factor:
-                break
-        return problems
+                prob_and_n.append((sub_prob, n_groups))
+        # return the problems with the most changes
+        prob_and_n.sort(key=lambda p: p[1], reverse=True)
+        probs = [p[0] for p in prob_and_n]
+        return probs[: self.max_split_factor]
 
 
 @dataclass(frozen=True)
@@ -542,9 +560,6 @@ class TkC3Problem(TokenizedEdit):
     @property
     def main_tks(self) -> TokenSeq:
         return self.input_tks
-
-    def show(self) -> str:
-        return self.show_prediction(None)
 
     def all_ctxs(self) -> dict[str, TokenSeq]:
         return {name: ref.tolist() for name, ref in self.named_references}

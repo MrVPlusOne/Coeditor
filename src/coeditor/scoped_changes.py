@@ -246,16 +246,16 @@ class ChangedSpan:
 
     @property
     def header_line_range(self) -> LineRange:
-        parent_scope = self.parent_scopes[-1].earlier()
+        parent_scope = self.parent_scopes[-1].earlier
         hrange = parent_scope.header_line_range
         return hrange
 
     @property
     def path(self) -> ProjectPath:
-        return self.parent_scopes[-1].earlier().path
+        return self.parent_scopes[-1].earlier.path
 
     def _is_func_body(self) -> bool:
-        return self.parent_scopes[-1].earlier().tree.type == ptree.Function.type
+        return self.parent_scopes[-1].earlier.tree.type == ptree.Function.type
 
     def __repr__(self) -> str:
         return f"ChangeSpan(scope={self.path}, range={self.line_range}, type={self.change.as_char()})"
@@ -303,7 +303,7 @@ class JModuleChange:
             for cspan in get_changed_spans(
                 module_change.map(lambda m: m.as_scope), tuple()
             ):
-                path = cspan.parent_scopes[-1].earlier().path
+                path = cspan.parent_scopes[-1].earlier.path
                 changed[path] = cspan
             return JModuleChange(module_change, changed)
 
@@ -572,7 +572,7 @@ def _edits_from_commit_history(
         new_path2module = path2module.copy()
         changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
-            path = project / path_change.earlier()
+            path = project / path_change.earlier
             rel_path = to_rel_path(path.relative_to(project))
             if not isinstance(path_change, Added) and rel_path not in new_path2module:
                 warnings.warn(f"No module for file: {project/rel_path}")
@@ -657,7 +657,7 @@ def get_changed_spans(
         line = 0
         for span in old_scope.spans:
             code = span.code
-            line_range = (line, line + len(code.split("\n")))
+            line_range = (line, line + count_lines(code))
             if subdelta := delta.for_input_range(line_range).shifted(-line):
                 new_code = subdelta.apply_to_input(code)
                 change = Modified(code, new_code)

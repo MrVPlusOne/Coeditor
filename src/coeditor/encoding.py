@@ -144,7 +144,7 @@ class StrDelta:
     _deltas: Mapping[int, tuple[str, ...]]
 
     def apply_to_input(self, input: str):
-        lines = input.split("\n")
+        lines = splitlines(input)
         new_lines = list[str]()
         for i, line in enumerate(lines):
             deleted = False
@@ -163,7 +163,7 @@ class StrDelta:
         return "\n".join(new_lines)
 
     def __repr__(self):
-        line_diffs = "\n".join(f"  {l}: {a}" for l, a in enumerate(self._deltas) if a)
+        line_diffs = "\n".join(f"  {l}: {a}" for l, a in self._deltas.items())
         return f"StrDelta(\n{line_diffs}\n)"
 
     def for_input_range(self, line_range: tuple[int, int]) -> Self:
@@ -522,9 +522,9 @@ def change_to_tokens(change: Change[str]) -> TokenSeq:
                 diffs = change_to_line_diffs(change)
                 return encode_diffs(diffs)
         case Added() | Deleted():
-            lines = split_list(encode_basic(change.earlier()), Newline_id)
+            lines = split_list(encode_basic(change.earlier), Newline_id)
             tk = Add_id if isinstance(change, Added) else Del_id
-            return join_list([tk] + line for line in lines)
+            return join_list(([tk] + line for line in lines), Newline_id)
         case _:
             raise AssertionError(f"Not a change type: {change}")
 
@@ -873,13 +873,10 @@ class TokenizedEdit(ABC):
             "main_tks": len(self.main_tks),
         }
 
-    def show(self) -> str:
-        return self.show_prediction(None)
-
     def __repr__(self) -> str:
         return f"{type(self).__name__}(path={str(self.path)}, type={type(self.change_type).__name__}, len(input_tks)={len(self.input_tks)}, len(output_tks)={len(self.output_tks)})"
 
-    def show_prediction(self, pred_tks: TokenSeq | None = None) -> str:
+    def show(self, pred_tks: TokenSeq | None = None) -> str:
         def show_label(i: int):
             return f" <{i}>" if i <= 9 else f"<{i}>"
 
@@ -906,6 +903,10 @@ class TokenizedEdit(ABC):
                 lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
             return "".join(lines)
 
+        def show_ctx(ctx_tks: TokenSeq):
+            lines = split_list(ctx_tks, Newline_id)
+            return "\n".join("  " + show_content(l) for l in lines)
+
         main_segs = output_ids_as_seqs(self.main_tks)
         id_map = {k: i for i, k in enumerate(main_segs)}
         main_lines = list[str]()
@@ -914,7 +915,7 @@ class TokenizedEdit(ABC):
                 prefix = show_label(id_map.get(line_tks[0], -1))
                 line = prefix + show_content(line_tks[1:])
             else:
-                line = "   |" + show_content(line_tks)
+                line = "    " + show_content(line_tks)
             main_lines.append(line)
 
         pred_lines = (
@@ -931,7 +932,7 @@ class TokenizedEdit(ABC):
             "========Main Code========",
             "\n".join(main_lines),
         ] + [
-            f"==========={name}===========\n" + decode_tokens(tks)
+            f"==========={name}===========\n" + show_ctx(tks)
             for name, tks in self.all_ctxs().items()
         ]
         return "\n".join(outputs)

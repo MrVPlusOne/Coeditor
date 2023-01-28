@@ -122,10 +122,14 @@ async def start_command(args: Sequence[str], cwd: str | Path) -> str:
 
 def splitlines(text: str) -> list[str]:
     """Split a text into lines and apalways ends with an empty line."""
+    if not text:
+        return []
     return text.split("\n")
 
 
 def count_lines(text: str) -> int:
+    if not text:
+        return 0
     return text.count("\n") + 1
 
 
@@ -136,6 +140,8 @@ def split_list(
     """
     Split a list into segments by a separator, always ends with an empty list.
     """
+    if not lst:
+        return []
     result = list[list[T1]]()
     ptr = 0
     for i, item in enumerate(lst):
@@ -163,7 +169,7 @@ HtmlCode = str
 
 
 def print_sections(
-    sections: list[tuple[str, str]],
+    *sections: tuple[str, str],
     sep: str = SEP,
 ) -> None:
     for title, content in sections:
