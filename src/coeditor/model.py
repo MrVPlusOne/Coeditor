@@ -49,7 +49,7 @@ from coeditor.encoding import (
     change_tks_to_original_delta,
     change_to_tokens,
     decode_tokens,
-    encode_basic,
+    encode_lines_join,
     get_tk_id,
     is_extra_id,
     output_ids_as_seqs,
@@ -194,7 +194,7 @@ class RetrievalDecodingResult:
         if bad_probs:
             cprint("yellow", "Number of problems with no edits:", len(bad_probs))
             for prob in bad_probs[:5]:
-                print(prob.summarize())
+                print(prob.summary())
         return correct_count, ex2correct
 
     def save_examples_to_dir(self, out_dir: Path, ex2correct: dict[int, bool]) -> None:
@@ -202,13 +202,17 @@ class RetrievalDecodingResult:
         (out_dir / "correct").mkdir(parents=True, exist_ok=True)
         (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
 
+        all_probs = dict[int, C3Problem]()
         for ex_id, correct in tqdm(ex2correct.items(), desc="saving examples"):
             ex = self.predictions[ex_id]
-            compare_str = self.show_prediction(self.problems[ex_id], ex)
+            prob = self.problems[ex_id]
+            compare_str = self.show_prediction(prob, ex)
             out_file = (
                 out_dir / ("correct" if correct else "incorrect") / f"ex-{ex_id}.txt"
             )
             out_file.write_text(compare_str)
+            all_probs[ex_id] = prob
+        pickle_dump(out_dir / "ex_probs.pkl", all_probs)
 
     @classmethod
     def show_prediction(cls, prob: C3Problem, pred: RetrievalModelPrediction) -> str:
@@ -225,9 +229,7 @@ class RetrievalDecodingResult:
             project=prob.src_info["project"],
             commit=prob.src_info["commit"],
         )
-        meta_lines = prob.meta_data_lines()
-        all_secs = [*meta_lines, tk_prob.show(pred["output_ids"])]
-        return "\n".join(all_secs)
+        return tk_prob.show(pred["output_ids"])
 
 
 class AttentionMode(enum.Enum):
@@ -549,7 +551,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
         self, references: Sequence[TokenSeq] | Sequence[str], pad_id=None
     ) -> LongTensor:
         references = [
-            encode_basic(ref) if isinstance(ref, str) else ref for ref in references
+            encode_lines_join(ref) if isinstance(ref, str) else ref
+            for ref in references
         ]
         out = pad_token_seqs(references, pad_id=pad_id)
         out = out.to(self.device)

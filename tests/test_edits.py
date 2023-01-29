@@ -152,6 +152,22 @@ class TestChangeIdentities:
             "\n".join(f"x = {i}" for i in range(0, 200)),
             "\n".join(f"x = {2* (i // 2)}" for i in range(0, 200)),
         ),
+        "strings with newlines": Modified(
+            dedent(
+                """\
+                If `True`, wraps the environments in an `AsyncVectorEnv` (which uses \n
+                        `multiprocessing` to run the environments in parallel)  \n
+                """
+            ),
+            dedent(
+                """\
+                If `True`, wraps the environments in an `AsyncVectorEnv` (which uses \n
+                        `multiprocessing` to run the environments in parallel)  \n
+                Added a line here.   \n
+                and here.
+                """
+            ),
+        ),
     }
 
     def test_str_encodings(self):
@@ -186,9 +202,7 @@ class TestChangeIdentities:
 
             assert_tks_eq(
                 in_seq,
-                code_to_input(
-                    _BaseTokenizer.encode(get_before(c), add_special_tokens=False)
-                ),
+                code_to_input(encode_lines_join(get_before(c))),
                 "change_to_input_output mathese code_to_input: " + name,
             )
 
@@ -210,9 +224,9 @@ class TestChangeIdentities:
             print("delta:", delta)
 
             tk_delta = delta.to_tk_delta()
-            tk_before = encode_basic(before)
+            tk_before = encode_lines_join(before)
             tk_after = tk_delta.apply_to_input(tk_before)
-            if tk_after != encode_basic(get_after(c)):
+            if tk_after != encode_lines_join(get_after(c)):
                 print("after diff:\n")
                 print(show_string_diff(get_after(c), decode_tokens(tk_after)))
 
@@ -233,6 +247,20 @@ class TestChangeIdentities:
                 )
 
             assert tk_delta1.apply_to_input(origin1) == tk_after
+
+    def test_apply_to_change(self):
+        for name, c in self.cases.items():
+            before, delta = StrDelta.from_change(c)
+            tk_delta = delta.to_tk_delta()
+            tk_before = encode_lines_join(before)
+            tk_change = tk_delta.apply_to_change(tk_before)
+            expect = change_to_tokens(c)
+            if tk_change != expect:
+                print_sections(
+                    ("expect", decode_tokens(expect)),
+                    ("tk_change", decode_tokens(tk_change)),
+                )
+                raise AssertionError(f"apply_to_change failed: {name}")
 
     def test_delta_decomposition(self):
         for name, c in self.cases.items():

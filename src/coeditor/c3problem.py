@@ -1,4 +1,3 @@
-import copy
 import dataclasses
 
 import jedi
@@ -13,23 +12,23 @@ from parso.python import tree as ptree
 
 from coeditor._utils import scalar_stats
 
-from .change import Added, Change, Modified
+from .change import Added, Change, Modified, show_change
 from .common import *
 from .encoding import (
-    Add_id,
     Del_id,
     Newline_id,
     TkDelta,
     TokenizedEdit,
     TruncateAt,
     break_into_chunks,
-    change_tks_to_original_delta,
     change_to_line_diffs,
     change_to_tokens,
     decode_tokens,
-    encode_basic,
+    encode_lines_join,
+    encode_single_line,
     get_extra_id,
     line_diffs_to_original_delta,
+    tokens_to_change,
     truncate_output_tks,
     truncate_section,
     truncate_sections,
@@ -37,7 +36,6 @@ from .encoding import (
 from .git import CommitInfo
 from .scoped_changes import (
     ChangeScope,
-    ElemPath,
     JModule,
     JModuleChange,
     JProjectChange,
@@ -104,6 +102,10 @@ class C3Problem:
     src_info: SrcInfo
     transformations: tuple[str, ...] = ()
 
+    @property
+    def path(self) -> ProjectPath:
+        return self.span.headers[-1].path
+
     def meta_data_lines(self) -> list[str]:
         return [
             f"path: {self.span.headers[-1].path}",
@@ -111,8 +113,16 @@ class C3Problem:
             f"commit: {self.src_info['commit']}",
         ]
 
-    def summarize(self) -> str:
+    def summary(self) -> str:
         return "\n".join(self.meta_data_lines())
+
+    def print(self):
+        main_change = self.span.delta.apply_to_change(self.span.original.tolist())
+        print_sections(
+            ("summary", self.summary()),
+            ("main change", decode_tokens(main_change)),
+            ("edit_lines", str(self.edit_lines)),
+        )
 
 
 PyFullName = NewType("PyFullName", str)
@@ -150,12 +160,13 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
+    - v2.5: fix newline encoding bug.
     - v2.4: fix buggy encoding of `Added` and `Deleted` changes.
     - v2.3: always generate problems with full editing range and move the problem
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "2.4"
+    VERSION = "2.5"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
 
@@ -282,7 +293,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                     body_code = ellipsis + body_code
                 cspan = ChangedCodeSpan(
                     [to_header(Modified.from_unchanged(s)) for s in ancestors],
-                    TkArray.new(encode_basic(body_code)),
+                    TkArray.new(encode_lines_join(body_code)),
                     TkDelta.empty(),
                     f_scope.spans[-1].line_range,
                     f_scope.path.module,
@@ -307,7 +318,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 body_code = "".join(s.get_code() for s in stmts).lstrip("\n")
                 cspan = ChangedCodeSpan(
                     [to_header(Modified.from_unchanged(s)) for s in ancestors],
-                    TkArray.new(encode_basic(body_code)),
+                    TkArray.new(encode_lines_join(body_code)),
                     TkDelta.empty(),
                     stmt_span.line_range,
                     stmt_span.scope.path.module,
@@ -390,7 +401,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
                 code_span = ChangedCodeSpan(
                     headers=[to_header(cs) for cs in span.parent_scopes],
-                    original=TkArray.new(encode_basic(original)),
+                    original=TkArray.new(encode_lines_join(original)),
                     delta=delta.to_tk_delta(),
                     line_range=span.line_range,
                     module=span.path.module,
@@ -433,6 +444,7 @@ class C3ProblemTransform(ABC):
         ...
 
 
+@dataclass
 class C3ProblemSimpleSplit(C3ProblemTransform):
     "Simply split the problem into fixed-sized editing ranges."
     max_lines_to_edit: int = 25
@@ -458,11 +470,13 @@ class C3ProblemSimpleSplit(C3ProblemTransform):
         return problems
 
 
+@dataclass
 class C3ProblemChangeDropout(C3ProblemTransform):
     """Split the problem into fixed-sized editing ranges like `C3ProblemSimpleSplit`,
     but also randomly keep some subset of changes in the input.
 
     ### Change log
+    - v1.2: fix newline encoding bug.
     - v1.1
         - Dropout changes using change groups instead of individual change actions.
         - Perform dropout at entire problem level ratehr than chunk level. This way,
@@ -470,12 +484,13 @@ class C3ProblemChangeDropout(C3ProblemTransform):
         - Removed `dropout_prob`.
     """
 
-    VERSION = "1.1"
+    VERSION = "1.2"
 
     max_lines_to_edit: int = 25
     max_split_factor: int = 4
     # when dropping the changes into the input, the biggest ratio of changes to drop
     max_dropout_ratio: float = 0.5
+    _test_prob: float = 0.01
 
     def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
         original = prob.span.original
@@ -496,6 +511,23 @@ class C3ProblemChangeDropout(C3ProblemTransform):
             keys_to_drop = []
         if keys_to_drop:
             delta1, delta2 = delta.decompose_for_change(keys_to_drop)
+            if random.random() < self._test_prob:
+                result1 = delta2.apply_to_change(
+                    delta1.apply_to_change(original.tolist())
+                )
+                result2 = delta.apply_to_change(original.tolist())
+                code1 = tokens_to_change(result1).after
+                code2 = tokens_to_change(result2).after
+                if code1 != code2:
+                    print_sections(
+                        ("result1", decode_tokens(result1)),
+                        ("result2", decode_tokens(result2)),
+                        ("delta", str(delta)),
+                        ("keys_to_drop", str(keys_to_drop)),
+                        ("delta1", str(delta1)),
+                        ("delta2", str(delta2)),
+                    )
+                    raise AssertionError("decompose_for_change failed.")
             delta2_groups = delta2.change_groups()
             if not delta2_groups:
                 print_err(f"{delta=}, {keys_to_drop=}, {delta1=}")
@@ -751,7 +783,7 @@ class C3ProblemTokenizer:
 
     def _get_offset_tks(self, offset: int) -> TkArray:
         if (tks := self._offset_cache.get(offset)) is None:
-            tks = TkArray.new(encode_basic(f"# offset: {offset}"))
+            tks = TkArray.new(encode_single_line(f"# offset: {offset}"))
             self._offset_cache[offset] = tks
         return tks
 

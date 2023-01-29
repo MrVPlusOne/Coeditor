@@ -87,8 +87,20 @@ def decode_tokens(tokens: TokenSeq, prettify: bool = False) -> str:
     return text
 
 
-def encode_basic(text: str, add_special_tokens=False) -> TokenSeq:
-    "Encode a string into a token sequence using the base tokenizer."
+def encode_lines(text: str) -> Iterable[TokenSeq]:
+    return (encode_single_line(l) for l in splitlines(text))
+
+
+def encode_lines_join(text: str) -> TokenSeq:
+    """Encode a mutliple line str such that the line breaks are consistently encoded."""
+    return join_list(encode_lines(text), sep=Newline_id)
+
+
+def encode_single_line(text: str, add_special_tokens=False) -> TokenSeq:
+    """Encode a string into a token sequence using the base tokenizer.
+    Note that you should use `encode_lines_join` when `text` contains multiple lines
+    to ensure that newline characters are consistently encoded as the same token.
+    """
     return _BaseTokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
@@ -184,7 +196,7 @@ class StrDelta:
             line_tk_delta = list[TokenSeq]()
             for action in line_delta:
                 if action[0] == "+":
-                    line_tk_delta.append([Add_id] + encode_basic(action[1:]))
+                    line_tk_delta.append([Add_id] + encode_single_line(action[1:]))
                 elif action[0] == "-":
                     line_tk_delta.append([Del_id])
                 else:
@@ -195,6 +207,11 @@ class StrDelta:
     def num_changes(self) -> int:
         "Return the number of changed lines in the delta."
         return sum(len(a) for a in self._deltas.values())
+
+    @staticmethod
+    def from_change(change: Change[str]) -> tuple[str, "StrDelta"]:
+        line_diffs = change_to_line_diffs(change)
+        return line_diffs_to_original_delta(line_diffs)
 
 
 def line_diffs_to_original_delta(diffs: list[str]) -> tuple[str, StrDelta]:
@@ -522,12 +539,12 @@ def change_to_tokens(change: Change[str]) -> TokenSeq:
     match change:
         case Modified(before=before, after=after, unchanged=unchanged):
             if unchanged or before == after:
-                return encode_basic(before)
+                return encode_lines_join(before)
             else:
                 diffs = change_to_line_diffs(change)
                 return encode_diffs(diffs)
         case Added() | Deleted():
-            lines = split_list(encode_basic(change.earlier), Newline_id)
+            lines = encode_lines(change.earlier)
             tk = Add_id if isinstance(change, Added) else Del_id
             return join_list(([tk] + line for line in lines), Newline_id)
         case _:
@@ -700,23 +717,20 @@ def encode_diffs(diffs: Sequence[str]) -> TokenSeq:
     A helper function to encode the diff lines (with '+', '-', or ' ' prefixes)
     into a token sequence with the special <add> and <del> tokens.
     """
-    prefixes = list[TokenSeq]()
-    code_lines = list[str]()
+    result = TokenSeq()
+    max_i = len(diffs) - 1
     for i, diff in enumerate(diffs):
         if diff.startswith("+"):
-            prefixes.append([Add_id])
+            result.append(Add_id)
         elif diff.startswith("-"):
-            prefixes.append([Del_id])
+            result.append(Del_id)
         else:
             assert diff.startswith(" ")
-            prefixes.append([])
-        code_lines.append(diff[1:])
-    code_tks = _BaseTokenizer.encode("\n".join(code_lines), add_special_tokens=False)
-    code_lines = split_list(code_tks, Newline_id)
-    for i, line in enumerate(code_lines):
-        if prefixes[i]:
-            code_lines[i] = prefixes[i] + line
-    return join_list(code_lines, Newline_id)
+        result.extend(encode_single_line(diff[1:]))
+        if i < max_i:
+            result.append(Newline_id)
+
+    return result
 
 
 def extract_edit_change(input_tks: TokenSeq, output_tks: TokenSeq) -> Modified[str]:
@@ -960,7 +974,7 @@ class TokenizedEdit(ABC):
             if tks and tks[0] == key_tk:
                 s = decode_tokens(tks[1:])
                 s.strip()
-                return encode_basic(s)
+                return encode_single_line(s)
             else:
                 return []
 
@@ -1014,6 +1028,7 @@ class TokenizedEdit(ABC):
 
 
 TEdit = TypeVar("TEdit", bound=TokenizedEdit)
+_OMIT = encode_single_line("...")
 
 
 def compress_change_tks(tks: TokenSeq, max_ctx: int):
@@ -1026,7 +1041,6 @@ def compress_change_tks(tks: TokenSeq, max_ctx: int):
                 to_keep[j] = True
     new_lines = list[TokenSeq]()
     i = 0
-    OMIT = encode_basic("...")
     while i < len(lines):
         if to_keep[i]:
             new_lines.append(lines[i])
@@ -1035,7 +1049,7 @@ def compress_change_tks(tks: TokenSeq, max_ctx: int):
             j = i + 1
             while j < len(lines) and not to_keep[j]:
                 j += 1
-            new_lines.append(OMIT)
+            new_lines.append(_OMIT)
             i = j
     return join_list(new_lines, sep=Newline_id)
 
