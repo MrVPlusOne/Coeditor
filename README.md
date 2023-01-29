@@ -1,6 +1,5 @@
-# TypeT5: Seq2seq Type Inference using Static Analysis
+# Coeditor: Project-level Contextual Code Change Prediction
 
-This repo contains the source code for the paper [TypeT5: Seq2seq Type Inference using Static Analysis](https://openreview.net/forum?id=4TyNEhI2GdN&noteId=EX_-kP9xah).
 
 ## Installation
 
@@ -13,12 +12,14 @@ To add new dependences into the virtual environment, you can manually install th
 
 We also provide a generated Python `requirements.txt` file in case you cannot use `pipenv` for some reasone.
 
-## Running Trained Model
-#### Downloading the pre-trained model
+## Usage
+All commands listed here assuming are run from the project root.
 
-## Dataset
+- run tests: `pipenv run pytest/tests`
+- train a new model: `pipenv run python scripts/train_model.py`.
+    - You can optionally specify which GPUs should be used by setting the `CUDA_VISIBLE_DEVICES` environment variable. For example, to use GPUs 0 and 1, run `CUDA_VISIBLE_DEVICES=0,1 pipenv run python scripts/train_model.py`.
+- download training data: See [`scripts/download_data.ipynb`](scripts/download_data.ipynb).
 
-## Training a New Model
 
 
 ## Development
