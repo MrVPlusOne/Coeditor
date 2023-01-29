@@ -345,29 +345,33 @@ def code_equal(code1: str, code2: str) -> bool:
 
 @overload
 def random_subset(
-    all: Sequence[T1], n: int, rng: random.Random | None = None
+    all: Sequence[T1], n: int, rng: random.Random | int | None = None
 ) -> list[T1]:
     ...
 
 
 @overload
 def random_subset(
-    all: Mapping[T1, T2], n: int, rng: random.Random | None = None
+    all: Mapping[T1, T2], n: int, rng: random.Random | int | None = None
 ) -> dict[T1, T2]:
     ...
 
 
-def random_subset(all, n: int, rng: random.Random | None = None):
+def random_subset(all, n: int, rng: random.Random | int | None = None):
     if rng is None:
-        rng = random.Random(42)
+        rng = random.Random()
+    elif isinstance(rng, int):
+        rng = random.Random(rng)
     if isinstance(all, Sequence):
-        xs = [x for x in all]
-        rng.shuffle(xs)
-        return xs[:n]
+        ids = list(range(len(all)))
+        rng.shuffle(ids)
+        xs = [all[i] for i in ids[:n]]
+        return xs
     elif isinstance(all, Mapping):
         keys = [k for k in all]
-        rng.shuffle(keys)
-        return {k: all[k] for k in keys[:n]}
+        ids = list(range(len(keys)))
+        rng.shuffle(ids)
+        return {(k := keys[i]): all[k] for i in ids[:n]}
     else:
         raise ArgumentError(all, f"Unsupported arg type: {type(all)}")
 

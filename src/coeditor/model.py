@@ -1693,7 +1693,6 @@ class C3DataLoader:
     desc: str
     tqdm_args: dict | None = None
     chunk_size: int = 1000
-    workers: int = 10
 
     def __post_init__(self):
         n_batches, batch_stats = self.estimate_batch_stats()
@@ -1706,25 +1705,34 @@ class C3DataLoader:
 
     def _to_tokenized(self, probs: Sequence[C3Problem]) -> Iterable[TkC3Problem]:
         probs = list(probs)
+        if self.transform is not None:
+            # we can afford to store all transformed problems beforehand
+            probs = join_list(pmap(self.transform.transform, probs, chunksize=500))
         if self.shuffle:
+            # we need to shuffle after the transform to help serialization
+            # this also mixes the problems better
             random.shuffle(probs)
         for i in range(0, len(probs), self.chunk_size):
+            # we can only afford to tokenize the problems on-the-fly
             group = probs[i : i + self.chunk_size]
-            if self.transform is not None:
-                group = join_list(
-                    pmap(self.transform.transform, group, tqdm_args={"disable": True})
-                )
             yield from pmap(
-                self.tokenizer.tokenize_problem, group, tqdm_args={"disable": True}
+                self.tokenizer.tokenize_problem,
+                group,
+                tqdm_args={"disable": True},
             )
 
     def estimate_batch_stats(self):
-        batches = self._problems_to_batches(self._to_tokenized(self.all_probs))
+        factor = 10
+        n = max(1, len(self.all_probs) // factor)
+        subset = random_subset(self.all_probs, n, rng=42)
+        batches = self._problems_to_batches(self._to_tokenized(subset))
         bsizes = list[int]()
-        for b in batches:
+        for b in tqdm(batches, desc="estimate_batch_stats", smoothing=0.0):
             bsizes.append(len(b["input_ids"]))
         batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
-        return len(bsizes), batch_stats
+        # better to have a smaller estimate to avoid triggering data regeneration
+        size_est = max(1, int(len(self.all_probs) / n * len(bsizes) * 0.99))
+        return size_est, batch_stats
 
     def __iter__(self) -> Iterable[dict]:
         batches = self._problems_to_batches(self._to_tokenized(self.all_probs))

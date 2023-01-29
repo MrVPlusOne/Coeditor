@@ -476,6 +476,7 @@ class C3ProblemChangeDropout(C3ProblemTransform):
     but also randomly keep some subset of changes in the input.
 
     ### Change log
+    - v1.3: make `random_subset` truely random.
     - v1.2: fix newline encoding bug.
     - v1.1
         - Dropout changes using change groups instead of individual change actions.
@@ -484,13 +485,16 @@ class C3ProblemChangeDropout(C3ProblemTransform):
         - Removed `dropout_prob`.
     """
 
-    VERSION = "1.2"
+    VERSION = "1.3"
 
     max_lines_to_edit: int = 25
     max_split_factor: int = 4
     # when dropping the changes into the input, the biggest ratio of changes to drop
     max_dropout_ratio: float = 0.5
     _test_prob: float = 0.01
+
+    def __post_init__(self):
+        self._rng = random.Random()
 
     def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
         original = prob.span.original
@@ -506,7 +510,9 @@ class C3ProblemChangeDropout(C3ProblemTransform):
                 len(grouped_keys) * random.random() * self.max_dropout_ratio
             )
             assert n_to_drop < len(grouped_keys)
-            keys_to_drop = join_list(random_subset(grouped_keys, n_to_drop))
+            keys_to_drop = join_list(
+                random_subset(grouped_keys, n_to_drop, rng=self._rng)
+            )
         else:
             keys_to_drop = []
         if keys_to_drop:

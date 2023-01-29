@@ -7,6 +7,7 @@ import wandb
 from prepare_data import make_or_load_dataset
 
 from coeditor._utils import cprint, run_long_task
+from coeditor.c3problem import C3ProblemChangeDropout
 from coeditor.common import *
 from coeditor.dataset import C3EditEncoder, C3ProblemDataset
 from coeditor.model import (
@@ -93,23 +94,15 @@ def train_model(
     )
 
     if not eval_only:
-        # we attach the problem transform to the dataloader to generate data on-the-fly
-        train_loader = C3DataLoader(
-            datasets["train"],
-            encoder.problem_tranform,
-            train_tkn,
-            batch_args,
-            shuffle=True,
-            desc="training",
-        )
-
         with timed_action("Warm-up Training"):
             warmup_bargs = copy.deepcopy(batch_args)
             warmup_bargs.min_queries *= 4
             warmup_bargs.max_queries *= 2
 
-            warm_up_data = random_subset(datasets["train"], len(datasets["train"]) // 4)
-            warmup_tkn = copy.deepcopy(train_tkn)
+            warm_up_data = random_subset(
+                datasets["train"], len(datasets["train"]) // 4, rng=42
+            )
+            warmup_tkn = copy.copy(train_tkn)
             warmup_tkn.max_ref_tks_sum //= 3
             warmup_loader = C3DataLoader(
                 warm_up_data,
@@ -125,6 +118,15 @@ def train_model(
             warmup_targs.max_train_epochs = 1
             model.train_on_data(model_name, warmup_loader, eval_loader, warmup_targs)
         with timed_action("Fine-tune Training"):
+            # we attach the problem transform to the dataloader to generate data on-the-fly
+            train_loader = C3DataLoader(
+                datasets["train"],
+                encoder.problem_tranform,
+                train_tkn,
+                batch_args,
+                shuffle=True,
+                desc="training",
+            )
             model.train_on_data(model_name, train_loader, eval_loader, train_args)
 
     model.to("cuda")
@@ -145,7 +147,7 @@ def train_model(
 
         out_dir = get_model_dir() / model_name / "exact_match_samples"
         dec_result.save_examples_to_dir(
-            out_dir, random_subset(exact_correct_map, max_saved_samples)
+            out_dir, random_subset(exact_correct_map, max_saved_samples, rng=42)
         )
         cprint("blue", "Exact-match samples saved to:", out_dir)
 
@@ -176,13 +178,15 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_model.py"):
         train_model(
-            dataset_name="tiny",
-            model_variant="-c3-simple-v1.4",
+            dataset_name="xl",
+            model_variant="-c3-dropout-v1.4",
             train_args=TrainingArgs(
                 max_train_epochs=1,
-                quicktest=True,
+                quicktest=False,
             ),
-            encoder=C3EditEncoder(),
+            encoder=C3EditEncoder(
+                problem_tranform=C3ProblemChangeDropout(),
+            ),
             recreate_data=False,
             eval_only=False,
         )
