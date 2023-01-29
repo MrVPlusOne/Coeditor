@@ -91,7 +91,7 @@ def _process_commits(
         edits = edits_from_commit_history(
             root,
             commits,
-            tempdir=workdir / "code",
+            tempdir=workdir / "code" / root.name,
             change_processor=change_processor,
             silent=True,
             time_limit=time_limit_per_commit * (len(commits) + 10),
@@ -121,7 +121,9 @@ def dataset_from_projects(
         - max_history_per_repo (int, optional): When the repo history is longer than
         this value, only the oldest portion is going to be used. Defaults to 1000.
     """
-    workdir = Path(tempfile.gettempdir()) / "dataset_from_projects"
+    # get the process id
+    pid = os.getpid()
+    workdir = Path(tempfile.gettempdir()) / "dataset_from_projects" / f"pid-{pid}"
     histories = pmap(
         get_commit_history,
         project_roots,
