@@ -29,7 +29,12 @@ from transformers.models.t5.modeling_t5 import (
 from transformers.trainer import EvalLoopOutput
 
 from coeditor._utils import cprint, groupby, scalar_stats
-from coeditor.c3problem import C3Problem, C3ProblemTokenizer, TkC3Problem
+from coeditor.c3problem import (
+    C3Problem,
+    C3ProblemTokenizer,
+    C3ProblemTransform,
+    TkC3Problem,
+)
 from coeditor.change import Modified
 from coeditor.encoding import (
     Add_id,
@@ -415,7 +420,12 @@ class RetrievalEditorModel(T5PreTrainedModel):
             )
 
         eval_loader = C3DataLoader(
-            eval_problems, tokenizer, batch_args, shuffle=False, desc="predict_on_data"
+            eval_problems,
+            None,
+            tokenizer,
+            batch_args,
+            shuffle=False,
+            desc="predict_on_data",
         )
 
         gen_args = dec_args.to_model_args()
@@ -1696,6 +1706,7 @@ class BatchArgs:
 @dataclass
 class C3DataLoader:
     all_probs: Sequence[C3Problem]
+    transform: C3ProblemTransform | None
     tokenizer: C3ProblemTokenizer
     batch_args: BatchArgs
     shuffle: bool
@@ -1714,17 +1725,21 @@ class C3DataLoader:
         return self._len_est
 
     def _to_tokenized(self, probs: Sequence[C3Problem]) -> Iterable[TkC3Problem]:
+        probs = list(probs)
+        if self.shuffle:
+            random.shuffle(probs)
         for i in range(0, len(probs), self.chunk_size):
             group = probs[i : i + self.chunk_size]
+            if self.transform is not None:
+                group = join_list(
+                    pmap(self.transform.transform, group, tqdm_args={"disable": True})
+                )
             yield from pmap(
                 self.tokenizer.tokenize_problem, group, tqdm_args={"disable": True}
             )
 
     def estimate_batch_stats(self):
-        probs = list(self.all_probs)
-        if self.shuffle:
-            random.shuffle(probs)
-        batches = self._problems_to_batches(self._to_tokenized(probs))
+        batches = self._problems_to_batches(self._to_tokenized(self.all_probs))
         bsizes = list[int]()
         for b in batches:
             bsizes.append(len(b["input_ids"]))
@@ -1732,11 +1747,7 @@ class C3DataLoader:
         return len(bsizes), batch_stats
 
     def __iter__(self) -> Iterable[dict]:
-        probs = list(self.all_probs)
-        if self.shuffle:
-            random.shuffle(probs)
-        batches = self._problems_to_batches(self._to_tokenized(probs))
-
+        batches = self._problems_to_batches(self._to_tokenized(self.all_probs))
         tqdm_args = self.tqdm_args or {"smoothing": 0.0}
         for b in tqdm(
             batches,

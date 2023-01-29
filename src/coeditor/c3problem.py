@@ -422,15 +422,15 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         return problems
 
 
-class C3ProblemTransformer(ABC):
+class C3ProblemTransform(ABC):
     "A strategy to generate new C3 problems from the orginal ones."
 
     @abstractmethod
-    def transform(self, prob: C3Problem) -> Iterable[C3Problem]:
+    def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
         ...
 
 
-class C3ProblemSimpleSplit(C3ProblemTransformer):
+class C3ProblemSimpleSplit(C3ProblemTransform):
     "Simply split the problem into fixed-sized editing ranges."
     max_lines_to_edit: int = 25
     max_split_factor: int = 4
@@ -455,7 +455,7 @@ class C3ProblemSimpleSplit(C3ProblemTransformer):
         return problems
 
 
-class C3ProblemChangeDropout(C3ProblemTransformer):
+class C3ProblemChangeDropout(C3ProblemTransform):
     """Split the problem into fixed-sized editing ranges like `C3ProblemSimpleSplit`,
     but also randomly keep some subset of changes in the input.
 

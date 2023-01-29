@@ -179,7 +179,7 @@ def pmap(
         return outs
 
     if chunksize is None:
-        chunksize = max(1, n // (50 * max_workers))
+        chunksize = max(1, n // (20 * max_workers))
 
     tag_f = _TaggedFunc(f, key_args)
     arg_tuples = zip(range(n), *f_args)
@@ -511,9 +511,11 @@ class PickleCache:
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
 
-    def cached(self, rel_path: Path | str, func: Callable[[], T1]) -> T1:
+    def cached(
+        self, rel_path: Path | str, func: Callable[[], T1], remake: bool = False
+    ) -> T1:
         path = self.cache_dir / rel_path
-        if not path.exists():
+        if remake or not path.exists():
             value = func()
             path.parent.mkdir(parents=True, exist_ok=True)
             logging.info(f"[PickleCache] Saving to cache: '{path}'")
@@ -525,7 +527,7 @@ class PickleCache:
             with path.open("rb") as f:
                 return pickle.load(f)
 
-    def set(self, rel_path: Path | str, value: T1):
+    def set(self, rel_path: Path | str, value: Any):
         path = self.cache_dir / rel_path
         with path.open("wb") as f:
             pickle.dump(value, f)

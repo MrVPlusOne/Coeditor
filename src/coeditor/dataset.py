@@ -10,7 +10,7 @@ from .c3problem import (
     C3ProblemGenerator,
     C3ProblemSimpleSplit,
     C3ProblemTokenizer,
-    C3ProblemTransformer,
+    C3ProblemTransform,
     JediUsageAnalyzer,
     fix_jedi_cache,
 )
@@ -61,9 +61,7 @@ class C3EditEncoder:
     change_processor: ProjectChangeProcessor[C3Problem] = field(
         default_factory=C3ProblemGenerator
     )
-    problem_tranformer: C3ProblemTransformer = field(
-        default_factory=C3ProblemSimpleSplit
-    )
+    problem_tranform: C3ProblemTransform = field(default_factory=C3ProblemSimpleSplit)
     edit_tokenizer: C3ProblemTokenizer = field(default_factory=C3ProblemTokenizer)
 
 
@@ -222,44 +220,70 @@ def datasets_from_repos(
     return {k: join_list(dataset[r] for r in repos) for k, repos in projects.items()}
 
 
-def make_or_load_datasets(
+TransformedC3Problem = C3Problem
+
+
+class C3ProblemDataset(TypedDict):
+    train: Sequence[C3Problem]
+    valid: Sequence[TransformedC3Problem]
+    test: Sequence[TransformedC3Problem]
+
+
+def make_or_load_dataset(
     dataset_name: str,
     change_processor: ProjectChangeProcessor[C3Problem],
-    recreate_data: bool = False,
+    problem_transformer: C3ProblemTransform,
+    remake_problems: bool = False,
     workers: int = DefaultWorkers,
-) -> Mapping[str, Sequence[C3Problem]]:
-    config_str = repr_modified_args(change_processor)
+) -> C3ProblemDataset:
+    def transform_eval_problems(
+        problems: dict[str, Sequence[C3Problem]]
+    ) -> dict[str, Sequence[C3Problem]]:
+        results = dict[str, Sequence[C3Problem]]()
+        for split, probs in problems.items():
+            if split == "train":
+                continue
+            prob_lists = pmap(
+                problem_transformer.transform,
+                probs,
+                desc=f"transform({split})",
+                chunksize=1000,
+            )
+            results[split] = join_list(prob_lists)
+        return results
 
-    save_dir = get_dataset_dir(dataset_name) / "processed" / config_str
-
-    if recreate_data or not save_dir.exists():
-        if dataset_name == "SPOT":
-            datasets = {
-                "test": join_list(
-                    dataset_from_projects(
-                        [proj_root()], change_processor, [False], workers=workers
-                    ).values()
-                )
-            }
-        else:
-            datasets = datasets_from_repos(
+    prob_config = repr_modified_args(change_processor)
+    processed_dir = get_dataset_dir(dataset_name) / "processed"
+    cache = PickleCache(processed_dir)
+    with timed_action("Making or loading C3 problems"):
+        problems = cache.cached(
+            prob_config,
+            lambda: datasets_from_repos(
                 get_dataset_dir(dataset_name) / "repos",
                 change_processor,
                 workers=workers,
-            )
-        with timed_action("Saving datasets to disk"):
-            save_dir.mkdir(parents=True, exist_ok=True)
-            save_datasets(datasets, save_dir)
-        print("Tokenized dataset saved to:", save_dir)
-    else:
-        with timed_action("Loading datasets from disk"):
-            datasets = load_datasets(save_dir)
+            ),
+            remake=remake_problems,
+        )
 
-    size_info = run_command(["du", "-ha", "."], save_dir)
-    print(f"Dataset sizes:")
-    print(size_info)
+    size_mb = (processed_dir / prob_config).stat().st_size / (1024**2)
+    print(f"Problems total size: {size_mb:.2f} MB")
 
-    return datasets
+    trans_config = repr_modified_args(problem_transformer)
+    transformed_dir = get_dataset_dir(dataset_name) / "transformed"
+    cache = PickleCache(transformed_dir)
+
+    with timed_action("Making or loading transformed C3 problems for eval"):
+        eval_probs = cache.cached(
+            f"{prob_config}-{trans_config}",
+            lambda: transform_eval_problems(problems),
+        )
+
+    return C3ProblemDataset(
+        train=problems.get("train", []),
+        valid=eval_probs.get("valid", []),
+        test=eval_probs.get("test", []),
+    )
 
 
 def save_datasets(datasets: Mapping[str, Any], save_dir: Path) -> None:

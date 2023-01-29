@@ -4,12 +4,11 @@ import shutil
 import warnings
 
 import wandb
-from prepare_data import make_or_load_datasets
+from prepare_data import make_or_load_dataset
 
 from coeditor._utils import cprint, run_long_task
-from coeditor.c3problem import C3Problem
 from coeditor.common import *
-from coeditor.dataset import C3EditEncoder
+from coeditor.dataset import C3EditEncoder, C3ProblemDataset
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -40,8 +39,12 @@ def train_model(
     if not eval_only:
         check_save_dir(model_name)
 
-    datasets = make_or_load_datasets(
-        dataset_name, encoder.change_processor, recreate_data=recreate_data
+    # problems will be transformed and saved for valid and test but not train.
+    datasets = make_or_load_dataset(
+        dataset_name,
+        encoder.change_processor,
+        encoder.problem_tranform,
+        remake_problems=recreate_data,
     )
 
     config_dict = {
@@ -62,7 +65,11 @@ def train_model(
     if train_args.quicktest:
         print("Using fewer data for quick test.")
         n_quick_exs = 20
-        datasets = {name: data[:n_quick_exs] for name, data in datasets.items()}
+        datasets = C3ProblemDataset(
+            train=datasets["train"][:n_quick_exs],
+            valid=datasets["valid"][:n_quick_exs],
+            test=datasets["test"][:n_quick_exs],
+        )
 
     if not eval_only:
         model = RetrievalEditorModel.from_code_t5(
@@ -78,22 +85,22 @@ def train_model(
         )
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    def transform_data(data: Sequence[C3Problem]) -> list[C3Problem]:
-        transformed = pmap(encoder.problem_tranformer.transform, data, chunksize=1000)
-        return join_list(transformed)
-
-    datasets = {split: transform_data(data) for split, data in datasets.items()}
-
     train_tkn = encoder.edit_tokenizer
     eval_tkn = copy.deepcopy(train_tkn)
     eval_tkn.max_ref_tks_sum *= 2
     eval_loader = C3DataLoader(
-        datasets["valid"], eval_tkn, eval_batch_args, shuffle=False, desc="eval"
+        datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
     )
 
     if not eval_only:
+        # we attach the problem transform to the dataloader to generate data on-the-fly
         train_loader = C3DataLoader(
-            datasets["train"], train_tkn, batch_args, shuffle=True, desc="training"
+            datasets["train"],
+            encoder.problem_tranform,
+            train_tkn,
+            batch_args,
+            shuffle=True,
+            desc="training",
         )
 
         with timed_action("Warm-up Training"):
@@ -106,6 +113,7 @@ def train_model(
             warmup_tkn.max_ref_tks_sum //= 3
             warmup_loader = C3DataLoader(
                 warm_up_data,
+                encoder.problem_tranform,
                 warmup_tkn,
                 warmup_bargs,
                 shuffle=True,
@@ -168,11 +176,11 @@ if __name__ == "__main__":
     os.chdir(proj_root())
     with run_long_task("train_model.py"):
         train_model(
-            dataset_name="xl",
-            model_variant="-c3-v1.3",
+            dataset_name="tiny",
+            model_variant="-c3-simple-v1.4",
             train_args=TrainingArgs(
                 max_train_epochs=1,
-                quicktest=False,
+                quicktest=True,
             ),
             encoder=C3EditEncoder(),
             recreate_data=False,
