@@ -216,7 +216,7 @@ class TestChangeIdentities:
                 print("after diff:\n")
                 print(show_string_diff(get_after(c), decode_tokens(tk_after)))
 
-            c_tokens = tk_delta.to_change_tks(tk_before)
+            c_tokens = tk_delta.apply_to_change(tk_before)
             if c_tokens != change_to_tokens(c):
                 print("c_tokens diff:\n")
                 print(
@@ -284,7 +284,7 @@ class TestChangeIdentities:
                         print_err(f"{sub_keys=}")
                         print_err(f"{delta1=}")
                         print_err("step1", SEP)
-                        step1 = delta1.to_change_tks(original)
+                        step1 = delta1.apply_to_change(original)
                         print_err(add_line_numbers(decode_tokens(step1), start=0))
                         print_err(SEP)
                         print_err(f"{new_edit_lines=}")

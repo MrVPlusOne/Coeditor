@@ -111,6 +111,9 @@ class C3Problem:
             f"commit: {self.src_info['commit']}",
         ]
 
+    def summarize(self) -> str:
+        return "\n".join(self.meta_data_lines())
+
 
 PyFullName = NewType("PyFullName", str)
 
@@ -497,7 +500,7 @@ class C3ProblemChangeDropout(C3ProblemTransform):
             if not delta2_groups:
                 print_err(f"{delta=}, {keys_to_drop=}, {delta1=}")
                 raise AssertionError("Empty delta2_groups")
-            new_original = TkArray.new(delta1.to_change_tks(original.tolist()))
+            new_original = TkArray.new(delta1.apply_to_change(original.tolist()))
             new_trans = prob.transformations + ("split", "dropout")
             new_span = dataclasses.replace(
                 prob.span, original=new_original, delta=delta2
@@ -662,7 +665,7 @@ class C3ProblemTokenizer:
 
         # try move some prev_change_tks into the input
         above_tks = join_list(origin_lines[:edit_start] + [TokenSeq()], Newline_id)
-        above_tks = tk_delta.for_input_range((0, edit_start)).to_change_tks(above_tks)
+        above_tks = tk_delta.for_input_range((0, edit_start)).apply_to_change(above_tks)
         below_tks = join_list(origin_lines[edit_stop:] + [TokenSeq()], Newline_id)
         chunk_input, above_tks, below_tks = self._inline_some_context(
             chunk_input, above_tks, below_tks, input_limit
@@ -808,7 +811,7 @@ class C3ProblemTokenizer:
                 if header_diff:
                     header_tks = self._encode_headers(header_diff, 0)
                     segs.append(header_tks)
-                c_tks = c.delta.to_change_tks(c.original.tolist())
+                c_tks = c.delta.apply_to_change(c.original.tolist())
                 segs.append(c_tks)
                 segs.append([Newline_id, Newline_id])
                 last_scope = c.headers

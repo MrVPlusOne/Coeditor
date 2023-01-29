@@ -274,8 +274,8 @@ class TkDelta:
     def get_line_change(self, line: int) -> tuple[TokenSeq, ...]:
         return self._deltas.get(line, ())
 
-    def to_change_tks(self, input: TokenSeq) -> TokenSeq:
-        lines = split_list(input, Newline_id)
+    def apply_to_change(self, change: TokenSeq) -> TokenSeq:
+        lines = split_list(change, Newline_id)
 
         new_lines = list[TokenSeq]()
         for i, line in enumerate(lines):
@@ -339,7 +339,7 @@ class TkDelta:
     ) -> tuple[Self, Self]:
         """
         Decompose the delta into two deltas such that applying them sequentially
-        using `to_change_tks` is equivalent to applying the original delta.
+        using `apply_to_change` is equivalent to applying the original delta.
         """
 
         key_set = set(first_keys)
@@ -538,19 +538,20 @@ def tokens_to_change(tokens: TokenSeq) -> Modified[str]:
     "Decode a token sequence into a change."
     tk_lines = split_list(tokens, Newline_id)
 
-    before_lines = list[str]()
-    after_lines = list[str]()
+    before_lines = list[TokenSeq]()
+    after_lines = list[TokenSeq]()
     for tk_line in tk_lines:
         if tk_line and tk_line[0] == Add_id:
-            after_lines.append(_Tokenizer.decode(tk_line[1:]))
+            after_lines.append(tk_line[1:])
         elif tk_line and tk_line[0] == Del_id:
-            before_lines.append(_Tokenizer.decode(tk_line[1:]))
+            before_lines.append(tk_line[1:])
         else:
-            line = _Tokenizer.decode(tk_line)
-            before_lines.append(line)
-            after_lines.append(line)
+            before_lines.append(tk_line)
+            after_lines.append(tk_line)
+    before_code = decode_tokens(join_list(before_lines, Newline_id))
+    after_code = decode_tokens(join_list(after_lines, Newline_id))
 
-    return Modified(before="\n".join(before_lines), after="\n".join(after_lines))
+    return Modified(before_code, after_code)
 
 
 def code_to_input(code_tks: TokenSeq) -> TokenSeq:

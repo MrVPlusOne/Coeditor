@@ -54,7 +54,9 @@ from coeditor.encoding import (
     is_extra_id,
     output_ids_as_seqs,
     random_extra_id_map,
+    tokens_to_change,
 )
+from coeditor.tk_array import TkArray
 
 from .common import *
 
@@ -173,18 +175,26 @@ class RetrievalDecodingResult:
 
     def exact_match_accuracy(self) -> tuple[CountedSum, dict[int, bool]]:
         ex2correct = dict[int, bool]()
+        bad_probs = list[C3Problem]()
         for i, mp in enumerate(self.predictions):
             prob = self.problems[i]
             original = prob.span.original.tolist()
             pred_delta = TkDelta.from_output_tks(mp["output_ids"])
             label_delta = TkDelta.from_output_tks(mp["labels"])
-            assert isinstance(prob.edit_lines, range)
-            line_shift = prob.edit_lines.start
-            pred_code = pred_delta.shifted(line_shift).apply_to_input(original)
-            label_code = label_delta.shifted(line_shift).apply_to_input(original)
-            is_correct = code_equal(decode_tokens(pred_code), decode_tokens(label_code))
-            ex2correct[i] = is_correct
+            if not prob.edit_lines:
+                bad_probs.append(prob)
+                continue
+            line_shift = prob.edit_lines[0]
+            pred_change = pred_delta.shifted(line_shift).apply_to_change(original)
+            label_change = label_delta.shifted(line_shift).apply_to_change(original)
+            pred_code = tokens_to_change(pred_change).after
+            label_code = tokens_to_change(label_change).after
+            ex2correct[i] = code_equal(pred_code, label_code)
         correct_count = CountedSum(sum(ex2correct.values()), len(ex2correct))
+        if bad_probs:
+            cprint("yellow", "Number of problems with no edits:", len(bad_probs))
+            for prob in bad_probs[:5]:
+                print(prob.summarize())
         return correct_count, ex2correct
 
     def save_examples_to_dir(self, out_dir: Path, ex2correct: dict[int, bool]) -> None:
@@ -201,56 +211,23 @@ class RetrievalDecodingResult:
             out_file.write_text(compare_str)
 
     @classmethod
-    def show_prediction(
-        cls, edit: C3Problem | None, pred: RetrievalModelPrediction
-    ) -> str:
-        def show_label(i: int):
-            return f" <{i}>" if i <= 9 else f"<{i}>"
-
-        def show_extra_tokens(tks: TokenSeq, main_tk_lines: dict[Token, TokenSeq]):
-            segs = output_ids_as_seqs(tks)
-            lines = []
-            for k, seg in segs.items():
-                if not seg:
-                    continue  # skip empty lines
-                if seg[-1] == Del_id:
-                    # show the delted line
-                    origin_line = main_tk_lines.get(k, [])
-                    seg = seg + origin_line
-                label = show_label(id_map.get(k, -1))
-                lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
-            return "".join(lines)
-
-        main_segs = output_ids_as_seqs(pred["input_ids"])
-        id_map = {k: i for i, k in enumerate(main_segs)}
-        main_lines = list[str]()
-        for line_tks in split_list(pred["input_ids"], Newline_id):
-            if line_tks and is_extra_id(line_tks[0]):
-                line = show_label(id_map.get(line_tks[0], -1)) + decode_tokens(
-                    line_tks[1:]
-                )
-            else:
-                line = decode_tokens(line_tks)
-            main_lines.append(line)
-
-        pred_lines = [
-            "========Prediction========",
-            f"{show_extra_tokens(pred['output_ids'], main_segs)}",
-        ]
-        meta_lines = [] if edit is None else edit.meta_data_lines()
-        outputs = [
-            *meta_lines,
-            "========Ground Truth========",
-            show_extra_tokens(pred["labels"], main_segs),
-            *pred_lines,
-            "========Main Code========",
-            "\n".join(main_lines),
-            "========References========",
-        ]
-        for i, ref in enumerate(pred["references"]):
-            outputs.append(indent("-" * 6 + f"Reference {i}" + "-" * 6, "  "))
-            outputs.append(indent(decode_tokens(ref), "  "))
-        return "\n".join(outputs)
+    def show_prediction(cls, prob: C3Problem, pred: RetrievalModelPrediction) -> str:
+        span = prob.span
+        tk_prob = TkC3Problem(
+            input=TkArray.new(pred["input_ids"]),
+            output=TkArray.new(pred["labels"]),
+            path=span.headers[-1].path,
+            change_type=prob.change_type,
+            named_references=[
+                (f"reference-{i}", TkArray.new(ref))
+                for i, ref in enumerate(pred["references"])
+            ],
+            project=prob.src_info["project"],
+            commit=prob.src_info["commit"],
+        )
+        meta_lines = prob.meta_data_lines()
+        all_secs = [*meta_lines, tk_prob.show(pred["output_ids"])]
+        return "\n".join(all_secs)
 
 
 class AttentionMode(enum.Enum):
