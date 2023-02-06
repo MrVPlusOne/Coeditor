@@ -1,4 +1,5 @@
 import copy
+import dataclasses
 import logging
 import shutil
 from textwrap import indent
@@ -179,8 +180,8 @@ class RetrievalDecodingResult:
         for i, mp in enumerate(self.predictions):
             prob = self.problems[i]
             original = prob.span.original.tolist()
-            pred_delta = TkDelta.from_output_tks(mp["output_ids"])
-            label_delta = TkDelta.from_output_tks(mp["labels"])
+            pred_delta = TkDelta.from_output_tks(prob.edit_lines, mp["output_ids"])
+            label_delta = TkDelta.from_output_tks(prob.edit_lines, mp["labels"])
             if not prob.edit_lines:
                 bad_probs.append(prob)
                 continue
@@ -439,7 +440,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def predict_on_batch(
         self,
         batch: dict,
-        requests: Sequence["EditRequest"],
+        originals: Sequence[TokenSeq],
         dec_args: DecodingArgs,
         n_solutions: int = 1,
     ) -> list[list[PredictedChange]]:
@@ -504,8 +505,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
         out_tks = [remove_pad_ids(x) for x in out_tks]
         assert isinstance(out_tks, list)
         logging.debug("Max out length:", max(len(x) for x in out_tks))
-        assert_eq(len(out_tks), len(requests) * N)
-        requests = join_list([[r] * N for r in requests])
+        assert_eq(len(out_tks), len(originals) * N)
+        originals = join_list([[x] * N for x in originals])
         if (pred_scores := gen_out.get("sequences_scores", None)) is None:
             pred_scores = [0.0] * len(out_tks)
         if use_sampling:
@@ -514,10 +515,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
             pred_weights = [math.exp(x) for x in pred_scores]
         with timed("assemble changes"):
             pred_changes = list[Modified[str]]()
-            for req, out in zip(requests, out_tks):
-                change = req.target.map(lambda x: x.code)
-                change_tks = change_to_tokens(change)
-                pred = apply_output_tks_to_change(change_tks, req.respect_lines, out)
+            for change_tks, out in zip(originals, out_tks):
+                pred = apply_output_tks_to_change(change_tks, 0, out)
                 pred_changes.append(pred)
         assert_eq(len(pred_changes), len(out_tks), len(pred_scores))
 
