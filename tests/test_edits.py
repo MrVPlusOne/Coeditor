@@ -267,7 +267,7 @@ class TestChangeIdentities:
             original, delta = TkDelta.from_change_tks(change_to_tokens(c))
             expect = delta.apply_to_input(original)
             keys = tuple(delta.keys())
-            for _ in range(10):
+            for _ in range(50):
                 n_keys = int(len(keys) * random.random())
                 sub_keys = random_subset(keys, n_keys)
                 delta1, delta2 = delta.decompose_for_input(sub_keys)
@@ -275,6 +275,8 @@ class TestChangeIdentities:
                 step2 = delta2.apply_to_input(step1)
                 if step2 != expect:
                     print_err(f"{sub_keys=}")
+                    print_err("earlier", SEP)
+                    print_err(c.earlier)
                     print_err("Original", SEP)
                     print_err(decode_tokens(original))
                     print_err("Expect", SEP)

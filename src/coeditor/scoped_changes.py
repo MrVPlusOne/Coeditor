@@ -8,6 +8,7 @@ from functools import cached_property
 
 import jedi
 import jedi.settings
+import parso
 from jedi.file_io import FileIO, FolderIO
 from jedi.inference.context import ModuleContext
 from jedi.inference.references import recurse_find_python_files
@@ -22,7 +23,18 @@ from .git import CommitInfo
 
 ScopeTree = ptree.Function | ptree.Class | ptree.Module
 PyNode = ptree.PythonBaseNode | ptree.PythonNode
-LineRange = NewType("LineRange", tuple[int, int])
+
+
+class LineRange(NamedTuple):
+    start: int
+    until: int
+
+    def __contains__(self, l: int) -> bool:
+        return self.start <= l < self.until
+
+    def to_range(self) -> range:
+        return range(self.start, self.until)
+
 
 _tlogger = TimeLogger()
 
@@ -30,7 +42,7 @@ _tlogger = TimeLogger()
 def line_range(start: int, end: int, can_be_empty: bool = False) -> LineRange:
     if not can_be_empty and start >= end:
         raise ValueError(f"Bad line range: {start=}, {end=}")
-    return LineRange((start, end))
+    return LineRange(start, end)
 
 
 def _strip_empty_lines(s: str):
@@ -104,6 +116,16 @@ class ChangeScope:
     def all_code(self) -> str:
         return self.header_code + self.spans_code
 
+    def search_span_by_line(self, line: int) -> "StatementSpan | None":
+        # TODO: optimize this to avoid linear scan
+        span = self._search_span(line)
+        if span is not None:
+            return span
+        for s in self.subscopes.values():
+            span = s.search_span_by_line(line)
+            if span is not None:
+                return span
+
     def _search(self, path: ElemPath, line: int) -> Self | "StatementSpan":
         scope = self._search_scope(path)
         if scope.header_line_range[0] <= line < scope.header_line_range[1]:
@@ -125,7 +147,7 @@ class ChangeScope:
 
     def _search_span(self, line: int) -> "StatementSpan | None":
         for span in self.spans:
-            if span.line_range[0] <= line < span.line_range[1]:
+            if line in span.line_range:
                 return span
         return None
 
@@ -182,7 +204,9 @@ class ChangeScope:
         return scope
 
     def __repr__(self):
-        return f"ChangeScope(path={self.path}, type={self.tree.type})"
+        return (
+            f"ChangeScope(path={self.path}, type={self.tree.type}, spans={self.spans})"
+        )
 
 
 _non_scope_stmt_types = {
@@ -236,6 +260,13 @@ class StatementSpan:
                 print_err(s)
             raise
 
+    def __repr__(self):
+        preview = self.code
+        str_limit = 30
+        if len(preview) > str_limit:
+            preview = preview[:str_limit] + "..."
+        return f"StatementSpan({self.line_range}, code={repr(preview)})"
+
 
 @dataclass(frozen=True)
 class ChangedSpan:
@@ -251,14 +282,18 @@ class ChangedSpan:
         return hrange
 
     @property
-    def path(self) -> ProjectPath:
-        return self.parent_scopes[-1].earlier.path
+    def module(self) -> ModuleName:
+        return self.parent_scopes[-1].earlier.path.module
+
+    @property
+    def scope(self) -> Change[ChangeScope]:
+        return self.parent_scopes[-1]
 
     def _is_func_body(self) -> bool:
         return self.parent_scopes[-1].earlier.tree.type == ptree.Function.type
 
     def __repr__(self) -> str:
-        return f"ChangeSpan(scope={self.path}, range={self.line_range}, type={self.change.as_char()})"
+        return f"ChangeSpan(module={self.module}, range={self.line_range}, scope={self.scope.earlier.path.path}, type={self.change.as_char()})"
 
 
 @dataclass
@@ -289,22 +324,18 @@ class JModule:
 @dataclass(frozen=True)
 class JModuleChange:
     module_change: Change[JModule]
-    changed: Mapping[ProjectPath, ChangedSpan]
+    changed: Sequence[ChangedSpan]
 
     def __repr__(self) -> str:
-        change_dict = {k.path: v.change.as_char() for k, v in self.changed.items()}
-        return f"JModuleChange({change_dict})"
+        return f"JModuleChange({self.changed})"
 
     @staticmethod
     def from_modules(module_change: Change[JModule]):
         "Compute the change spans from two versions of the same module."
         with _tlogger.timed("JModuleChange.from_modules"):
-            changed = dict[ProjectPath, ChangedSpan]()
-            for cspan in get_changed_spans(
+            changed = get_changed_spans(
                 module_change.map(lambda m: m.as_scope), tuple()
-            ):
-                path = cspan.parent_scopes[-1].earlier.path
-                changed[path] = cspan
+            )
             return JModuleChange(module_change, changed)
 
 
@@ -441,6 +472,26 @@ def _deep_copy_subset_(dict: dict[T1, T2], keys: Collection[T1]) -> dict[T1, T2]
 _Second = float
 
 
+def _parse_module_script(project: Path, path: Path):
+    assert path.is_absolute(), f"Path is not absolute: {path=}"
+    script = jedi.Script(path=path, project=project)
+    mcontext = script._get_module_context()
+    assert isinstance(mcontext, ModuleContext)
+    mname = cast(str, mcontext.py__name__())
+    if mname.startswith("src."):
+        e = ValueError(f"Bad module name: {mname}")
+        files = list(project.iterdir())
+        print_err(f"project: {project}", file=sys.stderr)
+        print_err(f"files in root: {files}", file=sys.stderr)
+        raise e
+    m = script._module_node
+    assert isinstance(m, ptree.Module)
+    # mname = PythonProject.rel_path_to_module_name(path.relative_to(proj.path))
+    # m = parso.parse(path.read_text())
+    jmod = JModule(mname, m)
+    return jmod, script
+
+
 def _edits_from_commit_history(
     project: Path,
     history: Sequence[CommitInfo],
@@ -465,23 +516,9 @@ def _edits_from_commit_history(
 
     def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
-            assert path.is_absolute(), f"Path is not absolute: {path=}"
-            s = jedi.Script(path=path, project=proj)
+            m, s = _parse_module_script(project, path)
             scripts[to_rel_path(path.relative_to(proj._path))] = s
-            mcontext = s._get_module_context()
-            assert isinstance(mcontext, ModuleContext)
-            mname = cast(str, mcontext.py__name__())
-            if mname.startswith("src."):
-                e = ValueError(f"Bad module name: {mname}")
-                files = list(project.iterdir())
-                print_err(f"project: {proj}", file=sys.stderr)
-                print_err(f"files in root: {files}", file=sys.stderr)
-                raise e
-            m = s._module_node
-            assert isinstance(m, ptree.Module)
-            # mname = PythonProject.rel_path_to_module_name(path.relative_to(proj.path))
-            # m = parso.parse(path.read_text())
-            return JModule(mname, m)
+            return m
 
     def checkout_commit(commit_hash: str):
         with _tlogger.timed("checkout"):
@@ -590,7 +627,7 @@ def _edits_from_commit_history(
                     changed[mod.mname] = JModuleChange.from_modules(Deleted(mod))
                 case Modified(path1, path2):
                     assert path1 == path2
-                    mod_old = new_path2module[rel_path]
+                    mod_old = new_path2module.pop(rel_path)
                     new_path2module[rel_path] = mod_new = parse_module(path)
                     changed[mod_new.mname] = JModuleChange.from_modules(
                         Modified(mod_old, mod_new)
@@ -698,9 +735,7 @@ def get_changed_spans(
 
 
 def code_to_module(code: str) -> ptree.Module:
-    m = jedi.Script(code)._module_node
-    assert isinstance(m, ptree.Module)
-    return m
+    return parso.parse(code)
 
 
 def _search_in_scope(

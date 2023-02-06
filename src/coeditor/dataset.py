@@ -57,7 +57,7 @@ class TokenizedEditDataset(Generic[TEdit]):
 
 
 @dataclass
-class C3EditEncoder:
+class C3CombinedEncoder:
     change_processor: ProjectChangeProcessor[C3Problem] = field(
         default_factory=C3ProblemGenerator
     )

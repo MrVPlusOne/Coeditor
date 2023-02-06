@@ -35,6 +35,7 @@ from .encoding import (
 )
 from .git import CommitInfo
 from .scoped_changes import (
+    ChangedSpan,
     ChangeScope,
     JModule,
     JModuleChange,
@@ -91,7 +92,7 @@ class SrcInfo(TypedDict):
 class C3Problem:
     "Contextual code change prediction problem."
     span: ChangedCodeSpan
-    # the lines to be edited
+    # the lines to be edited, reletive to the start of the span.
     edit_lines: Sequence[int]
     # most relevant to least relevant
     relevant_changes: Sequence[ChangedCodeSpan]
@@ -160,13 +161,14 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
+    - v2.6: fix missing changes in `JModuleChanges`.
     - v2.5: fix newline encoding bug.
     - v2.4: fix buggy encoding of `Added` and `Deleted` changes.
     - v2.3: always generate problems with full editing range and move the problem
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "2.5"
+    VERSION = "2.6"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
 
@@ -197,7 +199,6 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         changes: Mapping[ModuleName, JModuleChange],
     ) -> Mapping[ModuleName, LineUsageAnalysis]:
         "Return the definition usages of each line."
-        project = pstate.project
         result = dict[ModuleName, LineUsageAnalysis]()
 
         src_map = {m.mname: f for f, m in modules.items()}
@@ -206,16 +207,16 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 continue
 
             lines_to_analyze = set[int]()
-            for span in mchange.changed.values():
+            for span in mchange.changed:
                 if span.change is Added:
                     continue
-                lines_to_analyze.update(range(*span.line_range))
-                lines_to_analyze.update(range(*span.header_line_range))
+                lines_to_analyze.update(span.line_range.to_range())
+                lines_to_analyze.update(span.header_line_range.to_range())
 
             mod_path = src_map[mname]
             script = pstate.scripts[mod_path]
             line_usages = self.analyzer.get_line_usages(
-                script, project.path, lines_to_analyze, silent=True
+                script, lines_to_analyze, silent=True
             )
             result[mname] = line_usages
         return result
@@ -253,159 +254,16 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         module_order: Sequence[ModuleName],
     ) -> Sequence[C3Problem]:
         before_mod_map = {m.mname: m for m in pchange.all_modules.before}
-        mod_hier = ModuleHierarchy.from_modules(before_mod_map)
-        cspan_cache = dict[PyDefinition, list[ChangedCodeSpan]]()
-
-        def get_def_spans(used: PyDefinition) -> list[ChangedCodeSpan]:
-            "Get the (pre-edit) spans for the given definition."
-            if used.full_name in cspan_cache:
-                return cspan_cache[used.full_name]
-            path = mod_hier.resolve_path(split_dots(used.full_name))
-            cspans = list[ChangedCodeSpan]()
-            if path is None or (jmod := before_mod_map.get(path.module)) is None:
-                cspan_cache[used] = cspans
-                return cspans
-            scope = jmod.as_scope
-            elem = scope._search(path.path, used.start_pos[0])
-            func_scopes = list[ChangeScope]()
-            stmt_spans = list[StatementSpan]()
-            match elem:
-                case ChangeScope(tree=ptree.Function()):
-                    func_scopes.append(elem)
-                case ChangeScope(tree=ptree.Class()):
-                    # add all attrs and methods
-                    stmt_spans.extend(elem.spans)
-                    func_scopes.extend(
-                        s
-                        for s in elem.subscopes.values()
-                        if isinstance(s.tree, ptree.Function)
-                    )
-                case StatementSpan():
-                    stmt_spans.append(elem)
-
-            # add collapsed functions
-            for f_scope in func_scopes:
-                ancestors = f_scope.ancestors()
-                stmts = f_scope.spans[-1].statements
-                body_code = stmts[-1].get_code()
-                if len(stmts) > 1:
-                    ellipsis = "    " * (len(ancestors) - 1) + "# ...\n"
-                    body_code = ellipsis + body_code
-                cspan = ChangedCodeSpan(
-                    [to_header(Modified.from_unchanged(s)) for s in ancestors],
-                    TkArray.new(encode_lines_join(body_code)),
-                    TkDelta.empty(),
-                    f_scope.spans[-1].line_range,
-                    f_scope.path.module,
-                )
-                cspans.append(cspan)
-
-            # add statement spans
-            for stmt_span in stmt_spans:
-                ancestors = stmt_span.scope.ancestors()
-                stmts = stmt_span.statements
-                match stmts:
-                    case [
-                        ptree.PythonNode(
-                            type="simple_stmt",
-                            children=[ptree.String(), ptree.Newline()],
-                        ),
-                        *rest,
-                    ]:
-                        if not rest:
-                            continue
-                        stmts = rest
-                body_code = "".join(s.get_code() for s in stmts).lstrip("\n")
-                cspan = ChangedCodeSpan(
-                    [to_header(Modified.from_unchanged(s)) for s in ancestors],
-                    TkArray.new(encode_lines_join(body_code)),
-                    TkDelta.empty(),
-                    stmt_span.line_range,
-                    stmt_span.scope.path.module,
-                )
-                cspans.append(cspan)
-
-            cspan_cache[used] = cspans
-            return cspans
-
-        def get_relevant_unchanged(
-            this_change: ChangedCodeSpan, other_changes: Collection[ChangedCodeSpan]
-        ):
-            module = this_change.module
-            line_usages = mod2usages[module]
-            # parent defs are also considered as used
-            parent_defs = [
-                PyDefinition(
-                    PyFullName(f"{c.path.module}.{c.path.path}"),
-                    (c.line_range[0], 0),
-                    (c.line_range[1], 0),
-                )
-                for c in this_change.headers
-            ]
-            # immediate parents are more relevant
-            sorted_defs = list(reversed(parent_defs))
-            used_defs = set(sorted_defs)
-            all_lines = set(range(*this_change.line_range))
-            all_lines.update(range(*this_change.headers[-1].line_range))
-            for l in all_lines:
-                for pydef in line_usages.line2usages.get(l, set()):
-                    if (
-                        pydef.full_name.startswith(module)
-                        and pydef.start_pos[0] in all_lines
-                    ):
-                        # skip self references
-                        continue
-                    if pydef not in used_defs:
-                        used_defs.add(pydef)
-                        sorted_defs.append(pydef)
-
-            # return unique cspans
-            seen = set[tuple[ModuleName, LineRange]]()
-            # we don't need to show the changed parts again
-            for cspan in (this_change, *other_changes):
-                seen.add((cspan.module, cspan.line_range))
-            result = list[ChangedCodeSpan]()
-            for used in sorted_defs:
-                for cspan in get_def_spans(used):
-                    key = (cspan.module, cspan.line_range)
-                    if key not in seen:
-                        result.append(cspan)
-                        seen.add(key)
-            return result
-
-        header_cache = dict[ProjectPath, ChangedHeader]()
-
-        def to_header(cs: Change[ChangeScope]) -> ChangedHeader:
-            path = cs.earlier.path
-            if (ch := header_cache.get(path)) is None:
-                header_change = cs.map(lambda s: s.header_code.strip("\n"))
-                ch = ChangedHeader(
-                    TkArray.new(change_to_tokens(header_change)),
-                    cs.earlier.tree.type,
-                    cs.earlier.header_line_range,
-                    cs.earlier.path,
-                )
-                header_cache[path] = ch
-            return ch
+        cache = C3GeneratorCache(before_mod_map)
 
         processed_cspans = list[ChangedCodeSpan]()
         problems = list[C3Problem]()
         for m in module_order:
             if (mchange := pchange.changed.get(m)) is None:
                 continue
-            for span in mchange.changed.values():
-                original, delta = line_diffs_to_original_delta(
-                    change_to_line_diffs(span.change)
-                )
-                n_lines = count_lines(original)
-
-                code_span = ChangedCodeSpan(
-                    headers=[to_header(cs) for cs in span.parent_scopes],
-                    original=TkArray.new(encode_lines_join(original)),
-                    delta=delta.to_tk_delta(),
-                    line_range=span.line_range,
-                    module=span.path.module,
-                )
+            usages = mod2usages[m]
+            for span in mchange.changed:
+                code_span = cache.to_code_span(span)
                 should_mk_problem = (
                     (span.change.as_char() == Modified.as_char())
                     and (self._is_training or span._is_func_body())
@@ -415,13 +273,14 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 if should_mk_problem:
                     # latest changes are more relevant
                     relevant_changes = list(reversed(processed_cspans))
-                    relevant_unchanged = get_relevant_unchanged(
-                        code_span, relevant_changes
+                    relevant_unchanged = cache.get_relevant_unchanged(
+                        code_span, relevant_changes, usages
                     )
                     src_info: SrcInfo = {
                         "project": pchange.project_name,
                         "commit": pchange.commit_info,
                     }
+                    n_lines = span.line_range[1] - span.line_range[0]
                     prob = C3Problem(
                         code_span,
                         range(0, n_lines + 1),  # one additional line for appending
@@ -434,6 +293,193 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
                 processed_cspans.append(code_span)
         return problems
+
+
+class C3GeneratorCache:
+    def __init__(self, pre_module_map: Mapping[ModuleName, JModule]):
+        self.header_cache = dict[ProjectPath, ChangedHeader]()
+        self.cspan_cache = dict[PyDefinition, list[ChangedCodeSpan]]()
+        self.module_map = pre_module_map
+        self.mod_hier = ModuleHierarchy.from_modules(pre_module_map)
+
+    def create_problem(
+        self,
+        target: ChangedSpan,
+        changed: Mapping[ModuleName, JModuleChange],
+        target_usages: LineUsageAnalysis,
+        src_info: SrcInfo,
+    ) -> C3Problem:
+        relevant_changes = list[ChangedCodeSpan]()
+        changed = dict(changed)
+        module = target.module
+        target_mc = changed.pop(module)
+        all_mc = [target_mc] + list(changed.values())
+        for mc in all_mc:
+            is_target_mc = mc.module_change.earlier.mname == module
+            for cspan in mc.changed:
+                if not is_target_mc or cspan.line_range != target.line_range:
+                    relevant_changes.append(self.to_code_span(cspan))
+
+        code_span = self.to_code_span(target)
+        relevant_unchanged = self.get_relevant_unchanged(
+            code_span, relevant_changes, target_usages
+        )
+
+        n_lines = code_span.line_range[1] - code_span.line_range[0]
+        prob = C3Problem(
+            code_span,
+            range(0, n_lines + 1),  # one additional line for appending
+            relevant_changes=relevant_changes,
+            relevant_unchanged=relevant_unchanged,
+            change_type=target.change.map(lambda _: None),
+            src_info=src_info,
+        )
+        return prob
+
+    def get_pre_spans(self, used: PyDefinition) -> list[ChangedCodeSpan]:
+        "Get the (pre-edit) spans for the given definition."
+        cspan_cache = self.cspan_cache
+        if used.full_name in cspan_cache:
+            return cspan_cache[used.full_name]
+        path = self.mod_hier.resolve_path(split_dots(used.full_name))
+        cspans = list[ChangedCodeSpan]()
+        if path is None or (jmod := self.module_map.get(path.module)) is None:
+            cspan_cache[used] = cspans
+            return cspans
+        scope = jmod.as_scope
+        elem = scope._search(path.path, used.start_pos[0])
+        func_scopes = list[ChangeScope]()
+        stmt_spans = list[StatementSpan]()
+        match elem:
+            case ChangeScope(tree=ptree.Function()):
+                func_scopes.append(elem)
+            case ChangeScope(tree=ptree.Class()):
+                # add all attrs and methods
+                stmt_spans.extend(elem.spans)
+                func_scopes.extend(
+                    s
+                    for s in elem.subscopes.values()
+                    if isinstance(s.tree, ptree.Function)
+                )
+            case StatementSpan():
+                stmt_spans.append(elem)
+
+        # add collapsed functions
+        for f_scope in func_scopes:
+            ancestors = f_scope.ancestors()
+            stmts = f_scope.spans[-1].statements
+            body_code = stmts[-1].get_code()
+            if len(stmts) > 1:
+                ellipsis = "    " * (len(ancestors) - 1) + "# ...\n"
+                body_code = ellipsis + body_code
+            cspan = ChangedCodeSpan(
+                [self.to_header(Modified.from_unchanged(s)) for s in ancestors],
+                TkArray.new(encode_lines_join(body_code)),
+                TkDelta.empty(),
+                f_scope.spans[-1].line_range,
+                f_scope.path.module,
+            )
+            cspans.append(cspan)
+
+        # add statement spans
+        for stmt_span in stmt_spans:
+            ancestors = stmt_span.scope.ancestors()
+            stmts = stmt_span.statements
+            match stmts:
+                case [
+                    ptree.PythonNode(
+                        type="simple_stmt",
+                        children=[ptree.String(), ptree.Newline()],
+                    ),
+                    *rest,
+                ]:
+                    if not rest:
+                        continue
+                    stmts = rest
+            body_code = "".join(s.get_code() for s in stmts).lstrip("\n")
+            cspan = ChangedCodeSpan(
+                [self.to_header(Modified.from_unchanged(s)) for s in ancestors],
+                TkArray.new(encode_lines_join(body_code)),
+                TkDelta.empty(),
+                stmt_span.line_range,
+                stmt_span.scope.path.module,
+            )
+            cspans.append(cspan)
+
+        cspan_cache[used] = cspans
+        return cspans
+
+    def get_relevant_unchanged(
+        self,
+        this_change: ChangedCodeSpan,
+        other_changes: Collection[ChangedCodeSpan],
+        line_usages: LineUsageAnalysis,
+    ):
+        module = this_change.module
+        # parent defs are also considered as used
+        parent_defs = [
+            PyDefinition(
+                PyFullName(f"{c.path.module}.{c.path.path}"),
+                (c.line_range[0], 0),
+                (c.line_range[1], 0),
+            )
+            for c in this_change.headers
+        ]
+        # immediate parents are more relevant
+        sorted_defs = list(reversed(parent_defs))
+        used_defs = set(sorted_defs)
+        all_lines = set(this_change.line_range.to_range())
+        all_lines.update(this_change.headers[-1].line_range.to_range())
+        for l in all_lines:
+            for pydef in line_usages.line2usages.get(l, set()):
+                if (
+                    pydef.full_name.startswith(module)
+                    and pydef.start_pos[0] in all_lines
+                ):
+                    # skip self references
+                    continue
+                if pydef not in used_defs:
+                    used_defs.add(pydef)
+                    sorted_defs.append(pydef)
+
+        # return unique cspans
+        seen = set[tuple[ModuleName, LineRange]]()
+        # we don't need to show the changed parts again
+        for cspan in (this_change, *other_changes):
+            seen.add((cspan.module, cspan.line_range))
+        result = list[ChangedCodeSpan]()
+        for used in sorted_defs:
+            for cspan in self.get_pre_spans(used):
+                key = (cspan.module, cspan.line_range)
+                if key not in seen:
+                    result.append(cspan)
+                    seen.add(key)
+        return result
+
+    def to_header(self, cs: Change[ChangeScope]) -> ChangedHeader:
+        path = cs.earlier.path
+        if (ch := self.header_cache.get(path)) is None:
+            header_change = cs.map(lambda s: s.header_code.strip("\n"))
+            ch = ChangedHeader(
+                TkArray.new(change_to_tokens(header_change)),
+                cs.earlier.tree.type,
+                cs.earlier.header_line_range,
+                cs.earlier.path,
+            )
+            self.header_cache[path] = ch
+        return ch
+
+    def to_code_span(self, span: ChangedSpan):
+        original, delta = line_diffs_to_original_delta(
+            change_to_line_diffs(span.change)
+        )
+        return ChangedCodeSpan(
+            headers=[self.to_header(cs) for cs in span.parent_scopes],
+            original=TkArray.new(encode_lines_join(original)),
+            delta=delta.to_tk_delta(),
+            line_range=span.line_range,
+            module=span.module,
+        )
 
 
 class C3ProblemTransform(ABC):
@@ -899,7 +945,6 @@ class JediUsageAnalyzer:
     def get_line_usages(
         self,
         script: jedi.Script,
-        proj_root: Path,
         lines_to_analyze: Collection[int],
         silent: bool = False,
     ):

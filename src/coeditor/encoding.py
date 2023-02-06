@@ -455,7 +455,7 @@ class TkDelta:
         return tuple(new_edit_lines)
 
     @staticmethod
-    def from_output_tks(tks: TokenSeq) -> "TkDelta":
+    def from_output_tks(lines: Sequence[int], tks: TokenSeq) -> "TkDelta":
         ad_tks = (Add_id, Del_id)
 
         def seg_to_tuple(seg: TokenSeq) -> tuple[TokenSeq]:
@@ -471,9 +471,8 @@ class TkDelta:
             return tuple(result)
 
         segs = output_ids_as_seqs(tks)
-        deltas = {
-            extra_id_to_number(k): seg_to_tuple(seg) for k, seg in segs.items() if seg
-        }
+        assert_eq(len(segs), len(lines))
+        deltas = {l: seg_to_tuple(seg) for l, seg in zip(lines, segs.values()) if seg}
         return TkDelta(deltas)
 
     def __bool__(self) -> bool:

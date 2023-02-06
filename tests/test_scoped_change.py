@@ -170,6 +170,29 @@ class TestChangedSpan:
             (Modified, 0),
         )
 
+    def test_jmodule_change(self):
+        code2 = dedent(
+            """\
+            import os
+
+            x = 1
+            y = x + 2
+
+            def f1():
+                global x
+                x *= 5
+                return x + 1
+
+            if __name__ == "__main__":
+                print(f1() + x + 1)
+            """
+        )
+
+        mod1 = JModule("code1", code_to_module(self.code1))
+        mod2 = JModule("code1", code_to_module(code2))
+        mc = JModuleChange.from_modules(Modified(mod1, mod2))
+        assert len(mc.changed) == 3
+
     def test_diff_size_update(self):
         code2 = dedent(
             """\

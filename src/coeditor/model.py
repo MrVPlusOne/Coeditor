@@ -1692,6 +1692,7 @@ class C3DataLoader:
     desc: str
     tqdm_args: dict | None = None
     chunk_size: int = 1000
+    workers: int = DefaultWorkers
 
     def __post_init__(self):
         n_batches, batch_stats = self.estimate_batch_stats()
@@ -1706,7 +1707,14 @@ class C3DataLoader:
         probs = list(probs)
         if self.transform is not None:
             # we can afford to store all transformed problems beforehand
-            probs = join_list(pmap(self.transform.transform, probs, chunksize=500))
+            probs = join_list(
+                pmap(
+                    self.transform.transform,
+                    probs,
+                    chunksize=500,
+                    max_workers=self.workers,
+                )
+            )
         if self.shuffle:
             # we need to shuffle after the transform to help serialization
             # this also mixes the problems better
@@ -1718,6 +1726,7 @@ class C3DataLoader:
                 self.tokenizer.tokenize_problem,
                 group,
                 tqdm_args={"disable": True},
+                max_workers=self.workers,
             )
 
     def estimate_batch_stats(self):
@@ -1777,28 +1786,30 @@ class C3DataLoader:
             tkn.max_ref_tks_sum, tkn.max_query_tks, tkn.max_output_tks
         )
 
+    @staticmethod
+    def pack_batch(probs: Sequence[TkC3Problem]):
+        assert probs, "Empty batch found"
+        input_ids = [x.input_tks for x in probs]
+        labels = [x.output_tks for x in probs]
+        refs = [[y.tolist() for y in x.references] for x in probs]
+        id2ref = {id(ref): ref for row in refs for ref in row}
+        references = [id2ref[x] for x in id2ref]
+        id2order = {x: i for i, x in enumerate(id2ref)}
+        query_ref_list = [[id2order[id(ref)] for ref in row] for row in refs]
+        return {
+            "input_ids": input_ids,
+            "references": references,
+            "query_ref_list": query_ref_list,
+            "labels": labels,
+        }
+
     def _problems_to_batches(self, problems: Iterable[TkC3Problem]) -> Iterable[dict]:
-        def pack_batch(rows: list[dict]):
-            assert rows, "empty batch found"
-            input_ids = [x["input_tks"] for x in rows]
-            labels = [x["output_tks"] for x in rows]
-            refs = [x["references"] for x in rows]
-            id2ref = {id(ref): ref for row in refs for ref in row}
-            references = [id2ref[x] for x in id2ref]
-            id2order = {x: i for i, x in enumerate(id2ref)}
-            query_ref_list = [[id2order[id(ref)] for ref in row] for row in refs]
-            return {
-                "input_ids": input_ids,
-                "references": references,
-                "query_ref_list": query_ref_list,
-                "labels": labels,
-            }
 
         tkn = self.tokenizer
         cost_limit = self._cost_limit()
         warned_batch_size = False
         # sample references for each query
-        current_batch = []
+        current_batch = list[TkC3Problem]()
         current_cost = 0
         for tk_prob in problems:
             all_refs = [x[1] for x in tk_prob.named_references]
@@ -1810,11 +1821,9 @@ class C3DataLoader:
                 query_size=len(input_tks),
                 output_size=len(output_tks),
             )
-            row = {
-                "input_tks": input_tks,
-                "output_tks": output_tks,
-                "references": [x.tolist() for x in all_refs],
-            }
+            tk_prob = dataclasses.replace(
+                tk_prob, input_tks=input_tks, output_tks=output_tks
+            )
             if cost > cost_limit and not warned_batch_size:
                 warned_batch_size = True
                 warnings.warn("Batch cost limit is too small.")
@@ -1822,14 +1831,14 @@ class C3DataLoader:
                 cost + current_cost <= cost_limit
                 and len(current_batch) < self.batch_args.max_queries
             ):
-                current_batch.append(row)
+                current_batch.append(tk_prob)
                 current_cost += cost
             else:
-                yield pack_batch(current_batch)
-                current_batch = [row]
+                yield self.pack_batch(current_batch)
+                current_batch = [tk_prob]
                 current_cost = cost
         if current_batch:
-            yield pack_batch(current_batch)
+            yield self.pack_batch(current_batch)
 
 
 def pad_token_seqs(seqs: Sequence[TokenSeq], pad_id=None) -> LongTensor:

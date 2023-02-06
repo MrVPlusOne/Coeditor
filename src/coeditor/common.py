@@ -25,6 +25,8 @@ from IPython.display import HTML, display
 from tqdm import tqdm
 
 from ._utils import (
+    CodePosition,
+    CodeRange,
     DefaultWorkers,
     PickleCache,
     TimeLogger,

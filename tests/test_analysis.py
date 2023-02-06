@@ -26,9 +26,7 @@ def test_anlayzing_defs():
     analyzer = JediUsageAnalyzer()
     project = jedi.Project(path=testcase_root, added_sys_path=[proj_root() / "src"])
     script = jedi.Script(path=testcase_root / "defs.py", project=project)
-    analysis = analyzer.get_line_usages(
-        script, testcase_root, range(0, 46), silent=True
-    )
+    analysis = analyzer.get_line_usages(script, range(0, 46), silent=True)
 
     if analyzer.error_counts:
         raise RuntimeError(f"Errors found: {analyzer.error_counts}")
@@ -94,9 +92,7 @@ def test_anlayzing_usages():
     analyzer = JediUsageAnalyzer()
     project = jedi.Project(path=testcase_root, added_sys_path=[proj_root() / "src"])
     script = jedi.Script(path=testcase_root / "usages.py", project=project)
-    analysis = analyzer.get_line_usages(
-        script, testcase_root, range(0, 63), silent=True
-    )
+    analysis = analyzer.get_line_usages(script, range(0, 63), silent=True)
 
     if analyzer.error_counts:
         raise RuntimeError(f"Errors found: {analyzer.error_counts}")
