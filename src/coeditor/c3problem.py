@@ -5,7 +5,6 @@ import jedi.cache
 import jedi.parser_utils
 import parso
 import parso.cache
-from cachetools import LRUCache
 from jedi.api import classes, convert_names, helpers
 from parso.python import tree
 from parso.python import tree as ptree
@@ -714,7 +713,7 @@ class C3ProblemTokenizer:
         return cls(**args)
 
     def __post_init__(self):
-        self._offset_cache = LRUCache[int, TkArray](maxsize=100)
+        self._offset_cache = dict[int, TkArray]()
 
     def tokenize_problem(
         self,
