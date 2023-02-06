@@ -18,7 +18,7 @@ from coeditor.c3problem import (
 )
 from coeditor.change import Added, Change, Deleted, Modified, default_show_diff
 from coeditor.common import *
-from coeditor.encoding import TkDelta, tokens_to_change
+from coeditor.encoding import TkDelta, input_lines_from_tks, tokens_to_change
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -252,6 +252,7 @@ class ServiceResponse:
     target_file: str
     edit_start: tuple[int, int]
     edit_end: tuple[int, int]
+    target_lines: Sequence[int]
     input_code: str
     suggestions: list[EditSuggestion]
 
@@ -267,6 +268,7 @@ class ServiceResponse:
     def print(self, file=sys.stdout):
         print(f"Target file: {self.target_file}", file=file)
         print(f"Edit range: {self.edit_start} - {self.edit_end}", file=file)
+        print(f"Target lines: {self.target_lines}", file=file)
         for i, s in enumerate(self.suggestions):
             print(
                 f"\t--------------- Suggestion {i} (score: {s.score:.3g}) ---------------",
@@ -324,6 +326,9 @@ class EditPredictionService:
 
         with timed("tokenize c3 problem"):
             tk_prob = self.c3_tkn.tokenize_problem(problem)
+            target_begin = problem.span.line_range[0]
+            target_lines = input_lines_from_tks(tk_prob.main_input.tolist())
+            target_lines = [target_begin + l for l in target_lines]
             batch = C3DataLoader.pack_batch([tk_prob])
             original = problem.span.original.tolist()
 
@@ -379,6 +384,7 @@ class EditPredictionService:
             target_file=file.as_posix(),
             edit_start=(span.line_range[0], 0),
             edit_end=(span.line_range[1], 0),
+            target_lines=target_lines,
             input_code=old_code,
             suggestions=suggestions,
         )

@@ -2,7 +2,6 @@ import copy
 import dataclasses
 import logging
 import shutil
-from textwrap import indent
 
 import torch
 import transformers
@@ -42,17 +41,12 @@ from coeditor.encoding import (
     BOS_id,
     Del_id,
     EOS_id,
-    Newline_id,
     PAD_id,
     TkDelta,
     _Tokenizer,
-    apply_output_tks_to_change,
-    change_tks_to_original_delta,
-    change_to_tokens,
-    decode_tokens,
     encode_lines_join,
     get_tk_id,
-    is_extra_id,
+    inline_output_tokens,
     output_ids_as_seqs,
     random_extra_id_map,
     tokens_to_change,
@@ -219,7 +213,8 @@ class RetrievalDecodingResult:
     def show_prediction(cls, prob: C3Problem, pred: RetrievalModelPrediction) -> str:
         span = prob.span
         tk_prob = TkC3Problem(
-            input=TkArray.new(pred["input_ids"]),
+            main_input=TkArray.new(pred["input_ids"]),
+            header=TkArray.new([]),
             output=TkArray.new(pred["labels"]),
             path=span.headers[-1].path,
             change_type=prob.change_type,
@@ -516,7 +511,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         with timed("assemble changes"):
             pred_changes = list[Modified[str]]()
             for change_tks, out in zip(originals, out_tks):
-                pred = apply_output_tks_to_change(change_tks, 0, out)
+                pred = tokens_to_change(inline_output_tokens(change_tks, out))
                 pred_changes.append(pred)
         assert_eq(len(pred_changes), len(out_tks), len(pred_scores))
 

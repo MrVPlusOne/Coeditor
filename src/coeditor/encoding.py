@@ -455,7 +455,9 @@ class TkDelta:
         return tuple(new_edit_lines)
 
     @staticmethod
-    def from_output_tks(lines: Sequence[int], tks: TokenSeq) -> "TkDelta":
+    def from_output_tks(
+        lines: Sequence[int], tks: TokenSeq, allow_truncated_tks: bool = True
+    ) -> "TkDelta":
         ad_tks = (Add_id, Del_id)
 
         def remove_newline(seg: TokenSeq):
@@ -476,7 +478,8 @@ class TkDelta:
             return tuple(remove_newline(x) for x in result)
 
         segs = output_ids_as_seqs(tks)
-        assert_eq(len(segs), len(lines))
+        if not allow_truncated_tks:
+            assert_eq(len(segs), len(lines))
         deltas = {l: seg_to_tuple(seg) for l, seg in zip(lines, segs.values()) if seg}
         return TkDelta(deltas)
 
@@ -593,6 +596,19 @@ def code_to_input(code_tks: TokenSeq) -> TokenSeq:
             input_seq.append(Newline_id)
 
     return input_seq
+
+
+def input_lines_from_tks(input_tks: TokenSeq) -> list[int]:
+    """compute the lines in the input to be edited"""
+    input_lines = list[int]()
+    offset = 0
+    for line in split_list(input_tks, Newline_id):
+        if line and line[0] == Del_id:
+            continue
+        if line and is_extra_id(line[0]):
+            input_lines.append(offset)
+        offset += 1
+    return input_lines
 
 
 def check_output_tokens(tks: TokenSeq) -> bool:
@@ -1081,34 +1097,3 @@ def truncate_output_tks(in_tks: TokenSeq, out_tks: TokenSeq) -> TokenSeq:
                 out.append(k)
                 out.extend(out_segs[k])
         return out
-
-
-def change_tks_to_query_context(change_tks: TokenSeq, respect_lines: int):
-    lines = split_list(change_tks, Newline_id)
-    spliter = 0
-    result_lines = 0
-    for i, l in enumerate(lines):
-        if l and l[0] == Del_id:
-            pass
-        else:
-            result_lines += 1
-        if result_lines <= respect_lines:
-            spliter = i + 1
-
-    context = join_list(lines[:spliter], Newline_id)
-    query = change_tks_to_input_output(join_list(lines[spliter:], Newline_id))
-    return query, context
-
-
-def apply_output_tks_to_change(
-    change_tks: TokenSeq,
-    respect_lines: int,
-    out_tks: TokenSeq,
-) -> Modified[str]:
-    (input_tks, _), context = change_tks_to_query_context(change_tks, respect_lines)
-    change_tks = (
-        context
-        + [Newline_id]
-        + inline_output_tokens(input_tks, out_tks, leave_unpredicted=False)
-    )
-    return tokens_to_change(change_tks)

@@ -630,7 +630,8 @@ class C3ProblemChangeDropout(C3ProblemTransform):
 @dataclass(frozen=True)
 class TkC3Problem(TokenizedEdit):
     "Tokenized contextual code change prediction problem."
-    input: TkArray
+    main_input: TkArray
+    header: TkArray
     output: TkArray
     path: ProjectPath
     change_type: Change[None]
@@ -648,7 +649,7 @@ class TkC3Problem(TokenizedEdit):
 
     @property
     def input_tks(self) -> TokenSeq:
-        return self.input.tolist()
+        return self.header.tolist() + self.main_input.tolist()
 
     @property
     def output_tks(self) -> TokenSeq:
@@ -821,7 +822,8 @@ class C3ProblemTokenizer:
             kept_refs.append((name, ref))
 
         return TkC3Problem(
-            TkArray.new(scope_tks + chunk_input),
+            TkArray.new(chunk_input),
+            TkArray.new(scope_tks),
             TkArray.new(chunk_output),
             path=span.headers[-1].path,
             change_type=problem.change_type,
