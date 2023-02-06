@@ -305,6 +305,7 @@ class C3GeneratorCache:
     def create_problem(
         self,
         target: ChangedSpan,
+        edit_lines: Sequence[int] | None,
         changed: Mapping[ModuleName, JModuleChange],
         target_usages: LineUsageAnalysis,
         src_info: SrcInfo,
@@ -321,14 +322,23 @@ class C3GeneratorCache:
                     relevant_changes.append(self.to_code_span(cspan))
 
         code_span = self.to_code_span(target)
+        changed_code = code_span.delta.apply_to_change(code_span.original.tolist())
+        if edit_lines is None:
+            edit_lines = list[int]()
+            for i, tks in enumerate(split_list(changed_code, Newline_id)):
+                if tks and tks[0] == Del_id:
+                    continue
+                edit_lines.append(i)
+        code_span = dataclasses.replace(
+            code_span, original=TkArray.new(changed_code), delta=TkDelta.empty()
+        )
         relevant_unchanged = self.get_relevant_unchanged(
             code_span, relevant_changes, target_usages
         )
 
-        n_lines = code_span.line_range[1] - code_span.line_range[0]
         prob = C3Problem(
             code_span,
-            range(0, n_lines + 1),  # one additional line for appending
+            edit_lines,  # one additional line for appending
             relevant_changes=relevant_changes,
             relevant_unchanged=relevant_unchanged,
             change_type=target.change.map(lambda _: None),

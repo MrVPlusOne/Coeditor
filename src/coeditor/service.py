@@ -120,7 +120,7 @@ class ChangeDetector:
     def get_problem(
         self,
         target_file: RelPath,
-        target_line: int,
+        target_lines: Sequence[int] | int,
     ) -> C3Problem:
         def is_src(path_s: str) -> bool:
             path = Path(path_s)
@@ -128,6 +128,12 @@ class ChangeDetector:
                 p not in self.ignore_dirs for p in path.parts
             )
 
+        if isinstance(target_lines, int):
+            first_line = target_lines
+            edit_lines = None
+        else:
+            first_line = target_lines[0]
+            edit_lines = target_lines
         changed_files = run_command(
             ["git", "status", "--porcelain"], cwd=self.project
         ).splitlines()
@@ -159,7 +165,8 @@ class ChangeDetector:
                 if is_src(path2):
                     path_changes.add(Added(path2))
 
-        changed = dict[ModuleName, JModuleChange]()
+        # use inverse changes so that we can locate spans using their current locations
+        rev_changed = dict[ModuleName, JModuleChange]()
         for path_change in path_changes:
             path = self.project / path_change.earlier
             rel_path = to_rel_path(path.relative_to(self.project))
@@ -172,37 +179,45 @@ class ChangeDetector:
             match path_change:
                 case Added():
                     mod = self.get_current_module(rel_path)
-                    changed[mod.mname] = JModuleChange.from_modules(Added(mod))
+                    rev_changed[mod.mname] = JModuleChange.from_modules(
+                        Deleted(mod), only_ast_changes=False
+                    )
                 case Deleted():
                     mod = self._get_index_module(rel_path)
-                    changed[mod.mname] = JModuleChange.from_modules(Deleted(mod))
+                    rev_changed[mod.mname] = JModuleChange.from_modules(
+                        Added(mod), only_ast_changes=False
+                    )
                 case Modified(path1, path2):
                     assert path1 == path2
                     mod_old = self._get_index_module(rel_path)
                     mod_new = self.get_current_module(rel_path)
-                    changed[mod_new.mname] = JModuleChange.from_modules(
-                        Modified(mod_old, mod_new)
+                    rev_changed[mod_new.mname] = JModuleChange.from_modules(
+                        Modified(mod_new, mod_old), only_ast_changes=False
                     )
         modules = self.get_current_modules()
         gcache = C3GeneratorCache({m.mname: m for m in modules.values()})
 
         target_mod = self.get_current_module(target_file)
-        span = target_mod.as_scope.search_span_by_line(target_line)
+        span = target_mod.as_scope.search_span_by_line(first_line)
         if span is None:
             print_err("Target scope:")
             print_err(target_mod.as_scope)
-            raise ValueError(f"Could not find a statement span at line {target_line}.")
+            raise ValueError(f"Could not find a statement span at line {first_line}.")
 
-        if target_mod.mname not in changed:
-            changed[target_mod.mname] = JModuleChange(
+        if target_mod.mname not in rev_changed:
+            print(f"Target module '{target_mod.mname}' has not changed.")
+            rev_changed[target_mod.mname] = JModuleChange(
                 Modified.from_unchanged(target_mod), []
             )
 
         cspans = [
-            c for c in changed[target_mod.mname].changed if target_line in c.line_range
+            c
+            for c in rev_changed[target_mod.mname].changed
+            if first_line in c.line_range
         ]
         if len(cspans) != 1:
-            # Create a fake change for the target module if it wasn't changed.
+            # Create a trivial change for the target module if it wasn't changed.
+            print(f"Target span has not changed. Creating a trivial change.")
             parents = [Modified.from_unchanged(s) for s in span.scope.ancestors()]
             cspan = ChangedSpan(
                 Modified.from_unchanged(span.code), parents, span.line_range
@@ -218,7 +233,11 @@ class ChangeDetector:
                 script, lines_to_analyze, silent=True
             )
         src_info = SrcInfo(project=str(self.project), commit=None)
-        prob = gcache.create_problem(cspan, changed, target_usages, src_info)
+        changed = {m: c.inverse() for m, c in rev_changed.items()}
+        cspan = cspan.inverse()
+        prob = gcache.create_problem(
+            cspan, edit_lines, changed, target_usages, src_info
+        )
         return prob
 
 
@@ -253,7 +272,7 @@ class ServiceResponse:
     target_file: str
     edit_start: tuple[int, int]
     edit_end: tuple[int, int]
-    old_code: str
+    input_code: str
     suggestions: list[EditSuggestion]
 
     def to_json(self):
@@ -261,7 +280,7 @@ class ServiceResponse:
             "target_file": self.target_file,
             "edit_start": self.edit_start,
             "edit_end": self.edit_end,
-            "old_code": self.old_code,
+            "old_code": self.input_code,
             "suggestions": [s.to_json() for s in self.suggestions],
         }
 
@@ -274,7 +293,8 @@ class ServiceResponse:
                 file=file,
             )
             print(textwrap.indent(s.change_preview, "\t"), file=file)
-        print(f"original code:", file=file)
+        print(f"Input code:", file=file)
+        print(self.input_code, file=file)
 
     def __str__(self) -> str:
         # use the print above
@@ -309,7 +329,7 @@ class EditPredictionService:
     def suggest_edit(
         self,
         file: Path,
-        line: int,
+        edit_lines: Sequence[int],
         log_dir: Path | None = Path(".coeditor_logs"),
     ) -> ServiceResponse:
         timed = self.tlogger.timed
@@ -320,7 +340,7 @@ class EditPredictionService:
         file = to_rel_path(file)
 
         with timed("get c3 problem"):
-            problem = self.detector.get_problem(file, line)
+            problem = self.detector.get_problem(file, edit_lines)
 
         with timed("tokenize c3 problem"):
             tk_prob = self.c3_tkn.tokenize_problem(problem)
@@ -379,22 +399,9 @@ class EditPredictionService:
             target_file=file.as_posix(),
             edit_start=(span.line_range[0], 0),
             edit_end=(span.line_range[1], 0),
-            old_code=old_code,
+            input_code=old_code,
             suggestions=suggestions,
         )
-
-    def preview_changes(
-        self,
-        change: Modified[str],
-        respect_lines: int,
-    ) -> str:
-        change_tks = change_to_tokens(change)
-        (input_tks, output_tks), _ = change_tks_to_query_context(
-            change_tks, respect_lines
-        )
-        new_change = tokens_to_change(inline_output_tokens(input_tks, output_tks))
-        change_str = default_show_diff(new_change.before, new_change.after)
-        return change_str
 
     @staticmethod
     def apply_edit_to_elem(
@@ -405,7 +412,8 @@ class EditPredictionService:
         delta = TkDelta.from_output_tks(problem.edit_lines, out_tks)
         new_change_tks = delta.apply_to_change(change_tks)
         new_change = tokens_to_change(new_change_tks)
-        preview = default_show_diff(new_change.before, new_change.after)
+        current_code = tokens_to_change(change_tks).after
+        preview = default_show_diff(current_code, new_change.after)
         return new_change, preview
 
 

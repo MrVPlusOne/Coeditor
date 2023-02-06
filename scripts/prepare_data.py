@@ -11,7 +11,7 @@ if __name__ == "__main__":
     transform = C3ProblemChangeDropout()
     with run_long_task(f"Preparing dataset {dataset_name} with encoder {generator}"):
         problems = make_or_load_dataset(
-            dataset_name, generator, transform, remake_problems=True
+            dataset_name, generator, transform, remake_problems=False
         )
 
     tokenizer = C3ProblemTokenizer()

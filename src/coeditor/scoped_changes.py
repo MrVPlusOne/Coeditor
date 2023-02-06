@@ -275,6 +275,13 @@ class ChangedSpan:
     parent_scopes: Sequence[Change[ChangeScope]]
     line_range: LineRange
 
+    def inverse(self) -> "ChangedSpan":
+        return ChangedSpan(
+            self.change.inverse(),
+            [c.inverse() for c in self.parent_scopes],
+            self.line_range,
+        )
+
     @property
     def header_line_range(self) -> LineRange:
         parent_scope = self.parent_scopes[-1].earlier
@@ -329,12 +336,18 @@ class JModuleChange:
     def __repr__(self) -> str:
         return f"JModuleChange({self.changed})"
 
+    def inverse(self) -> Self:
+        "Create the inverse change."
+        return JModuleChange(
+            self.module_change.inverse(), [span.inverse() for span in self.changed]
+        )
+
     @staticmethod
-    def from_modules(module_change: Change[JModule]):
+    def from_modules(module_change: Change[JModule], only_ast_changes: bool = True):
         "Compute the change spans from two versions of the same module."
         with _tlogger.timed("JModuleChange.from_modules"):
             changed = get_changed_spans(
-                module_change.map(lambda m: m.as_scope), tuple()
+                module_change.map(lambda m: m.as_scope), tuple(), only_ast_changes
             )
             return JModuleChange(module_change, changed)
 
@@ -472,7 +485,7 @@ def _deep_copy_subset_(dict: dict[T1, T2], keys: Collection[T1]) -> dict[T1, T2]
 _Second = float
 
 
-def _parse_module_script(project: Path, path: Path):
+def _parse_module_script(project: jedi.Project, path: Path):
     assert path.is_absolute(), f"Path is not absolute: {path=}"
     script = jedi.Script(path=path, project=project)
     mcontext = script._get_module_context()
@@ -480,8 +493,8 @@ def _parse_module_script(project: Path, path: Path):
     mname = cast(str, mcontext.py__name__())
     if mname.startswith("src."):
         e = ValueError(f"Bad module name: {mname}")
-        files = list(project.iterdir())
-        print_err(f"project: {project}", file=sys.stderr)
+        files = list(project.path.iterdir())
+        print_err(f"project: {project.path}", file=sys.stderr)
         print_err(f"files in root: {files}", file=sys.stderr)
         raise e
     m = script._module_node
@@ -516,7 +529,7 @@ def _edits_from_commit_history(
 
     def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
-            m, s = _parse_module_script(project, path)
+            m, s = _parse_module_script(proj, path)
             scripts[to_rel_path(path.relative_to(proj._path))] = s
             return m
 
@@ -670,6 +683,7 @@ def _edits_from_commit_history(
 def get_changed_spans(
     scope_change: Change[ChangeScope],
     parent_changes: tuple[Change[ChangeScope], ...] = (),
+    only_ast_changes: bool = True,
 ) -> list[ChangedSpan]:
     """
     Extract the change spans from scope change.
@@ -678,6 +692,10 @@ def get_changed_spans(
         by concatenating all the regions before and after the edit
         (and hiding all the sub spans such as class methods), then map the changes
         to each line back to the original regions.
+
+    ## Args:
+    - `only_ast_changes`: if True, will skip the changes that are just caused by
+    comments or formatting changes.
     """
 
     def get_modified_spans(
@@ -685,7 +703,7 @@ def get_changed_spans(
         new_scope: ChangeScope,
         parent_changes: Sequence[Change[ChangeScope]],
     ) -> Iterable[ChangedSpan]:
-        if code_equal(old_scope.spans_code, new_scope.spans_code):
+        if only_ast_changes and code_equal(old_scope.spans_code, new_scope.spans_code):
             return
         diffs = change_to_line_diffs(
             Modified(old_scope.spans_code, new_scope.spans_code)

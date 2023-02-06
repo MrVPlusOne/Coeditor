@@ -30,6 +30,9 @@ class Added(_ChangeBase[E1]):
     def map(self, f: Callable[[E1], T2]) -> "Added[T2]":
         return Added(f(self.after))
 
+    def inverse(self) -> "Deleted[E1]":
+        return Deleted(self.after)
+
     @property
     def earlier(self) -> E1:
         return self.after
@@ -53,6 +56,9 @@ class Deleted(_ChangeBase[E1]):
 
     def map(self, f: Callable[[E1], T2]) -> "Deleted[T2]":
         return Deleted(f(self.before))
+
+    def inverse(self) -> "Added[E1]":
+        return Added(self.before)
 
     @property
     def earlier(self) -> E1:
@@ -83,6 +89,9 @@ class Modified(_ChangeBase[E1]):
             return Modified.from_unchanged(f(self.before))
         else:
             return Modified(f(self.before), f(self.after))
+
+    def inverse(self) -> "Modified[E1]":
+        return Modified(self.after, self.before)
 
     @property
     def earlier(self) -> E1:

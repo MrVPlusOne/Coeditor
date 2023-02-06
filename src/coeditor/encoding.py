@@ -458,6 +458,11 @@ class TkDelta:
     def from_output_tks(lines: Sequence[int], tks: TokenSeq) -> "TkDelta":
         ad_tks = (Add_id, Del_id)
 
+        def remove_newline(seg: TokenSeq):
+            if seg and seg[-1] == Newline_id:
+                del seg[-1]
+            return seg
+
         def seg_to_tuple(seg: TokenSeq) -> tuple[TokenSeq]:
             result = list[TokenSeq]()
             ptr = 0
@@ -468,7 +473,7 @@ class TkDelta:
                     ptr = i
             if ptr < len(seg) and seg[ptr] in ad_tks:
                 result.append(seg[ptr:])
-            return tuple(result)
+            return tuple(remove_newline(x) for x in result)
 
         segs = output_ids_as_seqs(tks)
         assert_eq(len(segs), len(lines))
