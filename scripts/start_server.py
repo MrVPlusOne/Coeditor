@@ -2,46 +2,39 @@ import traceback
 
 from jsonrpcserver import Error, InvalidParams, Result, Success, method, serve
 
-from coeditor.api import (
-    BatchArgs,
-    ChangeDetectionConfig,
-    DecodingArgs,
-    EditPredictionService,
-    QueryRefEditEncoder,
-)
 from coeditor.common import *
 from coeditor.model import AttentionMode, RetrievalEditorModel
+from coeditor.service import (
+    BatchArgs,
+    ChangeDetector,
+    DecodingArgs,
+    EditPredictionService,
+)
 
 
 def start_server(
     device, port: int, drop_comments: bool = False, print_stats: bool = True
 ):
     # this newer model is trained with comments
-    model_path = "MrVPlusOne/coeditor-xl-bi-request-stub-comments-v4"
+    model_path = "MrVPlusOne/coeditor-xl-c3-dropout-v1.4"
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)
     batch_args = BatchArgs.service_default()
+    dec_args = DecodingArgs(do_sample=False, num_beams=4, length_penalty=0.0)
+
     services = dict[Path, EditPredictionService]()
 
     @method
     def suggestEdits(project: str, file: str, line: int, writeLogs: bool):
         target_dir = Path(project).resolve()
         if (service := services.get(target_dir)) is None:
+            detector = ChangeDetector(target_dir)
             service = EditPredictionService(
-                target_dir,
+                detector,
                 model,
                 batch_args=batch_args,
-                encoder=QueryRefEditEncoder(
-                    max_ref_tks=batch_args.max_ref_tks,
-                    max_query_tks=batch_args.max_query_tks,
-                    max_output_tks=batch_args.max_output_tks,
-                ),
-                dec_args=DecodingArgs(do_sample=False, num_beams=8),
-                # dec_args=DecodingArgs(
-                #     do_sample=True, top_p=0.95, marginalize_samples=20
-                # ),
-                config=ChangeDetectionConfig(drop_comments=drop_comments),
+                dec_args=dec_args,
             )
             print(f"Service created for project: {target_dir}")
             services[target_dir] = service

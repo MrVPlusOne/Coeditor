@@ -1,43 +1,24 @@
 # End-user API as an editing suggestion tool.
 
 import io
-import logging
 import sys
 import textwrap
 
 import jedi
 import parso
 import torch
-from jedi.inference.context import ModuleContext
 from parso.python import tree as ptree
 
-from coeditor._utils import add_line_numbers
 from coeditor.c3problem import (
     C3GeneratorCache,
     C3Problem,
-    C3ProblemGenerator,
     C3ProblemTokenizer,
-    ChangedCodeSpan,
     JediUsageAnalyzer,
     SrcInfo,
 )
 from coeditor.change import Added, Change, Deleted, Modified, default_show_diff
 from coeditor.common import *
-from coeditor.dataset import C3CombinedEncoder
-from coeditor.encoding import (
-    Add_id,
-    Del_id,
-    TkDelta,
-    apply_output_tks_to_change,
-    change_tks_to_query_context,
-    change_to_tokens,
-    extra_id_to_number,
-    get_extra_id,
-    inline_output_tokens,
-    is_extra_id,
-    output_ids_as_seqs,
-    tokens_to_change,
-)
+from coeditor.encoding import TkDelta, tokens_to_change
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -51,7 +32,6 @@ from coeditor.scoped_changes import (
     DefaultIgnoreDirs,
     JModule,
     JModuleChange,
-    ProjectState,
     get_python_files,
 )
 
@@ -329,7 +309,7 @@ class EditPredictionService:
     def suggest_edit(
         self,
         file: Path,
-        edit_lines: Sequence[int],
+        edit_lines: Sequence[int] | int,
         log_dir: Path | None = Path(".coeditor_logs"),
     ) -> ServiceResponse:
         timed = self.tlogger.timed
