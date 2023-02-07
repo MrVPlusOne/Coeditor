@@ -14,6 +14,7 @@ from coeditor._utils import scalar_stats
 from .change import Added, Change, Modified, show_change
 from .common import *
 from .encoding import (
+    Add_id,
     Del_id,
     Newline_id,
     TkDelta,
@@ -91,8 +92,8 @@ class SrcInfo(TypedDict):
 class C3Problem:
     "Contextual code change prediction problem."
     span: ChangedCodeSpan
-    # the lines to be edited, reletive to the start of the span.
-    edit_lines: Sequence[int]
+    # The line ids in the change tks that should be edited
+    edit_line_ids: Sequence[int]
     # most relevant to least relevant
     relevant_changes: Sequence[ChangedCodeSpan]
     # most relevant to least relevant
@@ -121,8 +122,23 @@ class C3Problem:
         print_sections(
             ("summary", self.summary()),
             ("main change", decode_tokens(main_change)),
-            ("edit_lines", str(self.edit_lines)),
+            ("edit_line_ids", str(self.edit_line_ids)),
         )
+
+    def line_ids_to_input_lines(self, line_ids: Sequence[int]) -> Sequence[int]:
+        """Convert the edit lines (which are line ids including deleted lines) into
+        normal line numbers that do not include deleted lines."""
+        change_tks = self.span.delta.apply_to_change(self.span.original.tolist())
+        input_l = self.span.line_range[0]
+        input_lines = list[int]()
+        for i, tks in enumerate(split_list(change_tks, Newline_id)):
+            if tks and tks[0] == Del_id:
+                continue
+            if i in line_ids:
+                input_lines.append(input_l)
+            input_l += 1
+
+        return input_lines
 
 
 PyFullName = NewType("PyFullName", str)
@@ -160,7 +176,7 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
-    - v2.6: fix missing changes in `JModuleChanges`.
+    - v2.6: fix missing changes in `JModuleChanges`. Rename to edit_line_ids.
     - v2.5: fix newline encoding bug.
     - v2.4: fix buggy encoding of `Added` and `Deleted` changes.
     - v2.3: always generate problems with full editing range and move the problem
@@ -304,7 +320,7 @@ class C3GeneratorCache:
     def create_problem(
         self,
         target: ChangedSpan,
-        edit_lines: Sequence[int] | None,
+        target_lines: Sequence[int],
         changed: Mapping[ModuleName, JModuleChange],
         target_usages: LineUsageAnalysis,
         src_info: SrcInfo,
@@ -322,12 +338,15 @@ class C3GeneratorCache:
 
         code_span = self.to_code_span(target)
         changed_code = code_span.delta.apply_to_change(code_span.original.tolist())
-        if edit_lines is None:
-            edit_lines = list[int]()
-            for i, tks in enumerate(split_list(changed_code, Newline_id)):
-                if tks and tks[0] == Del_id:
-                    continue
-                edit_lines.append(i)
+        target_set = set(target_lines)
+        line_ids = list[int]()
+        input_l = target.line_range[0]
+        for i, tks in enumerate(split_list(changed_code, Newline_id)):
+            if tks and tks[0] == Del_id:
+                continue
+            if input_l in target_set:
+                line_ids.append(i)
+            input_l += 1
         code_span = dataclasses.replace(
             code_span, original=TkArray.new(changed_code), delta=TkDelta.empty()
         )
@@ -337,7 +356,7 @@ class C3GeneratorCache:
 
         prob = C3Problem(
             code_span,
-            edit_lines,  # one additional line for appending
+            line_ids,
             relevant_changes=relevant_changes,
             relevant_unchanged=relevant_unchanged,
             change_type=target.change.map(lambda _: None),
@@ -507,7 +526,7 @@ class C3ProblemSimpleSplit(C3ProblemTransform):
 
     def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
         delta = prob.span.delta
-        l_range = prob.edit_lines
+        l_range = prob.edit_line_ids
         assert isinstance(l_range, range)
         start, stop = l_range.start, l_range.stop
         problems = list[C3Problem]()
@@ -554,7 +573,7 @@ class C3ProblemChangeDropout(C3ProblemTransform):
     def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
         original = prob.span.original
         delta = prob.span.delta
-        l_range = prob.edit_lines
+        l_range = prob.edit_line_ids
         assert isinstance(l_range, range)
         start, stop = l_range.start, l_range.stop
 
@@ -724,7 +743,7 @@ class C3ProblemTokenizer:
         original: TokenSeq = span.original.tolist()
         tk_delta: TkDelta = span.delta
         origin_lines = split_list(original, Newline_id)
-        edit_start = problem.edit_lines[0]
+        edit_start = problem.edit_line_ids[0]
         scope_tks = self._encode_headers(span.headers, 0)
         input_limit = self.max_query_tks - len(scope_tks)
 
@@ -732,7 +751,7 @@ class C3ProblemTokenizer:
         chunk_output = TokenSeq()
         last_line = edit_start
 
-        for i, l in enumerate(problem.edit_lines):
+        for i, l in enumerate(problem.edit_line_ids):
             for line in origin_lines[last_line + 1 : l]:
                 chunk_input.extend(line)
                 chunk_input.append(Newline_id)

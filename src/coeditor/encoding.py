@@ -598,19 +598,6 @@ def code_to_input(code_tks: TokenSeq) -> TokenSeq:
     return input_seq
 
 
-def input_lines_from_tks(input_tks: TokenSeq) -> list[int]:
-    """compute the lines in the input to be edited"""
-    input_lines = list[int]()
-    offset = 0
-    for line in split_list(input_tks, Newline_id):
-        if line and line[0] == Del_id:
-            continue
-        if line and is_extra_id(line[0]):
-            input_lines.append(offset)
-        offset += 1
-    return input_lines
-
-
 def check_output_tokens(tks: TokenSeq) -> bool:
     """Check if a token sequence is a valid output of CodeT5."""
     for i, tk in enumerate(tks):

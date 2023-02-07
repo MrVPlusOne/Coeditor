@@ -12,9 +12,7 @@ from coeditor.service import (
 )
 
 
-def start_server(
-    device, port: int, drop_comments: bool = False, print_stats: bool = True
-):
+def start_server(device, port: int, print_stats: bool = True):
     # this newer model is trained with comments
     model_path = "MrVPlusOne/coeditor-xl-c3-dropout-v1.4"
     model = RetrievalEditorModel.load(model_path)
@@ -57,7 +55,7 @@ def start_server(
             traceback.print_exception(e)
             return Error(code=1, message=repr(e))
 
-    print(f"Starting suggestion server ({drop_comments=}) at localhost:{port}")
+    print(f"Starting suggestion server at localhost:{port}")
     serve("localhost", port)
 
 

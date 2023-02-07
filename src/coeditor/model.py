@@ -174,12 +174,12 @@ class RetrievalDecodingResult:
         for i, mp in enumerate(self.predictions):
             prob = self.problems[i]
             original = prob.span.original.tolist()
-            pred_delta = TkDelta.from_output_tks(prob.edit_lines, mp["output_ids"])
-            label_delta = TkDelta.from_output_tks(prob.edit_lines, mp["labels"])
-            if not prob.edit_lines:
+            pred_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["output_ids"])
+            label_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["labels"])
+            if not prob.edit_line_ids:
                 bad_probs.append(prob)
                 continue
-            line_shift = prob.edit_lines[0]
+            line_shift = prob.edit_line_ids[0]
             pred_change = pred_delta.shifted(line_shift).apply_to_change(original)
             label_change = label_delta.shifted(line_shift).apply_to_change(original)
             pred_code = tokens_to_change(pred_change).after

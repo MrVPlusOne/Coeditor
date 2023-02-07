@@ -18,7 +18,7 @@ from coeditor.c3problem import (
 )
 from coeditor.change import Added, Change, Deleted, Modified, default_show_diff
 from coeditor.common import *
-from coeditor.encoding import TkDelta, input_lines_from_tks, tokens_to_change
+from coeditor.encoding import TkDelta, is_extra_id, tokens_to_change
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -48,6 +48,8 @@ class ChangeDetector:
     project: Path
     untracked_as_additions: bool = True
     ignore_dirs: Collection[str] = field(default_factory=lambda: DefaultIgnoreDirs)
+    # if only the first target line is specified, how many following lines to edit.
+    max_lines_to_edit: int = 25
 
     def __post_init__(self):
         self.script_cache = TimedCache()
@@ -110,10 +112,8 @@ class ChangeDetector:
 
         if isinstance(target_lines, int):
             first_line = target_lines
-            edit_lines = None
         else:
             first_line = target_lines[0]
-            edit_lines = target_lines
         changed_files = run_command(
             ["git", "status", "--porcelain"], cwd=self.project
         ).splitlines()
@@ -195,7 +195,7 @@ class ChangeDetector:
             for c in rev_changed[target_mod.mname].changed
             if first_line in c.line_range
         ]
-        if len(cspans) != 1:
+        if len(cspans) == 0:
             # Create a trivial change for the target module if it wasn't changed.
             print(f"Target span has not changed. Creating a trivial change.")
             parents = [Modified.from_unchanged(s) for s in span.scope.ancestors()]
@@ -203,6 +203,10 @@ class ChangeDetector:
                 Modified.from_unchanged(span.code), parents, span.line_range
             )
         else:
+            if len(cspans) > 1:
+                warnings.warn(
+                    f"Multiple spans at line {first_line}. Using only the first one."
+                )
             cspan = cspans[0]
 
         with _tlogger.timed("usage analysis"):
@@ -215,8 +219,15 @@ class ChangeDetector:
         src_info = SrcInfo(project=str(self.project), commit=None)
         changed = {m: c.inverse() for m, c in rev_changed.items()}
         cspan = cspan.inverse()
+        if isinstance(target_lines, int):
+            edit_start = first_line
+            edit_stop = edit_start + min(
+                self.max_lines_to_edit, len(cspan.line_range.to_range()) + 1
+            )
+            target_lines = range(edit_start, edit_stop)
+
         prob = gcache.create_problem(
-            cspan, edit_lines, changed, target_usages, src_info
+            cspan, target_lines, changed, target_usages, src_info
         )
         return prob
 
@@ -268,15 +279,18 @@ class ServiceResponse:
     def print(self, file=sys.stdout):
         print(f"Target file: {self.target_file}", file=file)
         print(f"Edit range: {self.edit_start} - {self.edit_end}", file=file)
-        print(f"Target lines: {self.target_lines}", file=file)
+        target_lines = self.target_lines
+        if target_lines:
+            target_lines = f"{target_lines[0]}--{target_lines[-1]}"
+        print(f"Target lines: {target_lines}", file=file)
         for i, s in enumerate(self.suggestions):
             print(
                 f"\t--------------- Suggestion {i} (score: {s.score:.3g}) ---------------",
                 file=file,
             )
             print(textwrap.indent(s.change_preview, "\t"), file=file)
-        print(f"Input code:", file=file)
-        print(self.input_code, file=file)
+        # print(f"Input code:", file=file)
+        # print(self.input_code, file=file)
 
     def __str__(self) -> str:
         # use the print above
@@ -326,9 +340,10 @@ class EditPredictionService:
 
         with timed("tokenize c3 problem"):
             tk_prob = self.c3_tkn.tokenize_problem(problem)
-            target_begin = problem.span.line_range[0]
-            target_lines = input_lines_from_tks(tk_prob.main_input.tolist())
-            target_lines = [target_begin + l for l in target_lines]
+            n_out_segs = sum(1 for tk in tk_prob.output_tks if is_extra_id(tk))
+            target_lines = problem.line_ids_to_input_lines(
+                problem.edit_line_ids[:n_out_segs]
+            )
             batch = C3DataLoader.pack_batch([tk_prob])
             original = problem.span.original.tolist()
 
@@ -350,7 +365,7 @@ class EditPredictionService:
                 with (log_dir / f"solution-{i}.txt").open("w") as f:
                     pred_tks = pred.out_tks
                     score = pred.score
-                    print(f"{problem.edit_lines=}", file=f)
+                    print(f"{problem.edit_line_ids=}", file=f)
                     print(f"{len(input_tks)=}", file=f)
                     print(f"{len(references)=}", file=f)
                     print(f"Solution score: {score:.3g}", file=f)
@@ -395,7 +410,7 @@ class EditPredictionService:
         out_tks: TokenSeq,
     ) -> tuple[Modified[str], str]:
         change_tks = problem.span.original.tolist()
-        delta = TkDelta.from_output_tks(problem.edit_lines, out_tks)
+        delta = TkDelta.from_output_tks(problem.edit_line_ids, out_tks)
         new_change_tks = delta.apply_to_change(change_tks)
         new_change = tokens_to_change(new_change_tks)
         current_code = tokens_to_change(change_tks).after

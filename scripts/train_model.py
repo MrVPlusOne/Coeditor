@@ -7,9 +7,9 @@ import wandb
 from prepare_data import make_or_load_dataset
 
 from coeditor._utils import cprint, run_long_task
-from coeditor.c3problem import C3ProblemChangeDropout
+from coeditor.c3problem import C3ProblemChangeDropout, C3ProblemSimpleSplit
 from coeditor.common import *
-from coeditor.dataset import C3EditEncoder, C3ProblemDataset
+from coeditor.dataset import C3CombinedEncoder, C3ProblemDataset
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -22,7 +22,7 @@ from coeditor.model import (
 def train_model(
     dataset_name="medium",
     model_variant="-sig-analysis-post_usees",
-    encoder: C3EditEncoder = C3EditEncoder(),
+    encoder: C3CombinedEncoder = C3CombinedEncoder(),
     batch_args=BatchArgs.train_default(),
     eval_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
@@ -155,6 +155,7 @@ def train_model(
 
 
 def check_save_dir(model_name: str) -> None:
+    "Prompt user to remove existing training directory or abort."
     training_dir = get_model_dir(False) / model_name
     trained_dir = get_model_dir(True) / model_name
     if training_dir.exists():
@@ -179,14 +180,14 @@ if __name__ == "__main__":
     with run_long_task("train_model.py"):
         train_model(
             dataset_name="xl",
-            model_variant="-c3-dropout-v1.4",
+            model_variant="-c3-v1.4",
             train_args=TrainingArgs(
                 max_train_epochs=1,
                 quicktest=False,
             ),
-            encoder=C3EditEncoder(
-                problem_tranform=C3ProblemChangeDropout(),
+            encoder=C3CombinedEncoder(
+                problem_tranform=C3ProblemSimpleSplit(),
             ),
             recreate_data=False,
-            eval_only=False,
+            eval_only=True,
         )
