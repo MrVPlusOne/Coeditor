@@ -18,7 +18,7 @@ from coeditor.c3problem import (
 )
 from coeditor.change import Added, Change, Deleted, Modified, default_show_diff
 from coeditor.common import *
-from coeditor.encoding import TkDelta, is_extra_id, tokens_to_change
+from coeditor.encoding import StrDelta, TkDelta, is_extra_id, tokens_to_change
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -32,6 +32,7 @@ from coeditor.scoped_changes import (
     DefaultIgnoreDirs,
     JModule,
     JModuleChange,
+    StatementSpan,
     get_python_files,
 )
 
@@ -103,7 +104,7 @@ class ChangeDetector:
         self,
         target_file: RelPath,
         target_lines: Sequence[int] | int,
-    ) -> C3Problem:
+    ) -> tuple[C3Problem, StatementSpan]:
         def is_src(path_s: str) -> bool:
             path = Path(path_s)
             return path.suffix == ".py" and all(
@@ -229,7 +230,7 @@ class ChangeDetector:
         prob = gcache.create_problem(
             cspan, target_lines, changed, target_usages, src_info
         )
-        return prob
+        return prob, span
 
 
 @dataclass
@@ -274,6 +275,7 @@ class ServiceResponse:
             "edit_end": self.edit_end,
             "old_code": self.input_code,
             "suggestions": [s.to_json() for s in self.suggestions],
+            "target_lines": list(self.target_lines),
         }
 
     def print(self, file=sys.stdout):
@@ -336,7 +338,7 @@ class EditPredictionService:
         file = to_rel_path(file)
 
         with timed("get c3 problem"):
-            problem = self.detector.get_problem(file, edit_lines)
+            problem, span = self.detector.get_problem(file, edit_lines)
 
         with timed("tokenize c3 problem"):
             tk_prob = self.c3_tkn.tokenize_problem(problem)
@@ -381,22 +383,23 @@ class EditPredictionService:
 
         suggestions = list[EditSuggestion]()
         for pred in predictions:
-            suggested_change, preview = self.apply_edit_to_elem(
+            new_code, preview = self.apply_edit_to_elem(
+                span.code,
                 problem,
                 pred.out_tks,
             )
             suggestion = EditSuggestion(
                 score=pred.score,
                 change_preview=preview,
-                new_code=suggested_change.after,
+                new_code=new_code,
             )
             suggestions.append(suggestion)
 
-        span = problem.span
-        old_code = tokens_to_change(span.original.tolist()).after
+        old_code = span.code
+        print("old code:", repr(old_code))
 
         return ServiceResponse(
-            target_file=file.as_posix(),
+            target_file=str(self.project / file),
             edit_start=(span.line_range[0], 0),
             edit_end=(span.line_range[1], 0),
             target_lines=target_lines,
@@ -406,16 +409,23 @@ class EditPredictionService:
 
     @staticmethod
     def apply_edit_to_elem(
+        current_code: str,
         problem: C3Problem,
         out_tks: TokenSeq,
-    ) -> tuple[Modified[str], str]:
-        change_tks = problem.span.original.tolist()
+    ) -> tuple[str, str]:
         delta = TkDelta.from_output_tks(problem.edit_line_ids, out_tks)
-        new_change_tks = delta.apply_to_change(change_tks)
-        new_change = tokens_to_change(new_change_tks)
-        current_code = tokens_to_change(change_tks).after
-        preview = default_show_diff(current_code, new_change.after)
-        return new_change, preview
+        change1_tks = problem.span.original.tolist()
+        change1 = tokens_to_change(change1_tks)
+        change2_tks = delta.apply_to_change(change1_tks)
+        change2 = tokens_to_change(change2_tks)
+        # change2 is supposed to be the change we want. However, the tokenizer
+        # sometimes does not perfectly encode the input, hence we extract the
+        # delta and directly apply it to the current code to avoid unnecessary
+        # tokenization.
+        change_preview = default_show_diff(change1.after, change2.after)
+        _, delta2 = StrDelta.from_change(Modified(change1.after, change2.after))
+        new_code = delta2.apply_to_input(current_code)
+        return new_code, change_preview
 
 
 def replace_lines(text: str, span: CodeRange, replacement: str):
