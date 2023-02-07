@@ -51,7 +51,7 @@ class ChangeDetector:
     untracked_as_additions: bool = True
     ignore_dirs: Collection[str] = field(default_factory=lambda: DefaultIgnoreDirs)
     # if only the first target line is specified, how many following lines to edit.
-    max_lines_to_edit: int = 25
+    max_lines_to_edit: int = 40
 
     def __post_init__(self):
         self.script_cache = TimedCache()
@@ -327,14 +327,17 @@ class EditPredictionService:
         self,
         detector: ChangeDetector,
         model: RetrievalEditorModel,
-        batch_args: BatchArgs = BatchArgs.service_default(),
-        c3_tkn: C3ProblemTokenizer = C3ProblemTokenizer(),
+        c3_tkn: C3ProblemTokenizer = C3ProblemTokenizer(
+            max_query_tks=1024,
+            max_ref_tks=1024,
+            max_output_tks=512,
+            max_ref_tks_sum=1024 * 12,
+        ),
         dec_args: DecodingArgs = DecodingArgs(),
     ) -> None:
         self.project = detector.project
         self.detector = detector
         self.model = model
-        self.batch_args = batch_args
         self.c3_tkn = c3_tkn
         self.dec_args = dec_args
         self.show_max_solutions = 3
@@ -387,6 +390,15 @@ class EditPredictionService:
                     print(f"{problem.edit_line_ids=}", file=f)
                     print(f"{len(input_tks)=}", file=f)
                     print(f"{len(references)=}", file=f)
+                    print("Relevant unchagned:", file=f)
+                    for unchanged in problem.relevant_unchanged:
+                        print(
+                            "\tpath:",
+                            unchanged.headers[-1].path,
+                            "lines:",
+                            unchanged.line_range,
+                            file=f,
+                        )
                     print(f"Solution score: {score:.3g}", file=f)
                     print(f"Marginalized samples:", pred.n_samples, file=f)
                     pred = RetrievalModelPrediction(
@@ -412,15 +424,12 @@ class EditPredictionService:
             )
             suggestions.append(suggestion)
 
-        old_code = span.code
-        print("old code:", repr(old_code))
-
         return ServiceResponse(
             target_file=str(self.project / file),
             edit_start=(span.line_range[0], 0),
             edit_end=(span.line_range[1], 0),
             target_lines=target_lines,
-            input_code=old_code,
+            input_code=span.code,
             suggestions=suggestions,
         )
 

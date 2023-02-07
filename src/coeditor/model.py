@@ -1671,11 +1671,6 @@ class BatchArgs:
             shuffle_extra_ids=False,
         )
 
-    @classmethod
-    def service_default(cls) -> Self:
-        args = BatchArgs.eval_default()
-        return args
-
 
 @dataclass
 class C3DataLoader:

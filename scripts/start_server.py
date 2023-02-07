@@ -18,8 +18,7 @@ def start_server(device, port: int, print_stats: bool = True):
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)
-    batch_args = BatchArgs.service_default()
-    dec_args = DecodingArgs(do_sample=False, num_beams=4, length_penalty=0.0)
+    dec_args = DecodingArgs(do_sample=False, num_beams=1)
 
     services = dict[Path, EditPredictionService]()
 
@@ -29,15 +28,14 @@ def start_server(device, port: int, print_stats: bool = True):
     ):
         target_dir = Path(project).resolve()
         if (service := services.get(target_dir)) is None:
-            detector = ChangeDetector(target_dir)
-            service = EditPredictionService(
-                detector,
-                model,
-                batch_args=batch_args,
-                dec_args=dec_args,
-            )
-            print(f"Service created for project: {target_dir}")
-            services[target_dir] = service
+            with timed_action(f"Create service for project: {target_dir}"):
+                detector = ChangeDetector(target_dir)
+                service = EditPredictionService(
+                    detector,
+                    model,
+                    dec_args=dec_args,
+                )
+                services[target_dir] = service
 
         print(f"Suggesting edit for lines {lines} in {file}")
         path = Path(file)
@@ -45,7 +43,6 @@ def start_server(device, port: int, print_stats: bool = True):
             path = target_dir / path
         try:
             service.tlogger.clear()
-            model.tlogger = service.tlogger
             log_dir = service.project / ".coeditor_logs" if writeLogs else None
             response = service.suggest_edit(path, lines, log_dir)
             if print_stats:
