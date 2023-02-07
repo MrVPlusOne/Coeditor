@@ -24,7 +24,9 @@ def start_server(device, port: int, print_stats: bool = True):
     services = dict[Path, EditPredictionService]()
 
     @method
-    def suggestEdits(project: str, file: str, line: int, writeLogs: bool):
+    def suggestEdits(
+        project: str, file: str, lines: Sequence[int] | int, writeLogs: bool
+    ):
         target_dir = Path(project).resolve()
         if (service := services.get(target_dir)) is None:
             detector = ChangeDetector(target_dir)
@@ -37,7 +39,7 @@ def start_server(device, port: int, print_stats: bool = True):
             print(f"Service created for project: {target_dir}")
             services[target_dir] = service
 
-        print(f"Suggesting edit for line {line} in {file}")
+        print(f"Suggesting edit for lines {lines} in {file}")
         path = Path(file)
         if not Path.is_absolute(path):
             path = target_dir / path
@@ -45,7 +47,7 @@ def start_server(device, port: int, print_stats: bool = True):
             service.tlogger.clear()
             model.tlogger = service.tlogger
             log_dir = service.project / ".coeditor_logs" if writeLogs else None
-            response = service.suggest_edit(path, line, log_dir)
+            response = service.suggest_edit(path, lines, log_dir)
             if print_stats:
                 print("Runtime stats:")
                 display(service.tlogger.as_dataframe())
