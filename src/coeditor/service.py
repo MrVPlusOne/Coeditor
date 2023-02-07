@@ -34,6 +34,7 @@ from coeditor.scoped_changes import (
     JModuleChange,
     StatementSpan,
     get_python_files,
+    parse_module_script,
 )
 
 from .git import file_content_from_commit
@@ -56,12 +57,17 @@ class ChangeDetector:
         self.script_cache = TimedCache()
         self.analyzer = JediUsageAnalyzer()
         self._index_cache = TimedCache[RelPath, JModule, CommitHash]()
-        self._now_cache = TimedCache[RelPath, JModule, SysTime]()
+        self._now_cache = TimedCache[RelPath, tuple[JModule, jedi.Script], SysTime]()
+        proj = self.project
+        self.jproj = jedi.Project(path=proj, added_sys_path=[proj / "src"])
 
-    def _get_index_content(self, path: RelPath):
-        return file_content_from_commit(self.project, "", path.as_posix())
+        self._updated_now_modules = set[ModuleName]()
+        self._updated_index_modules = set[ModuleName]()
+        self.gcache = C3GeneratorCache({})
+        # preemptively parse all moduels
+        self.get_current_modules()
 
-    def _get_index_stamp(self, path: RelPath) -> CommitHash:
+    def _get_index_hash(self, path: RelPath) -> CommitHash:
         out = run_command(["git", "ls-files", "-s", path.as_posix()], cwd=self.project)
         hash = out.split(" ")[1]
         assert_eq(len(hash), 40)
@@ -71,30 +77,37 @@ class ChangeDetector:
         return os.stat(self.project / path).st_mtime
 
     def _parse_index_module(self, path: RelPath) -> JModule:
-        code = self._get_index_content(path)
+        code = file_content_from_commit(self.project, "", path.as_posix())
         mod = parso.parse(code)
         assert isinstance(mod, ptree.Module)
         mname = path_to_module_name(path)
+        self._updated_index_modules.add(mname)
         return JModule(mname, mod)
 
-    def _get_index_module(self, path: RelPath) -> JModule:
-        stamp = self._get_index_stamp(path)
+    def _parse_now_module_script(self, path: RelPath):
+        m, s = parse_module_script(self.jproj, self.project / path)
+        self._updated_now_modules.add(m.mname)
+        return m, s
+
+    def get_index_module(self, path: RelPath) -> JModule:
+        stamp = self._get_index_hash(path)
         return self._index_cache.cached(
             path, stamp, lambda: self._parse_index_module(path)
         )
 
-    def _parse_current_module(self, path: RelPath) -> JModule:
-        code = (self.project / path).read_text()
-        mod = parso.parse(code)
-        assert isinstance(mod, ptree.Module)
-        mname = path_to_module_name(path)
-        return JModule(mname, mod)
-
     def get_current_module(self, path: RelPath) -> JModule:
         stamp = self._get_mod_time(path)
-        return self._now_cache.cached(
-            path, stamp, lambda: self._parse_current_module(path)
+        mod, _ = self._now_cache.cached(
+            path, stamp, lambda: self._parse_now_module_script(path)
         )
+        return mod
+
+    def get_current_script(self, path: RelPath) -> jedi.Script:
+        stamp = self._get_mod_time(path)
+        _, script = self._now_cache.cached(
+            path, stamp, lambda: self._parse_now_module_script(path)
+        )
+        return script
 
     def get_current_modules(self) -> dict[RelPath, JModule]:
         files = get_python_files(self.project)
@@ -164,19 +177,17 @@ class ChangeDetector:
                         Deleted(mod), only_ast_changes=False
                     )
                 case Deleted():
-                    mod = self._get_index_module(rel_path)
+                    mod = self.get_index_module(rel_path)
                     rev_changed[mod.mname] = JModuleChange.from_modules(
                         Added(mod), only_ast_changes=False
                     )
                 case Modified(path1, path2):
                     assert path1 == path2
-                    mod_old = self._get_index_module(rel_path)
+                    mod_old = self.get_index_module(rel_path)
                     mod_new = self.get_current_module(rel_path)
                     rev_changed[mod_new.mname] = JModuleChange.from_modules(
                         Modified(mod_new, mod_old), only_ast_changes=False
                     )
-        modules = self.get_current_modules()
-        gcache = C3GeneratorCache({m.mname: m for m in modules.values()})
 
         target_mod = self.get_current_module(target_file)
         span = target_mod.as_scope.search_span_by_line(first_line)
@@ -211,7 +222,7 @@ class ChangeDetector:
             cspan = cspans[0]
 
         with _tlogger.timed("usage analysis"):
-            script = jedi.Script(path=self.project / target_file)
+            script = self.get_current_script(target_file)
             lines_to_analyze = set(cspan.line_range.to_range())
             lines_to_analyze.update(cspan.header_line_range.to_range())
             target_usages = self.analyzer.get_line_usages(
@@ -227,7 +238,13 @@ class ChangeDetector:
             )
             target_lines = range(edit_start, edit_stop)
 
-        prob = gcache.create_problem(
+        modules = self.get_current_modules()
+        self.gcache.set_module_map({m.mname: m for m in modules.values()})
+        self.gcache.clear_caches(self._updated_index_modules, self._updated_now_modules)
+        self._updated_index_modules.clear()
+        self._updated_now_modules.clear()
+
+        prob = self.gcache.create_problem(
             cspan, target_lines, changed, target_usages, src_info
         )
         return prob, span

@@ -485,7 +485,7 @@ def _deep_copy_subset_(dict: dict[T1, T2], keys: Collection[T1]) -> dict[T1, T2]
 _Second = float
 
 
-def _parse_module_script(project: jedi.Project, path: Path):
+def parse_module_script(project: jedi.Project, path: Path):
     assert path.is_absolute(), f"Path is not absolute: {path=}"
     script = jedi.Script(path=path, project=project)
     mcontext = script._get_module_context()
@@ -529,7 +529,7 @@ def _edits_from_commit_history(
 
     def parse_module(path: Path):
         with _tlogger.timed("parse_module"):
-            m, s = _parse_module_script(proj, path)
+            m, s = parse_module_script(proj, path)
             scripts[to_rel_path(path.relative_to(proj._path))] = s
             return m
 

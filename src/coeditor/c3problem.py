@@ -312,10 +312,32 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
 class C3GeneratorCache:
     def __init__(self, pre_module_map: Mapping[ModuleName, JModule]):
-        self.header_cache = dict[ProjectPath, ChangedHeader]()
-        self.cspan_cache = dict[PyDefinition, list[ChangedCodeSpan]]()
-        self.module_map = pre_module_map
-        self.mod_hier = ModuleHierarchy.from_modules(pre_module_map)
+        # stores the changed headers
+        self._header_cache = dict[ProjectPath, ChangedHeader]()
+        # stores the definitions pre-edit
+        self._pre_def_cache = dict[ProjectPath, list[ChangedCodeSpan]]()
+        # stores the changed code spans
+        self._cspan_cache = dict[tuple[ModuleName, LineRange], ChangedCodeSpan]()
+        self._module_map = pre_module_map
+        self._mod_hier = ModuleHierarchy.from_modules(pre_module_map)
+
+    def set_module_map(self, pre_module_map: Mapping[ModuleName, JModule]):
+        self._module_map = pre_module_map
+        self._mod_hier = ModuleHierarchy.from_modules(pre_module_map)
+
+    def clear_caches(
+        self, pre_changed: set[ModuleName], post_changed: set[ModuleName]
+    ) -> None:
+        "Clear outdated caches."
+        for k in tuple(self._header_cache):
+            if k.module in pre_changed or k.module in post_changed:
+                del self._header_cache[k]
+        for k in tuple(self._pre_def_cache):
+            if k.module in pre_changed:
+                del self._pre_def_cache[k]
+        for k in tuple(self._cspan_cache):
+            if k[0] in pre_changed or k[0] in post_changed:
+                del self._cspan_cache[k]
 
     def create_problem(
         self,
@@ -366,14 +388,13 @@ class C3GeneratorCache:
 
     def get_pre_spans(self, used: PyDefinition) -> list[ChangedCodeSpan]:
         "Get the (pre-edit) spans for the given definition."
-        cspan_cache = self.cspan_cache
-        if used.full_name in cspan_cache:
-            return cspan_cache[used.full_name]
-        path = self.mod_hier.resolve_path(split_dots(used.full_name))
+        def_cache = self._pre_def_cache
+        path = self._mod_hier.resolve_path(split_dots(used.full_name))
         cspans = list[ChangedCodeSpan]()
-        if path is None or (jmod := self.module_map.get(path.module)) is None:
-            cspan_cache[used] = cspans
+        if path is None or (jmod := self._module_map.get(path.module)) is None:
             return cspans
+        if path in def_cache:
+            return def_cache[path]
         scope = jmod.as_scope
         elem = scope._search(path.path, used.start_pos[0])
         func_scopes = list[ChangeScope]()
@@ -434,7 +455,7 @@ class C3GeneratorCache:
             )
             cspans.append(cspan)
 
-        cspan_cache[used] = cspans
+        def_cache[path] = cspans
         return cspans
 
     def get_relevant_unchanged(
@@ -486,7 +507,7 @@ class C3GeneratorCache:
 
     def to_header(self, cs: Change[ChangeScope]) -> ChangedHeader:
         path = cs.earlier.path
-        if (ch := self.header_cache.get(path)) is None:
+        if (ch := self._header_cache.get(path)) is None:
             header_change = cs.map(lambda s: s.header_code.strip("\n"))
             ch = ChangedHeader(
                 TkArray.new(change_to_tokens(header_change)),
@@ -494,20 +515,26 @@ class C3GeneratorCache:
                 cs.earlier.header_line_range,
                 cs.earlier.path,
             )
-            self.header_cache[path] = ch
+            self._header_cache[path] = ch
         return ch
 
     def to_code_span(self, span: ChangedSpan):
+        mod = span.parent_scopes[0].later.path.module
+        key = (mod, span.line_range)
+        if (cs := self._cspan_cache.get(key)) is not None:
+            return cs
         original, delta = line_diffs_to_original_delta(
             change_to_line_diffs(span.change)
         )
-        return ChangedCodeSpan(
+        result = ChangedCodeSpan(
             headers=[self.to_header(cs) for cs in span.parent_scopes],
             original=TkArray.new(encode_lines_join(original)),
             delta=delta.to_tk_delta(),
             line_range=span.line_range,
             module=span.module,
         )
+        self._cspan_cache[key] = result
+        return result
 
 
 class C3ProblemTransform(ABC):
