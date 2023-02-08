@@ -1,5 +1,6 @@
 # End-user API as an editing suggestion tool.
 
+import difflib
 import io
 import sys
 import textwrap
@@ -263,18 +264,15 @@ class ChangeDetector:
         return prob, span
 
 
-@dataclass
-class EditSuggestion:
+# add, delete, replace, equal
+StatusTag = Literal["A", "D", "R", " "]
+
+
+class EditSuggestion(TypedDict):
     score: float
     change_preview: str
     new_code: str
-
-    def to_json(self):
-        return {
-            "score": self.score,
-            "change_preview": self.change_preview,
-            "new_code": self.new_code,
-        }
+    line_status: list[tuple[int, StatusTag]]
 
 
 def path_to_module_name(rel_path: RelPath) -> ModuleName:
@@ -304,7 +302,7 @@ class ServiceResponse:
             "edit_start": self.edit_start,
             "edit_end": self.edit_end,
             "old_code": self.input_code,
-            "suggestions": [s.to_json() for s in self.suggestions],
+            "suggestions": [s for s in self.suggestions],
             "target_lines": list(self.target_lines),
         }
 
@@ -317,10 +315,10 @@ class ServiceResponse:
         print(f"Target lines: {target_lines}", file=file)
         for i, s in enumerate(self.suggestions):
             print(
-                f"\t--------------- Suggestion {i} (score: {s.score:.3g}) ---------------",
+                f"\t--------------- Suggestion {i} (score: {s['score']:.3g}) ---------------",
                 file=file,
             )
-            print(textwrap.indent(s.change_preview, "\t"), file=file)
+            print(textwrap.indent(s["change_preview"], "\t"), file=file)
         # print(f"Input code:", file=file)
         # print(self.input_code, file=file)
 
@@ -427,6 +425,7 @@ class EditPredictionService:
                     print(pred_str, file=f)
 
         target = self.get_target_code(span.code, problem, tk_prob)
+        target_lines = target.target_lines
         suggestions = list[EditSuggestion]()
         for pred in predictions:
             pred_change = self.apply_edit_to_elem(
@@ -440,14 +439,27 @@ class EditPredictionService:
                     splitlines(pred_change.after),
                 )
             )
+            diff_ops = get_diff_ops(
+                splitlines(pred_change.before), splitlines(pred_change.after)
+            )
+            print(f"Diff ops: {diff_ops}")
+            line_status = dict[int, StatusTag]()
+            for tag, (i1, i2), _ in diff_ops:
+                if tag == "A":
+                    line_status[i1] = "A"
+                    continue
+                for i in range(i1, i2):
+                    if i not in line_status:
+                        line_status[i] = tag
+            line_status = [(i + target_lines[0], tag) for i, tag in line_status.items()]
+
             suggestion = EditSuggestion(
                 score=pred.score,
                 change_preview=preview,
                 new_code=pred_change.after,
+                line_status=line_status[: len(target_lines)],
             )
             suggestions.append(suggestion)
-
-        target_lines = target.target_lines
 
         return ServiceResponse(
             target_file=str(self.project / file),
@@ -504,6 +516,24 @@ class EditPredictionService:
 
         new_code = delta2.apply_to_input(target.current_code)
         return Modified(target.current_code, new_code)
+
+
+_tag_map: dict[str, StatusTag] = {
+    "insert": "A",
+    "delete": "D",
+    "replace": "R",
+    "equal": " ",
+}
+
+
+def get_diff_ops(
+    before: Sequence[str], after: Sequence[str]
+) -> list[tuple[StatusTag, tuple[int, int], tuple[int, int]]]:
+    matcher = difflib.SequenceMatcher(None, before, after)
+    return [
+        (_tag_map[tag], (i1, i2), (j1, j2))
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+    ]
 
 
 def get_tk_lines(tks: TokenSeq, line_ids: Sequence[int]) -> TokenSeq:
