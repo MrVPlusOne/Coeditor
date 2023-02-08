@@ -15,10 +15,24 @@ from coeditor.c3problem import (
     C3ProblemTokenizer,
     JediUsageAnalyzer,
     SrcInfo,
+    TkC3Problem,
 )
-from coeditor.change import Added, Change, Deleted, Modified, default_show_diff
+from coeditor.change import (
+    Added,
+    Change,
+    Deleted,
+    Modified,
+    default_show_diff,
+    show_change,
+)
 from coeditor.common import *
-from coeditor.encoding import StrDelta, TkDelta, is_extra_id, tokens_to_change
+from coeditor.encoding import (
+    Newline_id,
+    StrDelta,
+    TkDelta,
+    is_extra_id,
+    tokens_to_change,
+)
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -51,7 +65,7 @@ class ChangeDetector:
     untracked_as_additions: bool = True
     ignore_dirs: Collection[str] = field(default_factory=lambda: DefaultIgnoreDirs)
     # if only the first target line is specified, how many following lines to edit.
-    max_lines_to_edit: int = 40
+    max_lines_to_edit: int = 30
 
     def __post_init__(self):
         self.script_cache = TimedCache()
@@ -232,10 +246,9 @@ class ChangeDetector:
         changed = {m: c.inverse() for m, c in rev_changed.items()}
         cspan = cspan.inverse()
         if isinstance(target_lines, int):
-            edit_start = first_line
-            edit_stop = edit_start + min(
-                self.max_lines_to_edit, len(cspan.line_range.to_range()) + 1
-            )
+            n_above = max(1, self.max_lines_to_edit // 2)
+            edit_start = max(cspan.line_range[0], first_line - n_above)
+            edit_stop = min(edit_start + self.max_lines_to_edit, cspan.line_range[1])
             target_lines = range(edit_start, edit_stop)
 
         modules = self.get_current_modules()
@@ -322,6 +335,13 @@ ErrorStr = str
 
 
 @dataclass
+class _EditRegion:
+    current_code: str
+    target_lines: Sequence[int]
+    target_line_ids: Sequence[int]
+
+
+@dataclass
 class EditPredictionService:
     def __init__(
         self,
@@ -362,10 +382,6 @@ class EditPredictionService:
 
         with timed("tokenize c3 problem"):
             tk_prob = self.c3_tkn.tokenize_problem(problem)
-            n_out_segs = sum(1 for tk in tk_prob.output_tks if is_extra_id(tk))
-            target_lines = problem.line_ids_to_input_lines(
-                problem.edit_line_ids[:n_out_segs]
-            )
             batch = C3DataLoader.pack_batch([tk_prob])
             original = problem.span.original.tolist()
 
@@ -410,37 +426,73 @@ class EditPredictionService:
                     pred_str = RetrievalDecodingResult.show_prediction(problem, pred)
                     print(pred_str, file=f)
 
+        target = self.get_target_code(span.code, problem, tk_prob)
         suggestions = list[EditSuggestion]()
         for pred in predictions:
-            new_code, preview = self.apply_edit_to_elem(
-                span.code,
+            pred_change = self.apply_edit_to_elem(
+                target,
                 problem,
                 pred.out_tks,
+            )
+            preview = "\n".join(
+                compute_line_diffs_fast(
+                    splitlines(pred_change.before),
+                    splitlines(pred_change.after),
+                )
             )
             suggestion = EditSuggestion(
                 score=pred.score,
                 change_preview=preview,
-                new_code=new_code,
+                new_code=pred_change.after,
             )
             suggestions.append(suggestion)
 
+        target_lines = target.target_lines
+
         return ServiceResponse(
             target_file=str(self.project / file),
-            edit_start=(span.line_range[0], 0),
-            edit_end=(span.line_range[1], 0),
-            target_lines=target_lines,
-            input_code=span.code,
+            edit_start=(target_lines[0], 0),
+            edit_end=(target_lines[-1] + 1, 0),
+            target_lines=target.target_lines,
+            input_code=target.current_code,
             suggestions=suggestions,
         )
 
     @staticmethod
-    def apply_edit_to_elem(
+    def get_target_code(
         current_code: str,
         problem: C3Problem,
+        tk_prob: TkC3Problem,
+    ) -> _EditRegion:
+        n_out_segs = sum(1 for tk in tk_prob.output_tks if is_extra_id(tk))
+        edit_line_ids = problem.edit_line_ids[:n_out_segs]
+        target_lines = problem.line_ids_to_input_lines(edit_line_ids)
+        current_start = target_lines[0] - problem.span.line_range[0]
+        current_stop = target_lines[-1] - problem.span.line_range[0] + 1
+        current_lines = current_code.split("\n")[current_start:current_stop]
+        current_lines.append("")
+        current_code = "\n".join(current_lines)
+        return _EditRegion(current_code, target_lines, edit_line_ids)
+
+    @staticmethod
+    def apply_edit_to_elem(
+        target: _EditRegion,
+        problem: C3Problem,
         out_tks: TokenSeq,
-    ) -> tuple[str, str]:
-        delta = TkDelta.from_output_tks(problem.edit_line_ids, out_tks)
-        change1_tks = problem.span.original.tolist()
+    ) -> Modified[str]:
+        edit_line_ids = target.target_line_ids
+        edit_start = edit_line_ids[0]
+        edit_stop = edit_line_ids[-1] + 1
+
+        delta = (
+            TkDelta.from_output_tks(problem.edit_line_ids, out_tks)
+            .for_input_range((edit_start, edit_stop + 1))
+            .shifted(-edit_start)
+        )
+
+        change1_tks = get_tk_lines(
+            problem.span.original.tolist(), range(edit_start, edit_stop)
+        )
         change1 = tokens_to_change(change1_tks)
         change2_tks = delta.apply_to_change(change1_tks)
         change2 = tokens_to_change(change2_tks)
@@ -448,10 +500,15 @@ class EditPredictionService:
         # sometimes does not perfectly encode the input, hence we extract the
         # delta and directly apply it to the current code to avoid unnecessary
         # tokenization.
-        change_preview = default_show_diff(change1.after, change2.after)
         _, delta2 = StrDelta.from_change(Modified(change1.after, change2.after))
-        new_code = delta2.apply_to_input(current_code)
-        return new_code, change_preview
+
+        new_code = delta2.apply_to_input(target.current_code)
+        return Modified(target.current_code, new_code)
+
+
+def get_tk_lines(tks: TokenSeq, line_ids: Sequence[int]) -> TokenSeq:
+    lines = split_list(tks, Newline_id)
+    return join_list((lines[i] for i in line_ids), Newline_id)
 
 
 def replace_lines(text: str, span: CodeRange, replacement: str):

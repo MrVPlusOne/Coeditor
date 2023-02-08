@@ -648,7 +648,9 @@ def compute_line_diffs(
     for line in differ.compare(before, after):
         assert len(line) >= 2
         tag = line[0]
-        if keep_explain_lines or tag != "?":
+        if keep_explain_lines and tag == "?":
+            result.append(tag + line[2:-1])  # remove trailing newline
+        elif tag != "?":
             result.append(tag + line[2:])
     return result
 

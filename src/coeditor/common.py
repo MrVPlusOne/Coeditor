@@ -34,6 +34,7 @@ from ._utils import (
     as_any,
     assert_eq,
     compute_line_diffs,
+    compute_line_diffs_fast,
     get_modified_args,
     groupby,
     not_none,
