@@ -634,18 +634,75 @@ def pretty_show_dict(
         return s.getvalue()
 
 
+from difflib import SequenceMatcher, _keep_original_ws  # type: ignore
+
+
+class _ModifiedDiffer(difflib.Differ):
+    """Modified Differ that outputs additions before deletions for replacement spans."""
+
+    _dump: Callable
+    linejunk: Any
+
+    # switch + and - order
+    def _qformat(self, aline, bline, atags, btags):
+        atags = _keep_original_ws(aline, atags).rstrip()
+        btags = _keep_original_ws(bline, btags).rstrip()
+
+        yield "+ " + bline
+        if btags:
+            yield f"? {btags}\n"
+
+        yield "- " + aline
+        if atags:
+            yield f"? {atags}\n"
+
+    # switch + and - order
+    def _plain_replace(self, a, alo, ahi, b, blo, bhi):
+        assert alo < ahi and blo < bhi
+        # dump the shorter block first -- reduces the burden on short-term
+        # memory if the blocks are of very different sizes
+        if bhi - blo < ahi - alo:
+            first = self._dump("+", b, blo, bhi)
+            second = self._dump("-", a, alo, ahi)
+        else:
+            first = self._dump("-", a, alo, ahi)
+            second = self._dump("+", b, blo, bhi)
+        # TODO: this changed
+        for g in second, first:
+            yield from g
+
+    # use _plain_replace instead of _fancy_replace
+    def simple_compare(self, a, b):
+        cruncher = SequenceMatcher(self.linejunk, a, b)
+        for tag, alo, ahi, blo, bhi in cruncher.get_opcodes():
+            if tag == "replace":
+                g = self._plain_replace(a, alo, ahi, b, blo, bhi)
+            elif tag == "delete":
+                g = self._dump("-", a, alo, ahi)
+            elif tag == "insert":
+                g = self._dump("+", b, blo, bhi)
+            elif tag == "equal":
+                g = self._dump(" ", a, alo, ahi)
+            else:
+                raise ValueError("unknown tag %r" % (tag,))
+
+            yield from g
+
+
 def compute_line_diffs(
     before: Sequence[str], after: Sequence[str], keep_explain_lines: bool = False
 ):
     SizeLimit = 8000
+    differ = _ModifiedDiffer()
     if (
         sum(len(x) for x in before) > SizeLimit
         or sum(len(x) for x in after) > SizeLimit
     ):
-        return compute_line_diffs_fast(before, after)
-    differ = difflib.Differ()
+        compare = differ.simple_compare
+    else:
+        compare = differ.compare
     result = []
-    for line in differ.compare(before, after):
+    for line in compare(before, after):
         assert len(line) >= 2
         tag = line[0]
         if keep_explain_lines and tag == "?":

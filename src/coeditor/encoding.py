@@ -405,15 +405,22 @@ class TkDelta:
             l2 = keys[key2][0]
             return l1 == l2 or (l2 == l1 + 1)
 
+        def is_same_line(key1: int, key2: int):
+            if key2 >= len(keys):
+                return False
+            l1 = keys[key1][0]
+            l2 = keys[key2][0]
+            return l1 == l2
+
         groups = list[tuple[DeltaKey, ...]]()
         keys = tuple(self.keys())
         i = 0
         while i < len(keys):
             # case 1: <del> immediately followed by <add>
             if (
-                is_next(i, i + 1)
-                and is_key_type(i, Del_id)
-                and is_key_type(i + 1, Add_id)
+                is_same_line(i, i + 1)
+                and is_key_type(i, Add_id)
+                and is_key_type(i + 1, Del_id)
             ):
                 groups.append((keys[i], keys[i + 1]))
                 i += 2
@@ -422,12 +429,7 @@ class TkDelta:
             if is_key_type(i, Del_id):
                 del_block = [keys[i]]
                 i += 1
-                while (
-                    i < len(keys)
-                    and is_next(i - 1, i)
-                    and is_key_type(i, Del_id)
-                    and not is_key_type(i + 1, Add_id)
-                ):
+                while i < len(keys) and is_next(i - 1, i) and is_key_type(i, Del_id):
                     del_block.append(keys[i])
                     i += 1
                 if del_block:
