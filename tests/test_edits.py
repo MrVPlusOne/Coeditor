@@ -262,6 +262,22 @@ class TestChangeIdentities:
                 )
                 raise AssertionError(f"apply_to_change failed: {name}")
 
+    def test_random_subset(self):
+        def is_sorted(xs):
+            return list(xs) == list(sorted(xs))
+
+        xs = range(50)
+        assert is_sorted(xs)
+        for _ in range(50):
+            ys = random_subset(xs, 20)
+            assert is_sorted(ys)
+
+        x_map = {i: i + 1 for i in range(50)}
+        assert is_sorted(x_map)
+        for _ in range(50):
+            y_map = random_subset(x_map, 20)
+            assert is_sorted(y_map)
+
     def test_delta_decomposition(self):
         for name, c in self.cases.items():
             original, delta = TkDelta.from_change_tks(change_to_tokens(c))

@@ -365,15 +365,22 @@ def random_subset(all, n: int, rng: random.Random | int | None = None):
         rng = random.Random()
     elif isinstance(rng, int):
         rng = random.Random(rng)
+
+    def _subset_ids(ids: list[int]):
+        rng.shuffle(ids)
+        ids = ids[:n]
+        ids.sort()
+        return ids
+
     if isinstance(all, Sequence):
         ids = list(range(len(all)))
-        rng.shuffle(ids)
+        ids = _subset_ids(ids)
         xs = [all[i] for i in ids[:n]]
         return xs
     elif isinstance(all, Mapping):
         keys = [k for k in all]
         ids = list(range(len(keys)))
-        rng.shuffle(ids)
+        ids = _subset_ids(ids)
         return {(k := keys[i]): all[k] for i in ids[:n]}
     else:
         raise ArgumentError(all, f"Unsupported arg type: {type(all)}")
