@@ -4,6 +4,7 @@ import difflib
 import io
 import sys
 import textwrap
+from pprint import pprint
 
 import jedi
 import parso
@@ -240,9 +241,14 @@ class ChangeDetector:
             script = self.get_current_script(target_file)
             lines_to_analyze = set(cspan.line_range.to_range())
             lines_to_analyze.update(cspan.header_line_range.to_range())
+            self.analyzer.error_counts.clear()
             target_usages = self.analyzer.get_line_usages(
-                script, lines_to_analyze, silent=True
+                script, lines_to_analyze, silent=False
             )
+            if errors := self.analyzer.error_counts:
+                print("Errors during usage analysis:")
+                pprint(errors)
+
         src_info = SrcInfo(project=str(self.project), commit=None)
         changed = {m: c.inverse() for m, c in rev_changed.items()}
         cspan = cspan.inverse()
@@ -442,7 +448,6 @@ class EditPredictionService:
             diff_ops = get_diff_ops(
                 splitlines(pred_change.before), splitlines(pred_change.after)
             )
-            print(f"Diff ops: {diff_ops}")
             line_status = dict[int, StatusTag]()
             for tag, (i1, i2), _ in diff_ops:
                 if tag == "A":

@@ -1,4 +1,5 @@
 import dataclasses
+from pprint import pprint
 
 import jedi
 import jedi.cache
@@ -1011,11 +1012,10 @@ class JediUsageAnalyzer:
             name for k, names in jmod.get_used_names()._dict.items() for name in names
         ]
         all_names.sort(key=lambda x: x.start_pos)
+        all_names = [n for n in all_names if n.start_pos[0] in lines_to_analyze]
         for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
             name: tree.Name
             line = name.start_pos[0]
-            if line not in lines_to_analyze:
-                continue
             usages = line2usages.setdefault(line, set())
             try:
                 defs = _fast_goto(
