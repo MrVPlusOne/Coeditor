@@ -160,12 +160,19 @@ class PyDefinition:
         if (
             not name.in_builtin_module()
             and (full_name := name.full_name)
-            # and (import_module := name.module_name)
-            and (signatures := name._get_docstring_signature())
+            and (signatures := name._get_docstring_signature() or name.get_line_code())
         ):
             full_name = PyFullName(full_name)
             start_pos = name.get_definition_start_position()
             end_pos = name.get_definition_end_position()
+            signatures = name._get_docstring_signature()
+            if name.type == "module":
+                return
+            if signatures:
+                signatures = "sig: " + signatures
+            else:
+                signatures = name.get_line_code()
+
             yield PyDefinition(full_name, start_pos, end_pos, signatures)
 
 
@@ -843,6 +850,8 @@ class C3ProblemTokenizer:
         this_chunk = TokenSeq()
         for name, defn in elems.items():
             parent = ".".join(split_dots(name)[:-1])
+            if not parent:
+                continue
             text = f"at: {parent}\n{defn.signatures}\n\n"
             tks = encode_lines_join(text)
             tks = truncate_section(
