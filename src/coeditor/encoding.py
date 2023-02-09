@@ -260,6 +260,13 @@ class TkDelta:
         for k, _ in self.items():
             yield k
 
+    def change_size(self) -> int:
+        sum = 0
+        for _, acts in self._deltas.items():
+            for act in acts:
+                sum += len(act)
+        return sum
+
     def items(self) -> Iterable[tuple[DeltaKey, TokenSeq]]:
         for l, acts in self._deltas.items():
             for i, act in enumerate(acts):

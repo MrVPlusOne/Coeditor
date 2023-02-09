@@ -410,15 +410,6 @@ class EditPredictionService:
                     print(f"{problem.edit_line_ids=}", file=f)
                     print(f"{len(input_tks)=}", file=f)
                     print(f"{len(references)=}", file=f)
-                    print("Relevant unchagned:", file=f)
-                    for unchanged in problem.relevant_unchanged:
-                        print(
-                            "\tpath:",
-                            unchanged.headers[-1].path,
-                            "lines:",
-                            unchanged.line_range,
-                            file=f,
-                        )
                     print(f"Solution score: {score:.3g}", file=f)
                     print(f"Marginalized samples:", pred.n_samples, file=f)
                     pred = RetrievalModelPrediction(

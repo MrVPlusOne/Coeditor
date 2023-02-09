@@ -98,7 +98,7 @@ class C3Problem:
     # most relevant to least relevant
     relevant_changes: Sequence[ChangedCodeSpan]
     # most relevant to least relevant
-    relevant_unchanged: Sequence[ChangedCodeSpan]
+    relevant_unchanged: Mapping["PyFullName", "PyDefinition"]
     # some optional information about how the problem was generated
     change_type: Change[None]
     src_info: SrcInfo
@@ -151,8 +151,9 @@ class PyDefinition:
     statement or the actual definition."""
 
     full_name: PyFullName
-    start_pos: tuple[int, int]
-    end_pos: tuple[int, int]
+    start_pos: tuple[int, int] | None
+    end_pos: tuple[int, int] | None
+    signatures: str
 
     @staticmethod
     def from_name(name: classes.BaseName) -> Iterable["PyDefinition"]:
@@ -160,13 +161,12 @@ class PyDefinition:
             not name.in_builtin_module()
             and (full_name := name.full_name)
             # and (import_module := name.module_name)
-            and (start_pos := name.get_definition_start_position())
-            and (end_pos := name.get_definition_end_position())
+            and (signatures := name._get_docstring_signature())
         ):
             full_name = PyFullName(full_name)
-            # if not full_name.startswith(import_module):
-            #     raise ValueError(f"Inconsistent module: {full_name=}, {import_module=}")
-            yield PyDefinition(full_name, start_pos, end_pos)
+            start_pos = name.get_definition_start_position()
+            end_pos = name.get_definition_end_position()
+            yield PyDefinition(full_name, start_pos, end_pos, signatures)
 
 
 @dataclass(frozen=True)
@@ -177,6 +177,7 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
+    - v2.7: Use new PyDefiniton that includes signatures.
     - v2.6: fix missing changes in `JModuleChanges`. Rename to edit_line_ids.
     - v2.5: fix newline encoding bug.
     - v2.4: fix buggy encoding of `Added` and `Deleted` changes.
@@ -184,7 +185,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "2.6"
+    VERSION = "2.7"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
 
@@ -289,9 +290,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 if should_mk_problem:
                     # latest changes are more relevant
                     relevant_changes = list(reversed(processed_cspans))
-                    relevant_unchanged = cache.get_relevant_unchanged(
-                        code_span, relevant_changes, usages
-                    )
+                    relevant_unchanged = cache.get_relevant_unchanged(code_span, usages)
                     src_info: SrcInfo = {
                         "project": pchange.project_name,
                         "commit": pchange.commit_info,
@@ -373,9 +372,7 @@ class C3GeneratorCache:
         code_span = dataclasses.replace(
             code_span, original=TkArray.new(changed_code), delta=TkDelta.empty()
         )
-        relevant_unchanged = self.get_relevant_unchanged(
-            code_span, relevant_changes, target_usages
-        )
+        relevant_unchanged = self.get_relevant_unchanged(code_span, target_usages)
 
         prob = C3Problem(
             code_span,
@@ -387,124 +384,28 @@ class C3GeneratorCache:
         )
         return prob
 
-    def get_pre_spans(self, used: PyDefinition) -> list[ChangedCodeSpan]:
-        "Get the (pre-edit) spans for the given definition."
-        def_cache = self._pre_def_cache
-        path = self._mod_hier.resolve_path(split_dots(used.full_name))
-        cspans = list[ChangedCodeSpan]()
-        if path is None or (jmod := self._module_map.get(path.module)) is None:
-            return cspans
-        if path in def_cache:
-            return def_cache[path]
-        scope = jmod.as_scope
-        elem = scope._search(path.path, used.start_pos[0])
-        func_scopes = list[ChangeScope]()
-        stmt_spans = list[StatementSpan]()
-        match elem:
-            case ChangeScope(tree=ptree.Function()):
-                func_scopes.append(elem)
-            case ChangeScope(tree=ptree.Class()):
-                # add all attrs and methods
-                stmt_spans.extend(elem.spans)
-                func_scopes.extend(
-                    s
-                    for s in elem.subscopes.values()
-                    if isinstance(s.tree, ptree.Function)
-                )
-            case StatementSpan():
-                stmt_spans.append(elem)
-
-        # add collapsed functions
-        for f_scope in func_scopes:
-            ancestors = f_scope.ancestors()
-            stmts = f_scope.spans[-1].statements
-            body_code = stmts[-1].get_code()
-            if len(stmts) > 1:
-                ellipsis = "    " * (len(ancestors) - 1) + "# ...\n"
-                body_code = ellipsis + body_code
-            cspan = ChangedCodeSpan(
-                [self.to_header(Modified.from_unchanged(s)) for s in ancestors],
-                TkArray.new(encode_lines_join(body_code)),
-                TkDelta.empty(),
-                f_scope.spans[-1].line_range,
-                f_scope.path.module,
-            )
-            cspans.append(cspan)
-
-        # add statement spans
-        for stmt_span in stmt_spans:
-            ancestors = stmt_span.scope.ancestors()
-            stmts = stmt_span.statements
-            match stmts:
-                case [
-                    ptree.PythonNode(
-                        type="simple_stmt",
-                        children=[ptree.String(), ptree.Newline()],
-                    ),
-                    *rest,
-                ]:
-                    if not rest:
-                        continue
-                    stmts = rest
-            body_code = "".join(s.get_code() for s in stmts).lstrip("\n")
-            cspan = ChangedCodeSpan(
-                [self.to_header(Modified.from_unchanged(s)) for s in ancestors],
-                TkArray.new(encode_lines_join(body_code)),
-                TkDelta.empty(),
-                stmt_span.line_range,
-                stmt_span.scope.path.module,
-            )
-            cspans.append(cspan)
-
-        def_cache[path] = cspans
-        return cspans
-
     def get_relevant_unchanged(
         self,
         this_change: ChangedCodeSpan,
-        other_changes: Collection[ChangedCodeSpan],
         line_usages: LineUsageAnalysis,
     ):
         module = this_change.module
         # parent defs are also considered as used
-        parent_defs = [
-            PyDefinition(
-                PyFullName(f"{c.path.module}.{c.path.path}"),
-                (c.line_range[0], 0),
-                (c.line_range[1], 0),
-            )
-            for c in this_change.headers
-        ]
-        # immediate parents are more relevant
-        sorted_defs = list(reversed(parent_defs))
-        used_defs = set(sorted_defs)
+        sorted_defs = dict[PyFullName, PyDefinition]()
         all_lines = set(this_change.line_range.to_range())
         all_lines.update(this_change.headers[-1].line_range.to_range())
         for l in all_lines:
             for pydef in line_usages.line2usages.get(l, set()):
                 if (
                     pydef.full_name.startswith(module)
+                    and pydef.start_pos
                     and pydef.start_pos[0] in all_lines
                 ):
                     # skip self references
                     continue
-                if pydef not in used_defs:
-                    used_defs.add(pydef)
-                    sorted_defs.append(pydef)
+                sorted_defs.setdefault(pydef.full_name, pydef)
 
-        # return unique cspans
-        seen = set[tuple[ModuleName, LineRange]]()
-        # we don't need to show the changed parts again
-        for cspan in (this_change, *other_changes):
-            seen.add((cspan.module, cspan.line_range))
-        result = list[ChangedCodeSpan]()
-        for used in sorted_defs:
-            for cspan in self.get_pre_spans(used):
-                key = (cspan.module, cspan.line_range)
-                if key not in seen:
-                    result.append(cspan)
-                    seen.add(key)
-        return result
+        return sorted_defs
 
     def to_header(self, cs: Change[ChangeScope]) -> ChangedHeader:
         path = cs.earlier.path
@@ -737,7 +638,12 @@ class C3TokenizerArgs(TypedDict):
 
 @dataclass
 class C3ProblemTokenizer:
-    VERSION = "2.3"
+    """
+    ## Change log
+    - 2.4: Encode each changed reference individually. Encode signatures for unchanged.
+    """
+
+    VERSION = "2.4"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
@@ -847,16 +753,16 @@ class C3ProblemTokenizer:
         all_refs = above_chunks + below_chunks
         ref_size_sum = sum(len(ref) for _, ref in all_refs)
 
-        # compute the references that are relevant to this span
-        if ref_size_sum < self.max_ref_tks_sum:
-            changed = self._group_encode_changed_refs(problem.relevant_changes)
-            for i, chunk in enumerate(changed):
-                all_refs.append((f"changed ref {i}", TkArray.new(chunk)))
-            ref_size_sum += sum(len(x) for x in changed)
         if ref_size_sum < self.max_ref_tks_sum:
             unchanged = self._group_encode_unchanged_refs(problem.relevant_unchanged)
             for i, chunk in enumerate(unchanged):
-                all_refs.append((f"unchanged ref {i}", TkArray.new(chunk)))
+                all_refs.append((f"unchanged ref {i}", chunk))
+
+        if ref_size_sum < self.max_ref_tks_sum:
+            changed = self._group_encode_changed_refs(problem.relevant_changes)
+            for i, chunk in enumerate(changed):
+                all_refs.append((f"changed ref {i}", chunk))
+            ref_size_sum += sum(len(x) for x in changed)
 
         # take until we hit the limit
         ref_size_sum = 0
@@ -931,42 +837,41 @@ class C3ProblemTokenizer:
         return input, above_ctx, below_ctx
 
     def _group_encode_unchanged_refs(
-        self, elems: Sequence[ChangedCodeSpan]
-    ) -> Sequence[TokenSeq]:
-        return self._group_encode_changed_refs(elems)
+        self, elems: Mapping[PyFullName, PyDefinition]
+    ) -> Sequence[TkArray]:
+        results = list[TkArray]()
+        this_chunk = TokenSeq()
+        for name, defn in elems.items():
+            parent = ".".join(split_dots(name)[:-1])
+            text = f"at: {parent}\n{defn.signatures}\n\n"
+            tks = encode_lines_join(text)
+            tks = truncate_section(
+                tks, TruncateAt.Right, self.max_ref_tks, inplace=True
+            )
+            if len(this_chunk) + len(tks) > self.max_ref_tks:
+                results.append(TkArray.new(this_chunk))
+                this_chunk = tks
+            else:
+                this_chunk.extend(tks)
+        if this_chunk:
+            results.append(TkArray.new(this_chunk))
+        return results
 
     def _group_encode_changed_refs(
         self, changes: Sequence[ChangedCodeSpan]
-    ) -> Sequence[TokenSeq]:
-        module2changes = groupby(changes, lambda c: c.module)
-        all_chunks = list[TokenSeq]()
-        for change_group in module2changes.values():
-            change_group.sort(key=lambda c: c.line_range[0])
-            segs = list[TokenSeq]()
-            # we'll add module as the chunk header, so we start within the module
-            last_scope = change_group[0].headers[:1]
-            for c in change_group:
-                header_diff = list[ChangedHeader]()
-                for i, h in enumerate(c.headers):
-                    if i >= len(last_scope) or h.path != last_scope[i].path:
-                        header_diff.append(h)
-                if header_diff:
-                    header_tks = self._encode_headers(header_diff, 0)
-                    segs.append(header_tks)
-                c_tks = c.delta.apply_to_change(c.original.tolist())
-                segs.append(c_tks)
-                segs.append([Newline_id, Newline_id])
-                last_scope = c.headers
-            segs.append([Newline_id])
-            mod_change = change_group[0].headers[:1]
-            mod_chunks = break_into_chunks(
-                join_list(segs),
-                lambda i: self._encode_headers(mod_change, i),
-                self.max_ref_tks,
-                overlap=self.ref_chunk_overlap,
-            )
-            all_chunks.extend(mod_chunks)
-        return all_chunks
+    ) -> Sequence[TkArray]:
+        return join_list(self._encode_changed_ref(x) for x in changes)
+
+    def _encode_changed_ref(self, cspan: ChangedCodeSpan) -> Iterable[TkArray]:
+        "encode a single changed reference"
+        cspan_tks = cspan.delta.apply_to_change(cspan.original.tolist())
+        for chunk in break_into_chunks(
+            cspan_tks,
+            lambda i: self._encode_headers(cspan.headers, i),
+            self.max_ref_tks,
+            overlap=self.ref_chunk_overlap,
+        ):
+            yield TkArray.new(chunk)
 
     def _compute_stats(self, problems: Sequence[C3Problem]):
         all_stats = pmap(self._tokenize_stats, problems)

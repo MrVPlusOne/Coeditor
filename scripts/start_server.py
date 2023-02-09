@@ -18,7 +18,7 @@ def start_server(device, port: int, print_stats: bool = True):
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)
-    dec_args = DecodingArgs(do_sample=False, num_beams=1)
+    dec_args = DecodingArgs(do_sample=False, num_beams=4)
 
     services = dict[Path, EditPredictionService]()
 
