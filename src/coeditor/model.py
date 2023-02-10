@@ -328,17 +328,18 @@ class RetrievalEditorModel(T5PreTrainedModel):
             output_dir=str(train_dir),
             overwrite_output_dir=True,
             evaluation_strategy="epoch",
-            save_strategy="epoch",
+            save_strategy="steps",
+            save_steps=max(1, min(5000, epoch_steps // 5)),
             logging_steps=max(1, min(1000, epoch_steps // 10)),
             num_train_epochs=train_args.max_train_epochs,
-            save_total_limit=2,
+            save_total_limit=3,
             lr_scheduler_type=train_args.lr_scheduler_type,
             learning_rate=train_args.learning_rate,
             weight_decay=train_args.weight_decay,
             metric_for_best_model="loss_per_tk",
             greater_is_better=False,
             fp16=True,
-            load_best_model_at_end=True,
+            # load_best_model_at_end=True,
             push_to_hub=False,
             report_to=["wandb"],
             disable_tqdm=True,
@@ -348,7 +349,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         trainer = DynamicTrainer(
             self,
             trainer_args,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
+            # callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
         )
 
         trainer.train()
@@ -1751,23 +1752,25 @@ class C3DataLoader:
             }
         self.epochs += 1
 
-    def _post_process(self, e: TkC3Problem):
+    def _post_process(self, e: TkC3Problem) -> TkC3Problem:
         max_output_tks = self.tokenizer.max_output_tks
         shuffle_extra_ids = self.batch_args.shuffle_extra_ids
-        labels = e.output_tks
-        labels = wrap_bos(labels)
+        output_tks = e.output_tks
+        output_tks = wrap_bos(output_tks)
 
-        if len(labels) > max_output_tks:
-            labels = labels[:max_output_tks]
+        if len(output_tks) > max_output_tks:
+            output_tks = output_tks[:max_output_tks]
 
-        input_ids = e.input_tks
+        main_input = e.main_input.tolist()
 
         if shuffle_extra_ids and random.random() < 0.5:
             id_map = random_extra_id_map()
-            input_ids = [id_map.get(tk, tk) for tk in input_ids]
-            labels = [id_map.get(tk, tk) for tk in labels]
+            main_input = [id_map.get(tk, tk) for tk in main_input]
+            output_tks = [id_map.get(tk, tk) for tk in output_tks]
 
-        return input_ids, labels
+        return dataclasses.replace(
+            e, main_input=TkArray.new(main_input), output=TkArray.new(output_tks)
+        )
 
     def _cost_limit(self) -> float:
         min_queries = self.batch_args.min_queries
@@ -1805,14 +1808,11 @@ class C3DataLoader:
             all_refs = [x[1] for x in tk_prob.named_references]
             ref_size_sum = sum(len(ref) for ref in all_refs)
             assert ref_size_sum <= tkn.max_ref_tks_sum, f"{ref_size_sum=}"
-            input_tks, output_tks = self._post_process(tk_prob)
+            tk_prob = self._post_process(tk_prob)
             cost = retrieval_cost_model(
                 ref_size=ref_size_sum,
-                query_size=len(input_tks),
-                output_size=len(output_tks),
-            )
-            tk_prob = dataclasses.replace(
-                tk_prob, input_tks=input_tks, output_tks=output_tks
+                query_size=len(tk_prob.input_tks),
+                output_size=len(tk_prob.output_tks),
             )
             if cost > cost_limit and not warned_batch_size:
                 warned_batch_size = True

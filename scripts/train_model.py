@@ -20,8 +20,8 @@ from coeditor.model import (
 
 
 def train_model(
-    dataset_name="medium",
-    model_variant="-sig-analysis-post_usees",
+    dataset_name: str,
+    model_variant: str,
     encoder: C3CombinedEncoder = C3CombinedEncoder(),
     batch_args=BatchArgs.train_default(),
     eval_batch_args=BatchArgs.eval_default(),
@@ -180,14 +180,14 @@ if __name__ == "__main__":
     with run_long_task("train_model.py"):
         train_model(
             dataset_name="xl",
-            model_variant="-c3-v1.4",
+            model_variant="-c3-dropout-v1.5",
             train_args=TrainingArgs(
                 max_train_epochs=1,
                 quicktest=False,
             ),
             encoder=C3CombinedEncoder(
-                problem_tranform=C3ProblemSimpleSplit(),
+                problem_tranform=C3ProblemChangeDropout(),
             ),
             recreate_data=False,
-            eval_only=True,
+            eval_only=False,
         )

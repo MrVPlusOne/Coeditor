@@ -18,5 +18,5 @@ if __name__ == "__main__":
     for name, probs in problems.items():
         probs = cast(Sequence[C3Problem], probs)
         print("=" * 40, name, "=" * 40)
-        stats = tokenizer._compute_stats(probs)
+        stats = tokenizer.compute_stats(probs)
         pretty_print_dict(stats)
