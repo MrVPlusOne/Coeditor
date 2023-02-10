@@ -80,6 +80,10 @@ def extra_id_to_number(tk: Token) -> int:
     return _max_extra_id - tk
 
 
+def tk_splitlines(tks: TokenSeq):
+    return split_list(tks, Newline_id)
+
+
 def decode_tokens(tokens: TokenSeq, prettify: bool = False) -> str:
     text = _Tokenizer.decode(tokens, add_special_tokens=False)
     if prettify:
@@ -277,7 +281,7 @@ class TkDelta:
         return self._deltas[line][i]
 
     def apply_to_input(self, input: TokenSeq):
-        lines = split_list(input, Newline_id)
+        lines = tk_splitlines(input)
         new_lines = list[TokenSeq]()
         for i, line in enumerate(lines):
             deleted = False
@@ -299,7 +303,7 @@ class TkDelta:
         return self._deltas.get(line, ())
 
     def apply_to_change(self, change: TokenSeq) -> TokenSeq:
-        lines = split_list(change, Newline_id)
+        lines = tk_splitlines(change)
 
         new_lines = list[TokenSeq]()
         for i, line in enumerate(lines):
@@ -524,7 +528,7 @@ class TkDelta:
 
 
 def change_tks_to_original_delta(change: TokenSeq) -> tuple[TokenSeq, TkDelta]:
-    diffs = split_list(change, Newline_id)
+    diffs = tk_splitlines(change)
     input_lines: list[TokenSeq] = []
     line_delta: list[TokenSeq] = []
     deltas = dict[int, tuple[TokenSeq, ...]]()
@@ -569,7 +573,7 @@ def change_to_tokens(change: Change[str]) -> TokenSeq:
 
 def tokens_to_change(tokens: TokenSeq) -> Modified[str]:
     "Decode a token sequence into a change."
-    tk_lines = split_list(tokens, Newline_id)
+    tk_lines = tk_splitlines(tokens)
 
     before_lines = list[TokenSeq]()
     after_lines = list[TokenSeq]()
@@ -594,7 +598,7 @@ def code_to_input(code_tks: TokenSeq) -> TokenSeq:
     In this format, there will be an <extra_id> token at the beginning of each line.
     An additional <extra_id> will be added at the end to allow appending.
     """
-    tk_lines = split_list(code_tks, Newline_id)
+    tk_lines = tk_splitlines(code_tks)
     tk_lines.append([])
     input_seq = TokenSeq()
     for i, line in enumerate(tk_lines):
@@ -633,7 +637,7 @@ def change_to_input_output(change: Change[str]) -> tuple[TokenSeq, TokenSeq]:
 
 def change_tks_to_input_output(tks: TokenSeq) -> tuple[TokenSeq, TokenSeq]:
     "See `change_to_input_output`."
-    tk_lines = split_list(tks, Newline_id)
+    tk_lines = tk_splitlines(tks)
 
     input_lines: list[TokenSeq] = []
     out_buff = TokenSeq()
@@ -932,7 +936,7 @@ class TokenizedEdit(ABC):
                     continue  # skip empty lines
                 if seg[-1] == Del_id:
                     # show the deleted line
-                    origin_line = split_list(main_tk_lines.get(k, []), Newline_id)[0]
+                    origin_line = tk_splitlines(main_tk_lines.get(k, []))[0]
                     origin_line.append(Newline_id)
                     seg = seg + origin_line
                 label = show_label(id_map.get(k, -1))
@@ -940,13 +944,13 @@ class TokenizedEdit(ABC):
             return "".join(lines)
 
         def show_ctx(ctx_tks: TokenSeq):
-            lines = split_list(ctx_tks, Newline_id)
+            lines = tk_splitlines(ctx_tks)
             return "\n".join("  " + show_content(l) for l in lines)
 
         main_segs = output_ids_as_seqs(self.main_tks)
         id_map = {k: i for i, k in enumerate(main_segs)}
         main_lines = list[str]()
-        for line_tks in split_list(self.main_tks, Newline_id):
+        for line_tks in tk_splitlines(self.main_tks):
             if line_tks and is_extra_id(line_tks[0]):
                 prefix = show_label(id_map.get(line_tks[0], -1))
                 line = prefix + show_content(line_tks[1:])
@@ -994,7 +998,7 @@ class TokenizedEdit(ABC):
             else:
                 return []
 
-        ctx_lines = split_list(self.input_tks, Newline_id)
+        ctx_lines = tk_splitlines(self.input_tks)
         main_lines = output_ids_as_seqs(self.input_tks)
         ctx_addtions = [tks for l in ctx_lines if (tks := get_changes(l, Add_id))]
         ctx_deletions = [tks for l in ctx_lines if (tks := get_changes(l, Del_id))]
@@ -1026,7 +1030,7 @@ class TokenizedEdit(ABC):
         if all(not s for s in out_segs.values()):
             return False
         for k, seg in out_segs.items():
-            for line in split_list(seg, Newline_id):
+            for line in tk_splitlines(seg):
                 if not has_match(line, k):
                     return False
         return True
@@ -1048,7 +1052,7 @@ _OMIT = encode_single_line("...")
 
 
 def compress_change_tks(tks: TokenSeq, max_ctx: int):
-    lines = split_list(tks, sep=Newline_id)
+    lines = tk_splitlines(tks)
     to_keep = [False for _ in lines]
     # mark which lines to keep
     for i, line in enumerate(lines):

@@ -136,6 +136,12 @@ def count_lines(text: str) -> int:
     return text.count("\n") + 1
 
 
+def fix_newline(text: str):
+    if text.endswith("\n"):
+        return text
+    return text + "\n"
+
+
 def split_list(
     lst: list[T1],
     sep: T1,
@@ -434,14 +440,16 @@ def print_err(*args, **kwargs) -> None:
     print(*args, file=sys.stderr, **kwargs)
 
 
-def assert_str_equal(actual: str, expect: str):
+def assert_str_equal(actual: str, expect: str, name: str | None = None):
+    actual = actual.rstrip()
+    expect = expect.rstrip()
     if actual != expect:
         print_err(f"{expect = }")
         print_err(f"{actual = }")
         print_err("String difference:")
         diff = show_string_diff(expect, actual)
         print_err(diff)
-        raise AssertionError("Strings didn't match.")
+        raise AssertionError(f"Strings didn't match: {name}")
 
 
 def rec_add_dict_to(

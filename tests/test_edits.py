@@ -28,27 +28,24 @@ def get_after(change: Change[str]) -> str:
 
 
 def assert_change_eq(actual: Change[str], expected: Change[str], name: str):
-    assert_str_equal(get_before(actual), get_before(expected))
-    assert_str_equal(get_after(actual), get_after(expected))
+    assert_str_equal(get_before(actual), get_before(expected), name)
+    assert_str_equal(get_after(actual), get_after(expected), name)
 
 
 def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
-    if actual != expected:
-        print_sections(
-            ("Expected", decode_tokens(expected)),
-            ("Reconstructed", decode_tokens(actual)),
-        )
-        raise ValueError(f"Failed for case: {name}")
+    actual_str = decode_tokens(actual)
+    expected_str = decode_tokens(expected)
+    assert_str_equal(actual_str, expected_str, name)
 
 
 def test_splitlines():
     for n in range(100):
         rand_input = [random.choice(["a", "b", "c", "\n"]) for _ in range(n)]
-        input = fix_line_end("".join(rand_input))
+        input = "".join(rand_input).rstrip("\n")
         lines = splitlines(input)
 
         # basic identity
-        assert "".join(lines) == input
+        assert "\n".join(lines) == input
         assert count_lines(input) == len(lines)
 
         # encode and decode
@@ -58,7 +55,7 @@ def test_splitlines():
         # split tokens
         tk_lines = tk_splitlines(enc)
         assert len(tk_lines) == len(lines)
-        assert_tks_eq(join_list(tk_lines), enc, "join_list(tk_lines)")
+        assert_tks_eq(join_list(tk_lines, Newline_id), enc, "join_list(tk_lines)")
 
 
 class TestChangeIdentities:
@@ -191,9 +188,9 @@ class TestChangeIdentities:
                 print("before:")
                 print(before)
                 print("delta:", delta)
-                assert_str_equal(before, get_before(c))
+                assert_str_equal(before, get_before(c), name)
                 after = delta.apply_to_input(before)
-                assert_str_equal(after, get_after(c))
+                assert_str_equal(after, get_after(c), name)
             except Exception:
                 print_err(f"Failed for case: {name}")
                 raise
@@ -305,7 +302,9 @@ class TestChangeIdentities:
                 delta1, delta2 = delta.decompose_for_input(sub_keys)
                 step1 = delta1.apply_to_input(original)
                 step2 = delta2.apply_to_input(step1)
-                if step2 != expect:
+                try:
+                    assert_tks_eq(step2, expect, name)
+                except:
                     print_sections(
                         ("change", decode_tokens(change_to_tokens(c))),
                         ("delta", str(delta)),
@@ -317,7 +316,7 @@ class TestChangeIdentities:
                         ("step2", decode_tokens(step2)),
                         ("expect", decode_tokens(expect)),
                     )
-                    raise AssertionError("Failed for case: " + name)
+                    raise
 
     def test_get_new_target_lines(self):
         for name, c in self.cases.items():

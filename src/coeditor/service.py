@@ -33,6 +33,7 @@ from coeditor.encoding import (
     StrDelta,
     TkDelta,
     is_extra_id,
+    tk_splitlines,
     tokens_to_change,
 )
 from coeditor.model import (
@@ -533,25 +534,8 @@ def get_diff_ops(
 
 
 def get_tk_lines(tks: TokenSeq, line_ids: Sequence[int]) -> TokenSeq:
-    lines = split_list(tks, Newline_id)
+    lines = tk_splitlines(tks)
     return join_list((lines[i] for i in line_ids), Newline_id)
-
-
-def replace_lines(text: str, span: CodeRange, replacement: str):
-    start_ln, end_ln = span[0][0] - 1, span[1][0]
-    replacemnet = textwrap.indent(textwrap.dedent(replacement), " " * span[0][1])
-    old_lines = text.split("\n")
-    new_lines = old_lines[:start_ln] + [replacemnet] + old_lines[end_ln + 1 :]
-    return "\n".join(new_lines)
-
-
-def get_span(text: str, span: CodeRange):
-    start_ln, end_ln = span[0][0] - 1, span[1][0]
-    old_lines = text.split("\n")
-    new_lines = old_lines[start_ln : end_ln + 1]
-    new_lines[0] = new_lines[0][span[0][1] :]
-    new_lines[-1] = new_lines[-1][: span[1][1]]
-    return "\n".join(new_lines)
 
 
 def show_location(loc: CodePosition):

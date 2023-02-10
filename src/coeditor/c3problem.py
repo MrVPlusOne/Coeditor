@@ -29,6 +29,7 @@ from .encoding import (
     encode_single_line,
     get_extra_id,
     line_diffs_to_original_delta,
+    tk_splitlines,
     tokens_to_change,
     truncate_output_tks,
     truncate_section,
@@ -132,7 +133,7 @@ class C3Problem:
         change_tks = self.span.delta.apply_to_change(self.span.original.tolist())
         input_l = self.span.line_range[0]
         input_lines = list[int]()
-        for i, tks in enumerate(split_list(change_tks, Newline_id)):
+        for i, tks in enumerate(tk_splitlines(change_tks)):
             if tks and tks[0] == Del_id:
                 continue
             if i in line_ids:
@@ -169,7 +170,7 @@ class PyDefinition:
             if name.type == "module":
                 return
             if signatures:
-                signatures = "sig: " + signatures
+                signatures = signatures
             else:
                 signatures = name.get_line_code()
 
@@ -370,7 +371,7 @@ class C3GeneratorCache:
         target_set = set(target_lines)
         line_ids = list[int]()
         input_l = target.line_range[0]
-        for i, tks in enumerate(split_list(changed_code, Newline_id)):
+        for i, tks in enumerate(tk_splitlines(changed_code)):
             if tks and tks[0] == Del_id:
                 continue
             if input_l in target_set:
@@ -683,7 +684,7 @@ class C3ProblemTokenizer:
 
         original: TokenSeq = span.original.tolist()
         tk_delta: TkDelta = span.delta
-        origin_lines = split_list(original, Newline_id)
+        origin_lines = tk_splitlines(original)
         edit_start = problem.edit_line_ids[0]
         scope_tks = self._encode_headers(span.headers, 0)
         input_limit = self.max_query_tks - len(scope_tks)
