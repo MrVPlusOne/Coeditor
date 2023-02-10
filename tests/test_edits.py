@@ -28,18 +28,8 @@ def get_after(change: Change[str]) -> str:
 
 
 def assert_change_eq(actual: Change[str], expected: Change[str], name: str):
-    if get_before(actual) != get_before(expected):
-        print_sections(
-            ("Expected before", get_before(expected)),
-            ("Reconstructed before", get_before(actual)),
-        )
-        raise ValueError(f"Failed for case: {name}")
-    if get_after(actual) != get_after(expected):
-        print_sections(
-            ("Expected after", get_after(expected)),
-            ("Reconstructed after", get_after(actual)),
-        )
-        raise ValueError(f"Failed for case: {name}")
+    assert_str_equal(get_before(actual), get_before(expected))
+    assert_str_equal(get_after(actual), get_after(expected))
 
 
 def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
@@ -51,10 +41,32 @@ def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
         raise ValueError(f"Failed for case: {name}")
 
 
+def test_splitlines():
+    for n in range(100):
+        rand_input = [random.choice(["a", "b", "c", "\n"]) for _ in range(n)]
+        input = fix_line_end("".join(rand_input))
+        lines = splitlines(input)
+
+        # basic identity
+        assert "".join(lines) == input
+        assert count_lines(input) == len(lines)
+
+        # encode and decode
+        enc = encode_lines_join(input)
+        assert decode_tokens(enc) == input
+
+        # split tokens
+        tk_lines = tk_splitlines(enc)
+        assert len(tk_lines) == len(lines)
+        assert_tks_eq(join_list(tk_lines), enc, "join_list(tk_lines)")
+
+
 class TestChangeIdentities:
     cases: dict[str, Change[str]] = {
         "empty": Modified("", ""),
         "generation": Modified("", "123"),
+        "add a new line": Modified("", "\n"),
+        "add a new line at end": Modified("a", "a\n"),
         "added": Added("a\nb\nc\n"),
         "deleted": Deleted("a\nb\nc\n"),
         "no change": Modified(
@@ -188,17 +200,21 @@ class TestChangeIdentities:
 
     def test_tk_encodings(self):
         for name, c in self.cases.items():
-            # print(show_change(c))
+            print("=" * 40, name, "=" * 40)
             c_tokens = change_to_tokens(c)
-            print("c_tokens\n------\n", decode_tokens(c_tokens))
+            print_sections(
+                ("c_tokens", decode_tokens(c_tokens)),
+            )
             c_rec = tokens_to_change(c_tokens)
             assert_change_eq(
                 c_rec, c, "change_to_tokens |> tokens_to_change = identity: " + name
             )
 
             in_seq, out_seq = change_to_input_output(c)
-            print("in_seq\n------\n", decode_tokens(in_seq))
-            print("out_seq\n------\n", decode_tokens(out_seq))
+            print_sections(
+                ("in_seq", decode_tokens(in_seq)),
+                ("out_seq", decode_tokens(out_seq)),
+            )
 
             assert_tks_eq(
                 in_seq,
@@ -208,12 +224,10 @@ class TestChangeIdentities:
 
             if len(splitlines(get_before(c))) < N_Extra_Ids:
                 inlined = inline_output_tokens(in_seq, out_seq)
-                if inlined:
-                    assert inlined[-1] == Newline_id
                 assert_tks_eq(
-                    inlined[:-1], change_to_tokens(c), "inline_output_tokens: " + name
+                    inlined, change_to_tokens(c), "inline_output_tokens: " + name
                 )
-                c_rec2 = tokens_to_change(inlined[:-1])
+                c_rec2 = tokens_to_change(inlined)
                 assert_change_eq(c_rec2, c, "tokens_to_change(inlined): " + name)
 
     def test_str_tk_conversion(self):
@@ -281,7 +295,9 @@ class TestChangeIdentities:
     def test_delta_decomposition(self):
         for name, c in self.cases.items():
             original, delta = TkDelta.from_change_tks(change_to_tokens(c))
+            assert_tks_eq(original, encode_lines_join(get_before(c)), name)
             expect = delta.apply_to_input(original)
+            assert_tks_eq(expect, encode_lines_join(get_after(c)), name)
             keys = tuple(delta.keys())
             for _ in range(50):
                 n_keys = int(len(keys) * random.random())
@@ -290,27 +306,23 @@ class TestChangeIdentities:
                 step1 = delta1.apply_to_input(original)
                 step2 = delta2.apply_to_input(step1)
                 if step2 != expect:
-                    print_err(f"{sub_keys=}")
-                    print_err("earlier", SEP)
-                    print_err(c.earlier)
-                    print_err("Original", SEP)
-                    print_err(decode_tokens(original))
-                    print_err("Expect", SEP)
-                    print_err(decode_tokens(expect))
-                    print_err("delta1", SEP)
-                    print_err(delta1)
-                    print_err("step1", SEP)
-                    print_err(decode_tokens(step1))
-                    print_err("delta2", SEP)
-                    print_err(delta2)
-                    print_err("step2", SEP)
-                    print_err(decode_tokens(step2))
+                    print_sections(
+                        ("change", decode_tokens(change_to_tokens(c))),
+                        ("delta", str(delta)),
+                        ("sub_keys", str(sub_keys)),
+                        ("original", decode_tokens(original)),
+                        ("delta1", str(delta1)),
+                        ("step1", decode_tokens(step1)),
+                        ("delta2", str(delta2)),
+                        ("step2", decode_tokens(step2)),
+                        ("expect", decode_tokens(expect)),
+                    )
                     raise AssertionError("Failed for case: " + name)
 
     def test_get_new_target_lines(self):
         for name, c in self.cases.items():
             original, delta = TkDelta.from_change_tks(change_to_tokens(c))
-            n_origin_lines = len(split_list(original, Newline_id))
+            n_origin_lines = len(tk_splitlines(original))
             edit_lines = range(n_origin_lines + 1)
             keys = tuple(delta.keys())
             for _ in range(10):
