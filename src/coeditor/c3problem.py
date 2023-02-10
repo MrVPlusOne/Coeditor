@@ -185,6 +185,7 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
+    - v2.8: Fix module usages in `pre_edit_analysis`. Sort changes using heuristic.
     - v2.7: Use new PyDefiniton that includes signatures.
     - v2.6: fix missing changes in `JModuleChanges`. Rename to edit_line_ids.
     - v2.5: fix newline encoding bug.
@@ -193,7 +194,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "2.7"
+    VERSION = "2.8"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
 
@@ -228,15 +229,18 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
         src_map = {m.mname: f for f, m in modules.items()}
         for mname, mchange in changes.items():
+            result[mname] = LineUsageAnalysis({})
             if not isinstance(mchange.module_change, Modified):
                 continue
 
             lines_to_analyze = set[int]()
             for span in mchange.changed:
-                if span.change is Added:
+                if not isinstance(span.change, Modified):
                     continue
                 lines_to_analyze.update(span.line_range.to_range())
                 lines_to_analyze.update(span.header_line_range.to_range())
+            if not lines_to_analyze:
+                continue
 
             mod_path = src_map[mname]
             script = pstate.scripts[mod_path]
@@ -286,7 +290,9 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         for m in module_order:
             if (mchange := pchange.changed.get(m)) is None:
                 continue
-            usages = mod2usages[m]
+            if not (usages := mod2usages.get(m)):
+                usages = LineUsageAnalysis({})
+                warnings.warn("Unexpected: usages missing for module: " + str(m))
             for span in mchange.changed:
                 code_span = cache.to_code_span(span)
                 should_mk_problem = (
@@ -297,8 +303,11 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 )
                 if should_mk_problem:
                     # latest changes are more relevant
-                    relevant_changes = list(reversed(processed_cspans))
                     relevant_unchanged = cache.get_relevant_unchanged(code_span, usages)
+                    relevant_changes = list(reversed(processed_cspans))
+                    relevant_changes = cache.sort_changes(
+                        code_span, relevant_unchanged, relevant_changes
+                    )
                     src_info: SrcInfo = {
                         "project": pchange.project_name,
                         "commit": pchange.commit_info,
@@ -382,6 +391,10 @@ class C3GeneratorCache:
         )
         relevant_unchanged = self.get_relevant_unchanged(code_span, target_usages)
 
+        relevant_changes = self.sort_changes(
+            code_span, relevant_unchanged, relevant_changes
+        )
+
         prob = C3Problem(
             code_span,
             line_ids,
@@ -414,6 +427,38 @@ class C3GeneratorCache:
                 sorted_defs.setdefault(pydef.full_name, pydef)
 
         return sorted_defs
+
+    max_distance_penalty = 1000
+    usage_bonus = 2000
+
+    def sort_changes(
+        self,
+        target: ChangedCodeSpan,
+        used_defs: Mapping[PyFullName, PyDefinition],
+        changed: Sequence[ChangedCodeSpan],
+    ) -> Sequence[ChangedCodeSpan]:
+        def distance_penalty(cspan: ChangedCodeSpan) -> int:
+            if cspan.module != target.module:
+                return self.max_distance_penalty
+            dis_above = abs(target.line_range[0] - cspan.line_range[1])
+            dis_below = abs(cspan.line_range[0] - target.line_range[1])
+            return min(self.max_distance_penalty, dis_above, dis_below)
+
+        def usage_penalty(cspan: ChangedCodeSpan) -> int:
+            path = cspan.headers[-1].path
+            fullname = path.module + "." + path.path
+            if fullname in used_defs:
+                return -self.usage_bonus
+            return 0
+
+        def length_penalty(cspan: ChangedCodeSpan) -> int:
+            return len(cspan.original) + cspan.delta.change_size()
+
+        result = list(changed)
+        result.sort(
+            key=lambda x: distance_penalty(x) + usage_penalty(x) + length_penalty(x)
+        )
+        return result
 
     def to_header(self, cs: Change[ChangeScope]) -> ChangedHeader:
         path = cs.earlier.path
@@ -473,7 +518,7 @@ class C3ProblemSimpleSplit(C3ProblemTransform):
             sub_delta = delta.for_input_range((i, j))
             if sub_delta.num_changes() > 0:
                 sub_prob = dataclasses.replace(
-                    prob, edit_lines=range(i, j), transformations=new_trans
+                    prob, edit_line_ids=range(i, j), transformations=new_trans
                 )
                 problems.append(sub_prob)
             if len(problems) >= self.max_split_factor:
@@ -563,16 +608,16 @@ class C3ProblemChangeDropout(C3ProblemTransform):
         prob_and_n = list[tuple[C3Problem, int]]()
         for i in range(start, stop, self.max_lines_to_edit):
             j = min(i + self.max_lines_to_edit, stop)
-            edit_lines = range(i, j)
+            edit_line_ids = range(i, j)
             if delta1 is not None:
-                edit_lines = delta1.get_new_target_lines(edit_lines)
-            line_set = set(edit_lines)
+                edit_line_ids = delta1.get_new_target_lines(edit_line_ids)
+            line_set = set(edit_line_ids)
             n_groups = sum(any(key[0] in line_set for key in g) for g in delta2_groups)
             if n_groups > 0:
                 sub_prob = dataclasses.replace(
                     prob,
                     span=new_span,
-                    edit_lines=edit_lines,
+                    edit_line_ids=edit_line_ids,
                     transformations=new_trans,
                 )
                 prob_and_n.append((sub_prob, n_groups))
@@ -883,7 +928,7 @@ class C3ProblemTokenizer:
         ):
             yield TkArray.new(chunk)
 
-    def _compute_stats(self, problems: Sequence[C3Problem]):
+    def compute_stats(self, problems: Sequence[C3Problem]):
         all_stats = pmap(self._tokenize_stats, problems)
         if not all_stats:
             return dict()
