@@ -1,5 +1,6 @@
 import dataclasses
 from pprint import pprint
+from textwrap import indent
 
 import jedi
 import jedi.cache
@@ -146,45 +147,42 @@ class C3Problem:
 PyFullName = NewType("PyFullName", str)
 
 
-@dataclass(frozen=True)
+@dataclass
 class PyDefinition:
-    """Note that the module and positions can be referring to either the import
-    statement or the actual definition."""
-
     full_name: PyFullName
-    start_pos: tuple[int, int] | None
-    end_pos: tuple[int, int] | None
-    signatures: str
+    start_locs: set[tuple[int, int]]
+    signatures: set[str]
 
-    @staticmethod
-    def from_name(name: classes.BaseName) -> Iterable["PyDefinition"]:
-        if (
-            not name.in_builtin_module()
-            and (full_name := name.full_name)
-            and (signatures := name._get_docstring_signature() or name.get_line_code())
-        ):
-            full_name = PyFullName(full_name)
-            start_pos = name.get_definition_start_position()
-            end_pos = name.get_definition_end_position()
-            signatures = name._get_docstring_signature()
-            if name.type == "module":
-                return
-            if signatures:
-                signatures = signatures
-            else:
-                signatures = name.get_line_code()
+    def __post_init__(self):
+        self.parent = ".".join(split_dots(self.full_name)[:-1])
 
-            yield PyDefinition(full_name, start_pos, end_pos, signatures)
+    def update(self, name: classes.BaseName):
+        if name.type not in ("function", "statement", "class"):
+            return
+        assert_eq(name.full_name, self.full_name)
+        if loc := name.get_definition_start_position():
+            self.start_locs.add(loc)
+
+        if name.type == "statement":
+            stmt = name._name.tree_name.search_ancestor("simple_stmt")
+            if stmt:
+                assert isinstance(stmt, ptree.PythonNode)
+                self.signatures.add(stmt.get_code(include_prefix=False).strip())
+            return
+
+        for sig in name._get_signatures(for_docstring=True):
+            self.signatures.add(sig.to_string().strip())
 
 
 @dataclass(frozen=True)
 class LineUsageAnalysis:
-    line2usages: Mapping[int, set[PyDefinition]]
+    line2usages: Mapping[int, Sequence[PyDefinition]]
 
 
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
+    - v2.9: Add sibling usages for class members. Improve statement signatures.
     - v2.8: Fix module usages in `pre_edit_analysis`. Sort changes using heuristic.
     - v2.7: Use new PyDefiniton that includes signatures.
     - v2.6: fix missing changes in `JModuleChanges`. Rename to edit_line_ids.
@@ -194,7 +192,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "2.8"
+    VERSION = "2.9"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
 
@@ -412,21 +410,18 @@ class C3GeneratorCache:
     ):
         module = this_change.module
         # parent defs are also considered as used
-        sorted_defs = dict[PyFullName, PyDefinition]()
+        name2def = dict[PyFullName, PyDefinition]()
         all_lines = set(this_change.line_range.to_range())
         all_lines.update(this_change.headers[-1].line_range.to_range())
         for l in all_lines:
-            for pydef in line_usages.line2usages.get(l, set()):
-                if (
-                    pydef.full_name.startswith(module)
-                    and pydef.start_pos
-                    and pydef.start_pos[0] in all_lines
+            for pydef in line_usages.line2usages.get(l, []):
+                if pydef.full_name.startswith(module) and any(
+                    l in all_lines for l in pydef.start_locs
                 ):
                     # skip self references
                     continue
-                sorted_defs.setdefault(pydef.full_name, pydef)
-
-        return sorted_defs
+                name2def.setdefault(pydef.full_name, pydef)
+        return {k: name2def[k] for k in sorted(name2def.keys())}
 
     max_distance_penalty = 1000
     usage_bonus = 2000
@@ -693,10 +688,11 @@ class C3TokenizerArgs(TypedDict):
 class C3ProblemTokenizer:
     """
     ## Change log
+    - 2.5: Sort used references by path.
     - 2.4: Encode each changed reference individually. Encode signatures for unchanged.
     """
 
-    VERSION = "2.4"
+    VERSION = "2.5"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
@@ -892,13 +888,18 @@ class C3ProblemTokenizer:
     def _group_encode_unchanged_refs(
         self, elems: Mapping[PyFullName, PyDefinition]
     ) -> Sequence[TkArray]:
+        def sort_key(e: PyDefinition):
+            return (e.parent, min(e.start_locs, default=(0, 0)))
+
         results = list[TkArray]()
         this_chunk = TokenSeq()
-        for name, defn in elems.items():
-            parent = ".".join(split_dots(name)[:-1])
-            if not parent:
-                continue
-            text = f"at: {parent}\n{defn.signatures}\n\n"
+        sorted_elems = [e for e in elems.values() if e.signatures and e.parent]
+        sorted_elems.sort(key=sort_key)
+        last_parent = None
+        for defn in sorted_elems:
+            parent = defn.parent
+            header = f"at: {parent}\n" if parent != last_parent else ""
+            text = header + indent("\n".join(s for s in defn.signatures), TAB) + "\n\n"
             tks = encode_lines_join(text)
             tks = truncate_section(
                 tks, TruncateAt.Right, self.max_ref_tks, inplace=True
@@ -908,6 +909,7 @@ class C3ProblemTokenizer:
                 this_chunk = tks
             else:
                 this_chunk.extend(tks)
+            last_parent = parent
         if this_chunk:
             results.append(TkArray.new(this_chunk))
         return results
@@ -947,6 +949,8 @@ class C3ProblemTokenizer:
 
 @dataclass
 class JediUsageAnalyzer:
+    include_parent_usages: bool = True
+
     _KnownJediErrors = {
         "not enough values to unpack (expected 2",
         "'Newline' object has no attribute 'children'",
@@ -967,33 +971,74 @@ class JediUsageAnalyzer:
         silent: bool = False,
     ):
         jmod: tree.Module = script._module_node
-        line2usages = dict[int, set[PyDefinition]]()
+        name2def_node = dict[PyFullName, list[classes.Name]]()
+        line2usages = dict[int, set[PyFullName]]()
+        registered_classes = set[PyFullName]()
+
+        def register_usage(cname: classes.Name, usages: set[PyFullName]):
+            fname = cname.full_name
+            if fname is None:
+                return
+            fname = PyFullName(fname)
+            usages.add(fname)
+            name2def_node.setdefault(fname, list()).append(cname)
+            # FIXME: wait until the jedi bug is fixed
+            # if self.include_parent_usages and (parent := cname.parent()):
+            # if cname.type == "statement" and parent.type == "class":
+            # register_usage(parent, usages)
+
+        def register_class_usage(cname: classes.Name, usages: set[PyFullName]):
+            assert_eq(cname.type, "class")
+            if not cname.full_name or cname.full_name in registered_classes:
+                return
+            for n in cname.defined_names():
+                if n.type == "statement":
+                    register_usage(n, usages)
+            registered_classes.add(PyFullName(cname.full_name))
+
         all_names = [
-            name for k, names in jmod.get_used_names()._dict.items() for name in names
+            name for names in jmod.get_used_names()._dict.values() for name in names
         ]
         all_names.sort(key=lambda x: x.start_pos)
         all_names = [n for n in all_names if n.start_pos[0] in lines_to_analyze]
-        for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
-            name: tree.Name
-            line = name.start_pos[0]
-            usages = line2usages.setdefault(line, set())
-            try:
-                defs = _fast_goto(
+        name2pydef = dict[PyFullName, PyDefinition]()
+
+        try:
+            for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
+                name: tree.Name
+                line = name.start_pos[0]
+                usages = line2usages.setdefault(line, set())
+                cnames = _fast_goto(
                     script,
                     name,
                     follow_imports=True,
                     follow_builtin_imports=False,
                 )
-                for d in defs:
-                    usages.update(PyDefinition.from_name(d))
+                for cname in cnames:
+                    register_usage(cname, usages)
+                    if (parent := cname.parent()) and parent.type == "class":
+                        register_class_usage(parent, usages)
 
-            except Exception as e:
-                err_text = repr(e)
-                str_limit = 40
-                if len(err_text) > str_limit:
-                    err_text = err_text[:str_limit] + "..."
-                self.add_error(err_text)
-        return LineUsageAnalysis(line2usages)
+            for fname, nodes in name2def_node.items():
+                pdef = PyDefinition(fname, set(), set())
+                for n in nodes:
+                    pdef.update(n)
+                name2pydef[fname] = pdef
+        except Exception as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            err_text = repr(e)
+            str_limit = 80
+            if len(err_text) > str_limit:
+                err_text = err_text[:str_limit] + "..."
+            self.add_error(err_text)
+
+        return LineUsageAnalysis(
+            {
+                k: [name2pydef[n] for n in sorted(names) if n in name2pydef]
+                for k, names in line2usages.items()
+            }
+        )
 
     def add_error(self, err_text: str):
         self.error_counts[err_text] = self.error_counts.get(err_text, 0) + 1

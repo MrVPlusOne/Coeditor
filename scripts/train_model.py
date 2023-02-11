@@ -7,7 +7,7 @@ import wandb
 from prepare_data import make_or_load_dataset
 
 from coeditor._utils import cprint, run_long_task
-from coeditor.c3problem import C3ProblemChangeDropout, C3ProblemSimpleSplit
+from coeditor.c3problem import C3ProblemChangeDropout
 from coeditor.common import *
 from coeditor.dataset import C3CombinedEncoder, C3ProblemDataset
 from coeditor.model import (
@@ -88,7 +88,10 @@ def train_model(
 
     train_tkn = encoder.edit_tokenizer
     eval_tkn = copy.deepcopy(train_tkn)
+    eval_tkn.max_query_tks *= 2
+    eval_tkn.max_output_tks *= 2
     eval_tkn.max_ref_tks_sum *= 2
+
     eval_loader = C3DataLoader(
         datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
     )

@@ -173,6 +173,7 @@ def join_list(
     return result
 
 
+TAB = " " * 4
 SEP = "-" * 80
 HtmlCode = str
 

@@ -45,17 +45,21 @@ def test_anlayzing_defs():
         "coeditor.common.ProjectPath",
     )
 
-    assert_has_usages(
-        analysis.line2usages[22],
-        "defs.ChangeScope.tree",
-        "defs.ScopeTree",
-    )
+    with pytest.raises(AssertionError):
+        # wait for jedi to be fixed.
+        assert_has_usages(
+            analysis.line2usages[22],
+            "defs.ChangeScope.tree",
+            "defs.ChangeScope",  # include parent usage as well
+            "defs.ScopeTree",
+        )
 
-    assert_has_usages(
-        analysis.line2usages[23],
-        "defs.ChangeScope.spans",
-        "typing.Sequence",
-    )
+        assert_has_usages(
+            analysis.line2usages[23],
+            "defs.ChangeScope.spans",
+            "defs.ChangeScope",
+            "typing.Sequence",
+        )
 
     assert_has_usages(
         analysis.line2usages[24],
@@ -86,6 +90,30 @@ def test_anlayzing_defs():
         "parso.python.tree.Scope.get_suite",
         # "parso.python.tree.BaseNode.children",
     )
+
+
+@pytest.mark.xfail(reason="Due to jedi bug")
+def test_dataclass_signature():
+    s = jedi.Script(
+        dedent(
+            """\
+        from dataclasses import dataclass
+        @dataclass
+        class Foo:
+            bar: int
+        """
+        )
+    )
+
+    defs = s.goto(3, 8)  # go to Foo directly
+    assert len(defs) == 1
+    n = defs[0]
+    assert n._get_docstring_signature() == "Foo(bar: int)"
+
+    defs = s.goto(4, 6)  # first go to bar
+    print(f"{len(defs)=}")
+    n = defs[0].parent()  # then go to parent
+    assert n._get_docstring_signature() == "Foo(bar: int)"
 
 
 def test_anlayzing_usages():
