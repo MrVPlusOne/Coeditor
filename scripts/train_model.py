@@ -115,6 +115,8 @@ def train_model(
                 shuffle=True,
                 desc="warm-up training",
             )
+            print("Warmup batch stats:")
+            pprint(warmup_loader.get_batch_stats())
 
             warmup_targs = copy.deepcopy(train_args)
             warmup_targs.learning_rate *= 4
@@ -130,6 +132,8 @@ def train_model(
                 shuffle=True,
                 desc="training",
             )
+            print("Fine-tune batch stats:")
+            pprint(train_loader.get_batch_stats())
             model.train_on_data(model_name, train_loader, eval_loader, train_args)
 
     model.to("cuda")
@@ -183,7 +187,7 @@ if __name__ == "__main__":
     with run_long_task("train_model.py"):
         train_model(
             dataset_name="xl",
-            model_variant="-c3-dropout-v1.5",
+            model_variant="-c3-dropout-v1.6",
             train_args=TrainingArgs(
                 max_train_epochs=1,
                 quicktest=False,

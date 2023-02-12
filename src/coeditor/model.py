@@ -329,7 +329,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             overwrite_output_dir=True,
             evaluation_strategy="epoch",
             save_strategy="steps",
-            save_steps=max(1, min(5000, epoch_steps // 5)),
+            save_steps=max(500, min(5000, epoch_steps // 5)),
             logging_steps=max(1, min(1000, epoch_steps // 10)),
             num_train_epochs=train_args.max_train_epochs,
             save_total_limit=3,
@@ -1693,6 +1693,9 @@ class C3DataLoader:
 
     def __len__(self) -> int:
         return self._len_est
+
+    def get_batch_stats(self):
+        return self._batch_stast
 
     def _to_tokenized(self, probs: Sequence[C3Problem]) -> Iterable[TkC3Problem]:
         probs = list(probs)
