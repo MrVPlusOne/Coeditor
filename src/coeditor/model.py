@@ -179,12 +179,12 @@ class RetrievalDecodingResult:
             if not prob.edit_line_ids:
                 bad_probs.append(prob)
                 continue
-            line_shift = prob.edit_line_ids[0]
-            pred_change = pred_delta.shifted(line_shift).apply_to_change(original)
-            label_change = label_delta.shifted(line_shift).apply_to_change(original)
+            pred_change = pred_delta.apply_to_change(original)
+            label_change = label_delta.apply_to_change(original)
             pred_code = tokens_to_change(pred_change).after
             label_code = tokens_to_change(label_change).after
-            ex2correct[i] = code_equal(pred_code, label_code)
+            is_correct = code_equal(pred_code, label_code)
+            ex2correct[i] = is_correct
         correct_count = CountedSum(sum(ex2correct.values()), len(ex2correct))
         if bad_probs:
             cprint("yellow", "Number of problems with no edits:", len(bad_probs))

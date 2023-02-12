@@ -899,6 +899,8 @@ class TokenizedEdit(ABC):
     path: ProjectPath
     change_type: Change[None]
 
+    BAD_DELETE = encode_single_line("((bad delete))")
+
     @abstractmethod
     def all_ctxs(self) -> dict[str, TokenSeq]:
         pass
@@ -936,7 +938,11 @@ class TokenizedEdit(ABC):
                     continue  # skip empty lines
                 if seg[-1] == Del_id:
                     # show the deleted line
-                    origin_line = tk_splitlines(main_tk_lines.get(k, []))[0]
+                    section_lines = tk_splitlines(main_tk_lines.get(k, TokenSeq()))
+                    if section_lines:
+                        origin_line = section_lines[0]
+                    else:
+                        origin_line = self.BAD_DELETE
                     origin_line.append(Newline_id)
                     seg = seg + origin_line
                 label = show_label(id_map.get(k, -1))
