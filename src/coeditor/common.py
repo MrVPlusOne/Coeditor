@@ -60,7 +60,8 @@ RelPath = NewType("RelPath", Path)
 AbsPath = NewType("AbsPath", Path)
 
 
-def to_rel_path(path: Path) -> RelPath:
+def to_rel_path(path: os.PathLike) -> RelPath:
+    path = Path(path)
     if path.is_absolute():
         raise ValueError(f"Expected a relative path, got: {path}")
     return RelPath(path)
