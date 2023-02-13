@@ -272,14 +272,15 @@ class ChangeDetector:
 
 
 # add, delete, replace, equal
-StatusTag = Literal["A", "D", "R", " "]
+StatusTag = Literal["A", "D", "R", " ", "RA", "RD"]
 
 
 class EditSuggestion(TypedDict):
     score: float
     change_preview: str
     new_code: str
-    line_status: list[tuple[int, StatusTag]]
+    input_status: list[tuple[int, StatusTag]]
+    output_status: list[tuple[int, StatusTag]]
 
 
 def path_to_module_name(rel_path: RelPath) -> ModuleName:
@@ -437,26 +438,18 @@ class EditPredictionService:
                         splitlines(pred_change.after),
                     )
                 )
-                diff_ops = get_diff_ops(
-                    splitlines(pred_change.before), splitlines(pred_change.after)
-                )
-                line_status = dict[int, StatusTag]()
-                for tag, (i1, i2), _ in diff_ops:
-                    if tag == "A":
-                        line_status[i1] = "A"
-                        continue
-                    for i in range(i1, i2):
-                        if i not in line_status:
-                            line_status[i] = tag
-                line_status = [
-                    (i + target_lines[0], tag) for i, tag in line_status.items()
+                input_status, change_status = compute_line_status(pred_change)
+                input_status = [
+                    (i + target_lines[0], tag) for i, tag in input_status.items()
                 ]
+                output_status = list(change_status.items())
 
                 suggestion = EditSuggestion(
                     score=pred.score,
                     change_preview=preview,
                     new_code=pred_change.after,
-                    line_status=line_status[: len(target_lines)],
+                    input_status=input_status,
+                    output_status=output_status,
                 )
                 suggestions.append(suggestion)
 
@@ -553,3 +546,33 @@ def get_tk_lines(tks: TokenSeq, line_ids: Sequence[int]) -> TokenSeq:
 
 def show_location(loc: CodePosition):
     return f"{loc[0]}:{loc[1]}"
+
+
+def compute_line_status(change: Modified[str]):
+    diff_ops = get_diff_ops(splitlines(change.before), splitlines(change.after))
+    offset = 0
+    # the line status for the lines before the edit
+    before_status = dict[int, StatusTag]()
+    # the line status for the lines in the delta file
+    change_status = dict[int, StatusTag]()
+    for tag, (i1, i2), (j1, j2) in diff_ops:
+        if tag == "A":
+            before_status[i1] = "A"
+            for j in range(j1, j2):
+                change_status[offset + j] = "A"
+            continue
+        if tag == "D":
+            for _ in range(i2 - i1):
+                change_status[offset + j1] = "D"
+                offset += 1
+        if tag == "R":
+            for _ in range(i2 - i1):
+                change_status[offset + j1] = "RD"
+                offset += 1
+            for j in range(j1, j2):
+                change_status[offset + j] = "RA"
+        for i in range(i1, i2):
+            if i not in before_status:
+                before_status[i] = tag
+
+    return before_status, change_status

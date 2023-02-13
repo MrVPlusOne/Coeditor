@@ -13,16 +13,37 @@ from coeditor.service import (
 )
 
 
+class LazyVal(Generic[T1]):
+    def __init__(self, task: Callable[[], T1], tag: int):
+        self._finished = False
+        self._task = task
+        self.id = tag
+
+    def get(self) -> T1:
+        if not self._finished:
+            assert self._task is not None
+            v = self._task()
+            self._task = None
+            self._finished = True
+            self._result = v
+        return self._result
+
+
 def start_server(device, port: int, print_stats: bool = True):
     # this newer model is trained with comments
-    model_path = "MrVPlusOne/coeditor-xl-c3-dropout-v1.4"
+    # model_path = "MrVPlusOne/coeditor-xl-c3-dropout-v1.5"
+    model_path = (
+        get_model_dir(trained=False)
+        / "coeditor-xl-c3-dropout-v1.5"
+        / "checkpoint-230000"
+    )
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)
     dec_args = DecodingArgs(do_sample=False, num_beams=4)
 
     services = dict[Path, EditPredictionService]()
-    continuations = dict[Path, Callable[[], ServiceResponse]]()
+    tasks = dict[Path, LazyVal[ServiceResponse]]()
 
     def handle_error(f, *args, **kwargs):
         @wraps(f)
@@ -37,19 +58,28 @@ def start_server(device, port: int, print_stats: bool = True):
 
     @method
     @handle_error
-    def submit_problem(
-        project: str, file: str, lines: Sequence[int] | int, writeLogs: bool
-    ):
+    def initialize(project: str):
         target_dir = Path(project).resolve()
-        if (service := services.get(target_dir)) is None:
+        tasks.pop(target_dir, None)
+
+        if target_dir not in services:
             with timed_action(f"Create service for project: {target_dir}"):
                 detector = ChangeDetector(target_dir)
-                service = EditPredictionService(
+                services[target_dir] = EditPredictionService(
                     detector,
                     model,
                     dec_args=dec_args,
                 )
-                services[target_dir] = service
+
+        return Success("OK")
+
+    @method
+    @handle_error
+    def submit_problem(
+        id: int, project: str, file: str, lines: Sequence[int] | int, writeLogs: bool
+    ):
+        target_dir = Path(project).resolve()
+        service = services[target_dir]
 
         print(f"Suggesting edit for lines {lines} in {file}")
         path = Path(file)
@@ -59,16 +89,20 @@ def start_server(device, port: int, print_stats: bool = True):
 
         service.tlogger.clear()
         log_dir = service.project / ".coeditor_logs" if writeLogs else None
-        region, cont = service._suggest_edit_two_steps(path, lines, log_dir)
-        continuations[target_dir] = cont
+        region, f = service._suggest_edit_two_steps(path, lines, log_dir)
+        if target_dir in tasks and tasks[target_dir].id > id:
+            return Success("Skipped")
+        tasks[target_dir] = LazyVal(f, id)
         return Success(region.target_lines)
 
     @method
     @handle_error
-    def get_result(project: str):
+    def get_result(id: int, project: str):
         target_dir = Path(project).resolve()
-        f = continuations.pop(target_dir)
-        response = f()
+        cont = tasks[target_dir]
+        if cont.id > id:
+            return Success("Skipped")
+        response = cont.get()
         service = services[target_dir]
         if print_stats:
             print("Runtime stats:")
