@@ -5,6 +5,10 @@ from coeditor.encoding import *
 from coeditor.encoding import _BaseTokenizer, _Tokenizer
 
 
+def get_rng():
+    return random.Random(42)
+
+
 def get_before(change: Change[str]) -> str:
     if isinstance(change, Modified):
         return change.before
@@ -39,8 +43,9 @@ def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
 
 
 def test_splitlines():
+    rng = get_rng()
     for n in range(100):
-        rand_input = [random.choice(["a", "b", "c", "\n"]) for _ in range(n)]
+        rand_input = [rng.choice(["a", "b", "c", "\n"]) for _ in range(n)]
         input = "".join(rand_input).rstrip("\n")
         lines = splitlines(input)
 
@@ -274,30 +279,34 @@ class TestChangeIdentities:
                 raise AssertionError(f"apply_to_change failed: {name}")
 
     def test_random_subset(self):
+        rng = get_rng()
+
         def is_sorted(xs):
             return list(xs) == list(sorted(xs))
 
         xs = range(50)
         assert is_sorted(xs)
-        for _ in range(50):
-            ys = random_subset(xs, 20)
+        for _ in range(100):
+            ys = random_subset(xs, 20, rng)
             assert is_sorted(ys)
 
         x_map = {i: i + 1 for i in range(50)}
         assert is_sorted(x_map)
-        for _ in range(50):
-            y_map = random_subset(x_map, 20)
+        for _ in range(100):
+            y_map = random_subset(x_map, 20, rng)
             assert is_sorted(y_map)
 
     def test_delta_decomposition(self):
+        rng = get_rng()
+
         for name, c in self.cases.items():
             original, delta = TkDelta.from_change_tks(change_to_tokens(c))
             assert_tks_eq(original, encode_lines_join(get_before(c)), name)
             expect = delta.apply_to_input(original)
             assert_tks_eq(expect, encode_lines_join(get_after(c)), name)
             keys = tuple(delta.keys())
-            for _ in range(50):
-                n_keys = int(len(keys) * random.random())
+            for _ in range(100):
+                n_keys = int(len(keys) * rng.random())
                 sub_keys = random_subset(keys, n_keys)
                 delta1, delta2 = delta.decompose_for_input(sub_keys)
                 step1 = delta1.apply_to_input(original)
@@ -319,13 +328,15 @@ class TestChangeIdentities:
                     raise
 
     def test_get_new_target_lines(self):
+        rng = get_rng()
+
         for name, c in self.cases.items():
             original, delta = TkDelta.from_change_tks(change_to_tokens(c))
             n_origin_lines = len(tk_splitlines(original))
             edit_lines = range(n_origin_lines + 1)
             keys = tuple(delta.keys())
-            for _ in range(10):
-                n_keys = int(len(keys) * random.random())
+            for _ in range(100):
+                n_keys = int(len(keys) * rng.random())
                 sub_keys = random_subset(keys, n_keys)
                 sub_keys.sort()
                 delta1, delta2 = delta.decompose_for_change(sub_keys)
