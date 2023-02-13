@@ -30,13 +30,8 @@ class LazyVal(Generic[T1]):
 
 
 def start_server(device, port: int, print_stats: bool = True):
-    # this newer model is trained with comments
     # model_path = "MrVPlusOne/coeditor-xl-c3-dropout-v1.5"
-    model_path = (
-        get_model_dir(trained=False)
-        / "coeditor-xl-c3-dropout-v1.5"
-        / "checkpoint-230000"
-    )
+    model_path = get_model_dir() / "coeditor-xl-c3-dropout-v1.5"
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)
@@ -60,7 +55,6 @@ def start_server(device, port: int, print_stats: bool = True):
     @handle_error
     def initialize(project: str):
         target_dir = Path(project).resolve()
-        tasks.pop(target_dir, None)
 
         if target_dir not in services:
             with timed_action(f"Create service for project: {target_dir}"):
@@ -76,8 +70,9 @@ def start_server(device, port: int, print_stats: bool = True):
     @method
     @handle_error
     def submit_problem(
-        id: int, project: str, file: str, lines: Sequence[int] | int, writeLogs: bool
+        time: int, project: str, file: str, lines: Sequence[int] | int, writeLogs: bool
     ):
+        initialize(project)
         target_dir = Path(project).resolve()
         service = services[target_dir]
 
@@ -90,17 +85,17 @@ def start_server(device, port: int, print_stats: bool = True):
         service.tlogger.clear()
         log_dir = service.project / ".coeditor_logs" if writeLogs else None
         region, f = service._suggest_edit_two_steps(path, lines, log_dir)
-        if target_dir in tasks and tasks[target_dir].id > id:
+        if target_dir in tasks and tasks[target_dir].id > time:
             return Success("Skipped")
-        tasks[target_dir] = LazyVal(f, id)
+        tasks[target_dir] = LazyVal(f, time)
         return Success(region.target_lines)
 
     @method
     @handle_error
-    def get_result(id: int, project: str):
+    def get_result(time: int, project: str):
         target_dir = Path(project).resolve()
         cont = tasks[target_dir]
-        if cont.id > id:
+        if cont.id > time:
             return Success("Skipped")
         response = cont.get()
         service = services[target_dir]
