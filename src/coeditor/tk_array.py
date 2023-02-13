@@ -15,7 +15,7 @@ class TkArray(ABC):
     def tolist(self) -> TokenSeq:
         ...
 
-    def truncate(self, dir: TruncateAt, new_len: int) -> "TkArray":
+    def truncate(self, dir: TruncateAt.Value, new_len: int) -> "TkArray":
         if new_len >= len(self):
             return self
         return _TruncatedTkArray(self, dir, new_len)
@@ -74,7 +74,7 @@ class _JoinedTkArray(TkArray):
 class _TruncatedTkArray(TkArray):
     "A chain-like data structure for concatenated `TkArray`s."
     original: TkArray
-    direction: TruncateAt
+    direction: TruncateAt.Value
     length: int
 
     def __len__(self) -> int:

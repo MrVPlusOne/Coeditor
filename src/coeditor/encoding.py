@@ -758,15 +758,11 @@ def extract_edit_change(input_tks: TokenSeq, output_tks: TokenSeq) -> Modified[s
     return tokens_to_change(inlined)
 
 
-class TruncateAt(enum.Enum):
+class TruncateAt:
+    Value = int
+
     Left = 0
     Right = 1
-
-    def reversed(self) -> Self:
-        if self == TruncateAt.Left:
-            return TruncateAt.Right
-        else:
-            return TruncateAt.Left
 
 
 def break_into_chunks(
@@ -833,7 +829,7 @@ def break_into_chunks(
 
 def truncate_section(
     sec: TokenSeq,
-    direction: TruncateAt,
+    direction: TruncateAt.Value,
     limit: int,
     add_bos: bool = True,
     inplace: bool = False,
@@ -841,7 +837,7 @@ def truncate_section(
     if len(sec) <= limit:
         return sec
 
-    if direction.value == TruncateAt.Left.value:
+    if direction == TruncateAt.Left:
         if inplace:
             del sec[:-limit]
         else:
@@ -849,7 +845,7 @@ def truncate_section(
         if add_bos and sec:
             sec[0] = BOS_id
     else:
-        assert_eq(direction.value, TruncateAt.Right.value)
+        assert_eq(direction, TruncateAt.Right)
         if inplace:
             del sec[limit:]
         else:
@@ -861,7 +857,7 @@ def truncate_section(
 
 def truncate_sections(
     total_limit: int,
-    *sections: tuple[TokenSeq, TruncateAt],
+    *sections: tuple[TokenSeq, TruncateAt.Value],
     add_bos: bool,
     inplace: bool = False,
 ) -> tuple[TokenSeq, ...]:
