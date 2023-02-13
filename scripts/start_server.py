@@ -1,14 +1,15 @@
 import traceback
+from functools import wraps
 
-from jsonrpcserver import Error, InvalidParams, Result, Success, method, serve
+from jsonrpcserver import Error, Success, method, serve
 
 from coeditor.common import *
-from coeditor.model import AttentionMode, RetrievalEditorModel
+from coeditor.model import RetrievalEditorModel
 from coeditor.service import (
-    BatchArgs,
     ChangeDetector,
     DecodingArgs,
     EditPredictionService,
+    ServiceResponse,
 )
 
 
@@ -21,9 +22,22 @@ def start_server(device, port: int, print_stats: bool = True):
     dec_args = DecodingArgs(do_sample=False, num_beams=4)
 
     services = dict[Path, EditPredictionService]()
+    continuations = dict[Path, Callable[[], ServiceResponse]]()
+
+    def handle_error(f, *args, **kwargs):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            try:
+                return f(*args, **kwargs)
+            except Exception as e:
+                traceback.print_exception(e)
+                return Error(code=1, message=repr(e))
+
+        return wrapper
 
     @method
-    def suggestEdits(
+    @handle_error
+    def submit_problem(
         project: str, file: str, lines: Sequence[int] | int, writeLogs: bool
     ):
         target_dir = Path(project).resolve()
@@ -39,20 +53,28 @@ def start_server(device, port: int, print_stats: bool = True):
 
         print(f"Suggesting edit for lines {lines} in {file}")
         path = Path(file)
-        if not Path.is_absolute(path):
-            path = target_dir / path
-        try:
-            service.tlogger.clear()
-            log_dir = service.project / ".coeditor_logs" if writeLogs else None
-            response = service.suggest_edit(path, lines, log_dir)
-            if print_stats:
-                print("Runtime stats:")
-                display(service.tlogger.as_dataframe())
-            return Success(response.to_json())
-        except Exception as e:
-            print("Failed with exception:")
-            traceback.print_exception(e)
-            return Error(code=1, message=repr(e))
+        if Path.is_absolute(path):
+            path = path.relative_to(target_dir)
+        path = to_rel_path(path)
+
+        service.tlogger.clear()
+        log_dir = service.project / ".coeditor_logs" if writeLogs else None
+        region, cont = service._suggest_edit_two_steps(path, lines, log_dir)
+        continuations[target_dir] = cont
+        return Success(region.target_lines)
+
+    @method
+    @handle_error
+    def get_result(project: str):
+        target_dir = Path(project).resolve()
+        f = continuations.pop(target_dir)
+        response = f()
+        service = services[target_dir]
+        if print_stats:
+            print("Runtime stats:")
+            display(service.tlogger.as_dataframe())
+
+        return Success(response.to_json())
 
     print(f"Starting suggestion server at localhost:{port}")
     serve("localhost", port)

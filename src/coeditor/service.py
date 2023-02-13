@@ -369,103 +369,116 @@ class EditPredictionService:
         self.tlogger = _tlogger
         model.tlogger = _tlogger
 
-    def suggest_edit(
+    def _suggest_edit_two_steps(
         self,
-        file: Path,
+        file: RelPath,
         edit_lines: Sequence[int] | int,
         log_dir: Path | None = Path(".coeditor_logs"),
-    ) -> ServiceResponse:
+    ) -> tuple[_EditRegion, Callable[[], ServiceResponse]]:
         timed = self.tlogger.timed
-        project = self.project
-
-        if file.is_absolute():
-            file = file.relative_to(project)
-        file = to_rel_path(file)
 
         with timed("get c3 problem"):
             problem, span = self.detector.get_problem(file, edit_lines)
 
         with timed("tokenize c3 problem"):
             tk_prob = self.c3_tkn.tokenize_problem(problem)
+
+        target = self.get_target_code(span.code, problem, tk_prob)
+
+        def next_step():
             batch = C3DataLoader.pack_batch([tk_prob])
             original = problem.span.original.tolist()
 
-        with timed("run model"), torch.autocast("cuda"):
-            predictions = self.model.predict_on_batch(
-                batch, [original], self.dec_args, self.show_max_solutions
-            )
-            assert_eq(len(predictions), 1)
-            predictions = predictions[0]
-            assert predictions
-
-        if log_dir is not None:
-            log_dir.mkdir(exist_ok=True)
-            input_tks = batch["input_ids"][0]
-            references = batch["references"]
-            output_truth = batch["labels"][0]
-            print(f"Writing logs to: {log_dir}")
-            for i, pred in enumerate(predictions):
-                with (log_dir / f"solution-{i}.txt").open("w") as f:
-                    pred_tks = pred.out_tks
-                    score = pred.score
-                    print(f"{problem.edit_line_ids=}", file=f)
-                    print(f"{len(input_tks)=}", file=f)
-                    print(f"{len(references)=}", file=f)
-                    print(f"Solution score: {score:.3g}", file=f)
-                    print(f"Marginalized samples:", pred.n_samples, file=f)
-                    pred = RetrievalModelPrediction(
-                        input_ids=input_tks,
-                        output_ids=pred_tks,
-                        labels=output_truth,
-                        references=references,
-                    )
-                    pred_str = RetrievalDecodingResult.show_prediction(problem, pred)
-                    print(pred_str, file=f)
-
-        target = self.get_target_code(span.code, problem, tk_prob)
-        target_lines = target.target_lines
-        suggestions = list[EditSuggestion]()
-        for pred in predictions:
-            pred_change = self.apply_edit_to_elem(
-                target,
-                problem,
-                pred.out_tks,
-            )
-            preview = "\n".join(
-                compute_line_diffs_fast(
-                    splitlines(pred_change.before),
-                    splitlines(pred_change.after),
+            with timed("run model"), torch.autocast("cuda"):
+                predictions = self.model.predict_on_batch(
+                    batch, [original], self.dec_args, self.show_max_solutions
                 )
-            )
-            diff_ops = get_diff_ops(
-                splitlines(pred_change.before), splitlines(pred_change.after)
-            )
-            line_status = dict[int, StatusTag]()
-            for tag, (i1, i2), _ in diff_ops:
-                if tag == "A":
-                    line_status[i1] = "A"
-                    continue
-                for i in range(i1, i2):
-                    if i not in line_status:
-                        line_status[i] = tag
-            line_status = [(i + target_lines[0], tag) for i, tag in line_status.items()]
+                assert_eq(len(predictions), 1)
+                predictions = predictions[0]
+                assert predictions
 
-            suggestion = EditSuggestion(
-                score=pred.score,
-                change_preview=preview,
-                new_code=pred_change.after,
-                line_status=line_status[: len(target_lines)],
-            )
-            suggestions.append(suggestion)
+            if log_dir is not None:
+                log_dir.mkdir(exist_ok=True)
+                input_tks = batch["input_ids"][0]
+                references = batch["references"]
+                output_truth = batch["labels"][0]
+                print(f"Writing logs to: {log_dir}")
+                for i, pred in enumerate(predictions):
+                    with (log_dir / f"solution-{i}.txt").open("w") as f:
+                        pred_tks = pred.out_tks
+                        score = pred.score
+                        print(f"{problem.edit_line_ids=}", file=f)
+                        print(f"{len(input_tks)=}", file=f)
+                        print(f"{len(references)=}", file=f)
+                        print(f"Solution score: {score:.3g}", file=f)
+                        print(f"Marginalized samples:", pred.n_samples, file=f)
+                        pred = RetrievalModelPrediction(
+                            input_ids=input_tks,
+                            output_ids=pred_tks,
+                            labels=output_truth,
+                            references=references,
+                        )
+                        pred_str = RetrievalDecodingResult.show_prediction(
+                            problem, pred
+                        )
+                        print(pred_str, file=f)
 
-        return ServiceResponse(
-            target_file=str(self.project / file),
-            edit_start=(target_lines[0], 0),
-            edit_end=(target_lines[-1] + 1, 0),
-            target_lines=target.target_lines,
-            input_code=target.current_code,
-            suggestions=suggestions,
-        )
+            target_lines = target.target_lines
+            suggestions = list[EditSuggestion]()
+            for pred in predictions:
+                pred_change = self.apply_edit_to_elem(
+                    target,
+                    problem,
+                    pred.out_tks,
+                )
+                preview = "\n".join(
+                    compute_line_diffs_fast(
+                        splitlines(pred_change.before),
+                        splitlines(pred_change.after),
+                    )
+                )
+                diff_ops = get_diff_ops(
+                    splitlines(pred_change.before), splitlines(pred_change.after)
+                )
+                line_status = dict[int, StatusTag]()
+                for tag, (i1, i2), _ in diff_ops:
+                    if tag == "A":
+                        line_status[i1] = "A"
+                        continue
+                    for i in range(i1, i2):
+                        if i not in line_status:
+                            line_status[i] = tag
+                line_status = [
+                    (i + target_lines[0], tag) for i, tag in line_status.items()
+                ]
+
+                suggestion = EditSuggestion(
+                    score=pred.score,
+                    change_preview=preview,
+                    new_code=pred_change.after,
+                    line_status=line_status[: len(target_lines)],
+                )
+                suggestions.append(suggestion)
+
+            return ServiceResponse(
+                target_file=str(self.project / file),
+                edit_start=(target_lines[0], 0),
+                edit_end=(target_lines[-1] + 1, 0),
+                target_lines=target.target_lines,
+                input_code=target.current_code,
+                suggestions=suggestions,
+            )
+
+        return target, next_step
+
+    def suggest_edit(
+        self,
+        file: RelPath,
+        edit_lines: Sequence[int] | int,
+        log_dir: Path | None = Path(".coeditor_logs"),
+    ) -> ServiceResponse:
+        _, f = self._suggest_edit_two_steps(file, edit_lines, log_dir)
+        return f()
 
     @staticmethod
     def get_target_code(
