@@ -83,8 +83,6 @@ class TrainingArgs:
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     max_train_epochs: int = 3
-    reinit_weights: bool = False
-    quicktest: bool = False
     lr_scheduler_type: SchedulerType = SchedulerType.LINEAR
 
 
@@ -157,75 +155,6 @@ class RetrievalModelPrediction(TypedDict):
     output_ids: TokenSeq
     labels: TokenSeq
     references: list[TokenSeq]
-
-
-@dataclass
-class RetrievalDecodingResult:
-    eval_args: dict
-    problems: Sequence[C3Problem]
-    predictions: Sequence[RetrievalModelPrediction]
-
-    def __post_init__(self):
-        assert_eq(len(self.problems), len(self.predictions))
-
-    def exact_match_accuracy(self) -> tuple[CountedSum, dict[int, bool]]:
-        ex2correct = dict[int, bool]()
-        bad_probs = list[C3Problem]()
-        for i, mp in enumerate(self.predictions):
-            prob = self.problems[i]
-            original = prob.span.original.tolist()
-            pred_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["output_ids"])
-            label_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["labels"])
-            if not prob.edit_line_ids:
-                bad_probs.append(prob)
-                continue
-            pred_change = pred_delta.apply_to_change(original)
-            label_change = label_delta.apply_to_change(original)
-            pred_code = tokens_to_change(pred_change).after
-            label_code = tokens_to_change(label_change).after
-            is_correct = code_equal(pred_code, label_code)
-            ex2correct[i] = is_correct
-        correct_count = CountedSum(sum(ex2correct.values()), len(ex2correct))
-        if bad_probs:
-            cprint("yellow", "Number of problems with no edits:", len(bad_probs))
-            for prob in bad_probs[:5]:
-                print(prob.summary())
-        return correct_count, ex2correct
-
-    def save_examples_to_dir(self, out_dir: Path, ex2correct: dict[int, bool]) -> None:
-        shutil.rmtree(out_dir, ignore_errors=True)
-        (out_dir / "correct").mkdir(parents=True, exist_ok=True)
-        (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
-
-        all_probs = dict[int, C3Problem]()
-        for ex_id, correct in tqdm(ex2correct.items(), desc="saving examples"):
-            ex = self.predictions[ex_id]
-            prob = self.problems[ex_id]
-            compare_str = self.show_prediction(prob, ex)
-            out_file = (
-                out_dir / ("correct" if correct else "incorrect") / f"ex-{ex_id}.txt"
-            )
-            out_file.write_text(compare_str)
-            all_probs[ex_id] = prob
-        pickle_dump(out_dir / "ex_probs.pkl", all_probs)
-
-    @classmethod
-    def show_prediction(cls, prob: C3Problem, pred: RetrievalModelPrediction) -> str:
-        span = prob.span
-        tk_prob = TkC3Problem(
-            main_input=TkArray.new(pred["input_ids"]),
-            header=TkArray.new([]),
-            output=TkArray.new(pred["labels"]),
-            path=span.headers[-1].path,
-            change_type=prob.change_type,
-            named_references=[
-                (f"reference-{i}", TkArray.new(ref))
-                for i, ref in enumerate(pred["references"])
-            ],
-            project=prob.src_info["project"],
-            commit=prob.src_info["commit"],
-        )
-        return tk_prob.show(pred["output_ids"])
 
 
 class AttentionMode(enum.Enum):
@@ -383,13 +312,19 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
     @torch.no_grad()
     @torch.autocast("cuda")
-    def predict_on_data(
+    def eval_on_data(
         self,
         eval_problems: Sequence[C3Problem],
         tokenizer: C3ProblemTokenizer,
         batch_args: "BatchArgs",
         dec_args: DecodingArgs,
+        out_dir: Path,
+        probs_to_save: int = 300,
     ):
+        shutil.rmtree(out_dir, ignore_errors=True)
+        (out_dir / "correct").mkdir(parents=True, exist_ok=True)
+        (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
+
         if batch_args.shuffle_extra_ids:
             warnings.warn(
                 "Shuffling extra ids during eval can lead to incorrect results."
@@ -404,8 +339,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
             desc="predict_on_data",
         )
 
+        save_ids = set(
+            random_subset(range(0, len(eval_problems)), probs_to_save, rng=42)
+        )
+
         gen_args = dec_args.to_model_args()
-        batch_elems = list[RetrievalModelPrediction]()
+        exact_acc = CountedSum(0, 0)
+        ex_id = 0
         for batch in eval_loader:  # type: ignore
             out_tks = self.generate(
                 batch["input_ids"].to(self.device),
@@ -419,18 +359,25 @@ class RetrievalEditorModel(T5PreTrainedModel):
             for i in range(len(input_ids)):
                 all_refs = batch["references"]
                 references = [all_refs[j] for j in query_ref_list[i]]
-                e = RetrievalModelPrediction(
+                mp = RetrievalModelPrediction(
                     input_ids=remove_pad_ids(input_ids[i]),
                     output_ids=remove_pad_ids(out_tks[i]),
                     labels=labels[i],
                     references=references,
                 )
-                batch_elems.append(e)
-        return RetrievalDecodingResult(
-            eval_args={"batch_args": batch_args, "dec_args": dec_args},
-            problems=eval_problems,
-            predictions=batch_elems,
-        )
+                prob = eval_problems[ex_id]
+                correct = exact_match_correct(prob, mp)
+                exact_acc += correct
+                if ex_id in save_ids:
+                    pred_str = show_prediction(prob, mp)
+                    (
+                        out_dir
+                        / ("correct" if correct.sum else "incorrect")
+                        / f"ex-{ex_id}.txt"
+                    ).write_text(pred_str)
+                ex_id += 1
+
+        return exact_acc
 
     @torch.autocast("cuda")
     def predict_on_batch(
@@ -908,6 +855,36 @@ class RetrievalEditorModel(T5PreTrainedModel):
         model.attention_mode = attention_mode
         model.config.vocab_size = len(_Tokenizer)
         return model
+
+
+def exact_match_correct(prob: C3Problem, mp: RetrievalModelPrediction) -> CountedSum:
+    original = prob.span.original.tolist()
+    pred_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["output_ids"])
+    label_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["labels"])
+    pred_change = pred_delta.apply_to_change(original)
+    label_change = label_delta.apply_to_change(original)
+    pred_code = tokens_to_change(pred_change).after
+    label_code = tokens_to_change(label_change).after
+    is_correct = code_equal(pred_code, label_code)
+    return CountedSum(int(is_correct), 1)
+
+
+def show_prediction(prob: C3Problem, pred: RetrievalModelPrediction) -> str:
+    span = prob.span
+    tk_prob = TkC3Problem(
+        main_input=TkArray.new(pred["input_ids"]),
+        header=TkArray.new([]),
+        output=TkArray.new(pred["labels"]),
+        path=span.headers[-1].path,
+        change_type=prob.change_type,
+        named_references=[
+            (f"reference-{i}", TkArray.new(ref))
+            for i, ref in enumerate(pred["references"])
+        ],
+        project=prob.src_info["project"],
+        commit=prob.src_info["commit"],
+    )
+    return tk_prob.show(pred["output_ids"])
 
 
 @dataclass

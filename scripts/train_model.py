@@ -20,21 +20,21 @@ from coeditor.model import (
 
 
 def train_model(
+    model_name: str,
     dataset_name: str,
-    model_variant: str,
     encoder: C3CombinedEncoder = C3CombinedEncoder(),
     batch_args=BatchArgs.train_default(),
     eval_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
     recreate_data: bool = False,
+    resumed_from: Path | None = None,
     eval_only: bool = False,
+    quicktest: bool = False,
 ):
-    # model_variant = "-file"
-    model_name = f"coeditor-{dataset_name}"
-    model_name += model_variant
+    assert dataset_name in model_name, "Model name should contain dataset name."
 
     dec_args = DecodingArgs()
-    if train_args.quicktest:
+    if quicktest:
         model_name = "quicktest-" + model_name
 
     if not eval_only:
@@ -58,12 +58,12 @@ def train_model(
         }.items()
     }
 
-    project = "Coeditor" if not train_args.quicktest else "Coeditor-quicktest"
+    project = "Coeditor" if not quicktest else "Coeditor-quicktest"
     if eval_only:
         project = "eval-" + project
     wandb.init(dir="..", project=project, name=model_name, config=config_dict)
 
-    if train_args.quicktest:
+    if quicktest:
         print("Using fewer data for quick test.")
         n_quick_exs = 20
         datasets = C3ProblemDataset(
@@ -72,12 +72,10 @@ def train_model(
             test=datasets["test"][:n_quick_exs],
         )
 
-    if not eval_only:
-        model = RetrievalEditorModel.from_code_t5(
-            "base", reuse_embed=True, reinit_weights=train_args.reinit_weights
-        )
+    if resumed_from is None:
+        model = RetrievalEditorModel.from_code_t5("base", reuse_embed=True)
     else:
-        model = RetrievalEditorModel.load(get_model_dir() / model_name)
+        model = RetrievalEditorModel.load(resumed_from)
 
     if os.getenv("CUDA_VISIBLE_DEVICES") is None:
         warnings.warn(
@@ -96,7 +94,7 @@ def train_model(
         datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
     )
 
-    if not eval_only:
+    if not eval_only and resumed_from is None:
         with timed_action("Warm-up Training"):
             warmup_bargs = copy.deepcopy(batch_args)
             warmup_bargs.min_queries *= 4
@@ -122,6 +120,8 @@ def train_model(
             warmup_targs.learning_rate *= 4
             warmup_targs.max_train_epochs = 1
             model.train_on_data(model_name, warmup_loader, eval_loader, warmup_targs)
+
+    if not eval_only:
         with timed_action("Fine-tune Training"):
             # we attach the problem transform to the dataloader to generate data on-the-fly
             train_loader = C3DataLoader(
@@ -142,20 +142,18 @@ def train_model(
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
 
-    max_saved_samples = 300
-
     with timed_action("Accuracy Evaluation"):
-        dec_result = model.predict_on_data(
-            datasets["test"], eval_tkn, eval_batch_args, dec_args
-        )
-        pickle_dump(get_model_dir() / model_name / "dec_result.pkl", dec_result)
-        exact_acc, exact_correct_map = dec_result.exact_match_accuracy()
-        wandb.log({"test/exact-acc": exact_acc.average()})
-
         out_dir = get_model_dir() / model_name / "exact_match_samples"
-        dec_result.save_examples_to_dir(
-            out_dir, random_subset(exact_correct_map, max_saved_samples, rng=42)
+        exact_acc = model.eval_on_data(
+            datasets["test"],
+            eval_tkn,
+            eval_batch_args,
+            dec_args,
+            out_dir,
+            probs_to_save=300,
         )
+        print("Exact-match accuracy:", exact_acc)
+        wandb.log({"test/exact-acc": exact_acc.average()})
         cprint("blue", "Exact-match samples saved to:", out_dir)
 
     return model
@@ -184,17 +182,21 @@ def check_save_dir(model_name: str) -> None:
 
 if __name__ == "__main__":
     os.chdir(proj_root())
+
     with run_long_task("train_model.py"):
         train_model(
+            model_name="coeditor-xl-c3-dropout-v1.6-resumed",
             dataset_name="xl",
-            model_variant="-c3-dropout-v1.6",
             train_args=TrainingArgs(
                 max_train_epochs=1,
-                quicktest=False,
             ),
             encoder=C3CombinedEncoder(
                 problem_tranform=C3ProblemChangeDropout(),
             ),
-            recreate_data=False,
+            resumed_from=(
+                get_model_dir(False) / "coeditor-xl-c3-dropout-v1.6/checkpoint-125000"
+            ),
             eval_only=False,
+            recreate_data=False,
+            quicktest=False,
         )

@@ -19,14 +19,7 @@ from coeditor.c3problem import (
     SrcInfo,
     TkC3Problem,
 )
-from coeditor.change import (
-    Added,
-    Change,
-    Deleted,
-    Modified,
-    default_show_diff,
-    show_change,
-)
+from coeditor.change import Added, Change, Deleted, Modified
 from coeditor.common import *
 from coeditor.encoding import (
     Newline_id,
@@ -37,12 +30,11 @@ from coeditor.encoding import (
     tokens_to_change,
 )
 from coeditor.model import (
-    BatchArgs,
     C3DataLoader,
     DecodingArgs,
-    RetrievalDecodingResult,
     RetrievalEditorModel,
     RetrievalModelPrediction,
+    show_prediction,
 )
 from coeditor.scoped_changes import (
     ChangedSpan,
@@ -419,9 +411,7 @@ class EditPredictionService:
                             labels=output_truth,
                             references=references,
                         )
-                        pred_str = RetrievalDecodingResult.show_prediction(
-                            problem, pred
-                        )
+                        pred_str = show_prediction(problem, pred)
                         print(pred_str, file=f)
 
             target_lines = target.target_lines
