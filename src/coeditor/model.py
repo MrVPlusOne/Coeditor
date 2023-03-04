@@ -383,7 +383,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def predict_on_batch(
         self,
         batch: dict,
-        originals: Sequence[TokenSeq],
+        problems: Sequence[C3Problem],
         dec_args: DecodingArgs,
         n_solutions: int = 1,
     ) -> list[list[PredictedChange]]:
@@ -448,8 +448,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
         out_tks = [remove_pad_ids(x) for x in out_tks]
         assert isinstance(out_tks, list)
         logging.debug("Max out length:", max(len(x) for x in out_tks))
-        assert_eq(len(out_tks), len(originals) * N)
-        originals = join_list([[x] * N for x in originals])
+        assert_eq(len(out_tks), len(problems) * N)
+        problems = join_list([[x] * N for x in problems])
         if (pred_scores := gen_out.get("sequences_scores", None)) is None:
             pred_scores = [0.0] * len(out_tks)
         if use_sampling:
@@ -458,8 +458,10 @@ class RetrievalEditorModel(T5PreTrainedModel):
             pred_weights = [math.exp(x) for x in pred_scores]
         with timed("assemble changes"):
             pred_changes = list[Modified[str]]()
-            for change_tks, out in zip(originals, out_tks):
-                pred = tokens_to_change(inline_output_tokens(change_tks, out))
+            for prob, out in zip(problems, out_tks):
+                delta = TkDelta.from_output_tks(prob.edit_line_ids, out)
+                original = prob.span.original.tolist()
+                pred = tokens_to_change(delta.apply_to_change(original))
                 pred_changes.append(pred)
         assert_eq(len(pred_changes), len(out_tks), len(pred_scores))
 

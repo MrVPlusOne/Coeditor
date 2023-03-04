@@ -367,6 +367,7 @@ class EditPredictionService:
         file: RelPath,
         edit_lines: Sequence[int] | int,
         log_dir: Path | None = Path(".coeditor_logs"),
+        n_suggestions: int = 1,
     ) -> tuple[_EditRegion, Callable[[], ServiceResponse]]:
         timed = self.tlogger.timed
 
@@ -380,11 +381,10 @@ class EditPredictionService:
 
         def next_step():
             batch = C3DataLoader.pack_batch([tk_prob])
-            original = problem.span.original.tolist()
 
             with timed("run model"), torch.autocast("cuda"):
                 predictions = self.model.predict_on_batch(
-                    batch, [original], self.dec_args, self.show_max_solutions
+                    batch, [problem], self.dec_args, self.show_max_solutions
                 )
                 assert_eq(len(predictions), 1)
                 predictions = predictions[0]
@@ -416,7 +416,7 @@ class EditPredictionService:
 
             target_lines = target.target_lines
             suggestions = list[EditSuggestion]()
-            for pred in predictions:
+            for pred in predictions[:n_suggestions]:
                 pred_change = self.apply_edit_to_elem(
                     target,
                     problem,
