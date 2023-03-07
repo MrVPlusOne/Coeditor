@@ -340,7 +340,7 @@ class TestChangeIdentities:
                 sub_keys = random_subset(keys, n_keys)
                 sub_keys.sort()
                 delta1, delta2 = delta.decompose_for_change(sub_keys)
-                new_edit_lines = delta1.get_new_target_lines(edit_lines)
+                new_edit_lines = delta1.get_new_line_ids(edit_lines)
                 new_edit_set = set(new_edit_lines)
                 for l in delta2.changed_lines():
                     if l not in new_edit_set and l != n_origin_lines:
@@ -395,12 +395,12 @@ def test_edit_lines_transform():
 
     tk_delta = ex_delta.to_tk_delta()
     all_lines = range(6)
-    new_target_lines = tk_delta.get_new_target_lines(all_lines)
+    new_target_lines = tk_delta.get_new_line_ids(all_lines)
     expect = (0, 1, 2, 3, 4, 6, 7, 8, 9, 10)
     assert_eq(new_target_lines, expect)
 
     later_lines = range(3, 6)
-    new_target_lines = tk_delta.get_new_target_lines(later_lines)
+    new_target_lines = tk_delta.get_new_line_ids(later_lines)
     # only the last 5 lines should be edited
     expect = (6, 7, 8, 9, 10)
     assert_eq(new_target_lines, expect)
@@ -459,3 +459,31 @@ def test_extra_ids():
         assert is_extra_id(x)
         n = extra_id_to_number(x)
         assert get_extra_id(n) == x
+
+
+def test_edit_distance():
+    jump_cost = 4
+    cases = [
+        ("empty strings", ("", ""), 0),
+        ("identical strings", ("abc", "abc"), 0),
+        ("add to empty", ("", "abc"), 3 + jump_cost),
+        ("delete all", ("abc", ""), 3 + jump_cost),
+        ("add to end", ("abc", "abcd"), 1 + jump_cost),
+        ("add in the middle", ("abc", "aabc"), 1 + jump_cost),
+        ("replace in the middle", ("abc", "axc"), 2 + jump_cost),
+        ("consective edits", ("abc", "axdf"), 2 * 2 + 1 + jump_cost),
+        ("nonconsective inserts (close)", ("abc", "xaxbc"), 3 + jump_cost),
+        ("nonconsective inserts (far)", ("abcdefg", "axbcdefxg"), 2 + jump_cost * 2),
+        ("many inserts", ("abcdefg", "xaxbxcxdxefg"), 5 + 4 + jump_cost),
+        ("many replaces (sep)", ("abcdefg", "xbxdxfx"), 4 * 2 + 3 + jump_cost),
+        ("many replaces (continuous)", ("abcdefg", "axxxxfg"), 4 * 2 + jump_cost),
+        ("delete single", ("abcde", "acde"), 1 + jump_cost),
+        ("delete all", ("a" * 100, ""), 2 * jump_cost + 2),
+        (
+            "delete middle",
+            ("a" * 30 + "b" * 20 + "c" * 30, "a" * 30 + "c" * 30),
+            2 * jump_cost + 2,
+        ),
+    ]
+    for name, (x, y), expect in cases:
+        assert keystroke_cost(x, y, jump_cost) == expect, f"Failed for case: {name}"

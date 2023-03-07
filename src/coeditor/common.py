@@ -504,3 +504,85 @@ class ProjectPath(NamedTuple):
             raise ValueError(f"A project path must have one '/': {s}")
         module, path = s.split("/")
         return ProjectPath(module, path)
+
+
+def keystroke_cost(
+    input: str,
+    output: str,
+    cursor_jump_cost: int = 4,
+    init_curosr_dis: int | None = None,  # default to cursor_jump_cost
+):
+    """
+    A string distance metric that takes the cost of moving the cursor into account.
+    This metric aim to approximate the number of key strokes required to
+    transform the input string into the output string.
+
+    Starting with the state `i = 0, j = 0, cursor_dis = init_curosr_dis, deleting = False`,
+    the cost is computed using the optimal combination of the following operations:
+    - M: match char (cost=0), require `input[i] == output[j], not deleting`, cause
+    `i += 1, j += 1, cursor_dis += 1`
+    - D: delete input char (cost=1), require `cursor_dis == 0, not deleting`, cause`i += 1`.
+    - A: add output char (cost=1), require `cursor_dis == 0, not deleting`, cause`j += 1`.
+    - C: bring cursor here (cost=min(curosr_dis, cursor_jump_cost)), require nothing, cause`cursor_dis = 0`.
+    - S: start deleting (cost=1), require `cursor_dis == 0, not deleting`, cause `deleting = True`.
+    - K: keep deleting (cost=0), require `deleting`, cause`i += 1`.
+    - E: end deleting (cost=1), require `cursor_dis == 0, deleting`, cause`deleting = False`.
+
+    Worst-case complexity: `len(input) * len(output) * cursor_jump_cost`.
+
+    Unmodeled operations:
+    - Copy and paste
+    """
+    l_in = len(input)
+    l_out = len(output)
+    MaxCost = l_in + l_out + cursor_jump_cost + 1000
+    CacheKey = tuple[int, int, int, bool]
+    cache = dict[CacheKey, int]()
+
+    def rec(i: int, j: int, cursor_dis: int, deleting: bool) -> int:
+        "Return the cost of matching input[i:] and output[j:]]."
+        if i > l_in or j > l_out:
+            return MaxCost
+        if i == l_in:
+            if j == l_out and not deleting:
+                return 0  # don't need to care about curosr in this case
+            # type out all remaining chars
+            return cursor_dis + int(deleting) + (l_out - j)
+
+        key = (i, j, cursor_dis, deleting)
+        if key in cache:
+            return cache[key]
+
+        if deleting:
+            # end deleting
+            if cursor_dis > 0:
+                cost0 = 1 + cursor_dis + rec(i, j, cursor_dis=0, deleting=False)
+            else:
+                cost0 = MaxCost  # not an option
+            # keep deleting
+            new_dis = min(cursor_dis + 1, cursor_jump_cost)
+            cost1 = rec(i + 1, j, new_dis, deleting=True)
+
+            best_cost = min(cost0, cost1)
+        else:
+            # match char
+            if i < l_in and j < l_out and input[i] == output[j]:
+                new_dis = min(cursor_dis + 1, cursor_jump_cost)
+                cost0 = rec(i + 1, j + 1, new_dis, False)
+            else:
+                cost0 = MaxCost  # not an option
+            # delete input char
+            cost1 = 1 + rec(i + 1, j, 0, False) + cursor_dis
+            # add output char
+            cost2 = 1 + rec(i, j + 1, 0, False) + cursor_dis
+            # start deleting
+            cost3 = 1 + rec(i, j, 0, True) + cursor_dis
+
+            best_cost = min(cost0, cost1, cost2, cost3)
+        cache[key] = best_cost
+        return best_cost
+
+    if init_curosr_dis is None:
+        init_curosr_dis = cursor_jump_cost
+
+    return rec(0, 0, init_curosr_dis, False)
