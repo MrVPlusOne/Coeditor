@@ -24,6 +24,7 @@ jsonrpcserver = "~=5.0.9"
 jedi = "~=0.18.2"
 parso = "*"
 cachetools = "*"
+editdistance = "*"
 
 [dev-packages]
 pytest = "*"
