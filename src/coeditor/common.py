@@ -45,6 +45,7 @@ from ._utils import (
     pmap,
     pretty_print_dict,
     repr_modified_args,
+    scalar_stats,
     show_string_diff,
     split_dots,
     timed_action,

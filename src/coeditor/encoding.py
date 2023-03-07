@@ -258,7 +258,9 @@ class TkDelta:
     _deltas: Mapping[int, tuple[TokenSeq, ...]]
 
     def changed_lines(self) -> Collection[int]:
-        return self._deltas.keys()
+        lines = self._deltas.keys()
+        assert all(x for x in self._deltas.values())
+        return lines
 
     def keys(self) -> Iterable[DeltaKey]:
         for k, _ in self.items():
@@ -279,6 +281,12 @@ class TkDelta:
     def __getitem__(self, key: DeltaKey) -> TokenSeq:
         line, i = key
         return self._deltas[line][i]
+
+    def get(self, key: DeltaKey) -> TokenSeq | None:
+        try:
+            return self[key]
+        except (KeyError, IndexError):
+            return None
 
     def apply_to_input(self, input: TokenSeq):
         lines = tk_splitlines(input)
@@ -392,7 +400,7 @@ class TkDelta:
         delta2 = TkDelta({k: tuple(v) for k, v in acts2.items()})
         return delta1, delta2
 
-    def change_groups(self) -> Sequence[Sequence[DeltaKey]]:
+    def change_groups(self) -> Sequence[tuple[DeltaKey, ...]]:
         """Group individual changes into logical groups using heuristics.
         Currently, this only groups a <del> immediately followed by an <add>,
         as well as contiguous <del> blocks."""
@@ -445,13 +453,13 @@ class TkDelta:
         assert_eq(join_list(groups), list(keys))
         return groups
 
-    def get_new_target_lines(self, lines: Sequence[int]) -> Sequence[int]:
+    def get_new_line_ids(self, line_ids: Sequence[int]) -> Sequence[int]:
         """Given a list of lines to edit, return the corresponding new lines to edit
         after applying this delta."""
-        if not lines:
+        if not line_ids:
             return tuple()
-        last_line = lines[-1]
-        line_set = set(lines)
+        last_line = line_ids[-1]
+        line_set = set(line_ids)
         new_edit_lines = list[int]()
         offset = 0
         for l in range(last_line + 1):
@@ -467,9 +475,38 @@ class TkDelta:
                 new_edit_lines.append(l + offset)
         return tuple(new_edit_lines)
 
+    def change_groups_as_output_ranges(
+        self, edit_line_ids: Sequence[int]
+    ) -> list[slice]:
+        tk_i = 1  # skip the first <s>
+        line_i = 0
+        ranges = list[slice]()
+        for group in self.change_groups():
+            l1 = group[0][0]
+            l2 = group[-1][0]
+            start = tk_i
+            end = tk_i
+            for j in range(line_i, len(edit_line_ids)):
+                line = edit_line_ids[j]
+                if line <= l1:
+                    start += 1  # skip previous extra_ids
+                if line <= l2:
+                    end += 1  # count in-range extra_ids
+                    line_i += 1
+                else:
+                    break
+            for k in group:
+                seg = self[k]
+                end += len(seg)
+                if seg[0] == Add_id:
+                    end += 1  # ending newline
+            ranges.append(slice(start, end))
+            tk_i = end
+        return ranges
+
     @staticmethod
     def from_output_tks(
-        lines: Sequence[int], tks: TokenSeq, allow_truncated_tks: bool = True
+        edit_line_ids: Sequence[int], tks: TokenSeq, allow_truncated_tks: bool = True
     ) -> "TkDelta":
         ad_tks = (Add_id, Del_id)
 
@@ -492,8 +529,10 @@ class TkDelta:
 
         segs = output_ids_as_seqs(tks)
         if not allow_truncated_tks:
-            assert_eq(len(segs), len(lines))
-        deltas = {l: seg_to_tuple(seg) for l, seg in zip(lines, segs.values()) if seg}
+            assert_eq(len(segs), len(edit_line_ids))
+        deltas = {
+            l: seg_to_tuple(seg) for l, seg in zip(edit_line_ids, segs.values()) if seg
+        }
         return TkDelta(deltas)
 
     def __bool__(self) -> bool:
@@ -914,54 +953,63 @@ class TokenizedEdit(ABC):
     def __repr__(self) -> str:
         return f"{type(self).__name__}(path={str(self.path)}, type={type(self.change_type).__name__}, len(input_tks)={len(self.input_tks)}, len(output_tks)={len(self.output_tks)})"
 
-    def show(self, pred_tks: TokenSeq | None = None) -> str:
-        def show_label(i: int):
-            return f" <{i}>" if i <= 9 else f"<{i}>"
+    @classmethod
+    def show_label(cls, i: int):
+        return f" <{i}>" if i <= 9 else f"<{i}>"
 
-        def show_content(tks: TokenSeq):
-            if tks and tks[0] == Add_id:
-                return "+ " + decode_tokens(tks[1:])
-            elif tks and tks[0] == Del_id:
-                return "- " + decode_tokens(tks[1:])
-            else:
-                return "  " + decode_tokens(tks)
+    @classmethod
+    def show_line(cls, tks: TokenSeq):
+        if tks and tks[0] == Add_id:
+            return "+ " + decode_tokens(tks[1:])
+        elif tks and tks[0] == Del_id:
+            return "- " + decode_tokens(tks[1:])
+        else:
+            return "  " + decode_tokens(tks)
 
-        def show_extra_tokens(tks: TokenSeq, main_tk_lines: dict[Token, TokenSeq]):
-            segs = output_ids_as_seqs(tks)
-            lines = []
-            for k, seg in segs.items():
-                if not seg:
-                    continue  # skip empty lines
-                if seg[-1] == Del_id:
-                    # show the deleted line
-                    section_lines = tk_splitlines(main_tk_lines.get(k, TokenSeq()))
-                    if section_lines:
-                        origin_line = section_lines[0]
-                    else:
-                        origin_line = self.BAD_DELETE
-                    origin_line.append(Newline_id)
-                    seg = seg + origin_line
-                label = show_label(id_map.get(k, -1))
-                lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
-            return "".join(lines)
+    @classmethod
+    def show_predictions(
+        cls, pred: TokenSeq, main_tk_lines: dict[Token, TokenSeq]
+    ) -> str:
+        id_map = {k: i for i, k in enumerate(main_tk_lines)}
+        segs = output_ids_as_seqs(pred)
+        lines = []
+        for k, seg in segs.items():
+            if not seg:
+                continue  # skip empty lines
+            if seg[-1] == Del_id:
+                # show the deleted line
+                section_lines = tk_splitlines(main_tk_lines.get(k, TokenSeq()))
+                if section_lines:
+                    origin_line = section_lines[0]
+                else:
+                    origin_line = cls.BAD_DELETE
+                origin_line.append(Newline_id)
+                seg = seg + origin_line
+            label = cls.show_label(id_map.get(k, -1))
+            lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
+        return "".join(lines)
 
+    def show(self, pred_tks: TokenSeq | None = None, skip_ctx: bool = False) -> str:
         def show_ctx(ctx_tks: TokenSeq):
             lines = tk_splitlines(ctx_tks)
-            return "\n".join("  " + show_content(l) for l in lines)
+            return "\n".join("  " + self.show_line(l) for l in lines)
 
         main_segs = output_ids_as_seqs(self.main_tks)
         id_map = {k: i for i, k in enumerate(main_segs)}
         main_lines = list[str]()
         for line_tks in tk_splitlines(self.main_tks):
             if line_tks and is_extra_id(line_tks[0]):
-                prefix = show_label(id_map.get(line_tks[0], -1))
-                line = prefix + show_content(line_tks[1:])
+                prefix = self.show_label(id_map.get(line_tks[0], -1))
+                line = prefix + self.show_line(line_tks[1:])
             else:
-                line = "    " + show_content(line_tks)
+                line = "    " + self.show_line(line_tks)
             main_lines.append(line)
 
         pred_lines = (
-            ["========Prediction========", f"{show_extra_tokens(pred_tks, main_segs)}"]
+            [
+                "========Prediction========",
+                f"{self.show_predictions(pred_tks, main_segs)}",
+            ]
             if pred_tks
             else []
         )
@@ -969,14 +1017,16 @@ class TokenizedEdit(ABC):
             "-" * 80,
             *self.meta_data_lines(),
             "========Ground Truth========",
-            show_extra_tokens(self.output_tks, main_segs),
+            self.show_predictions(self.output_tks, main_segs),
             *pred_lines,
             "========Main Code========",
             "\n".join(main_lines),
-        ] + [
-            f"==========={name}===========\n" + show_ctx(tks)
-            for name, tks in self.all_ctxs().items()
         ]
+        if not skip_ctx:
+            outputs.extend(
+                f"==========={name}===========\n" + show_ctx(tks)
+                for name, tks in self.all_ctxs().items()
+            )
         return "\n".join(outputs)
 
     import warnings

@@ -1,4 +1,4 @@
-import dataclasses
+from dataclasses import replace
 from pprint import pprint
 from textwrap import indent
 
@@ -85,6 +85,10 @@ class ChangedCodeSpan:
     line_range: LineRange
     module: ModuleName
 
+    def get_change(self) -> Modified[str]:
+        change_tks = self.delta.apply_to_change(self.original.tolist())
+        return tokens_to_change(change_tks)
+
 
 class SrcInfo(TypedDict):
     project: str
@@ -105,6 +109,13 @@ class C3Problem:
     change_type: Change[None]
     src_info: SrcInfo
     transformations: tuple[str, ...] = ()
+
+    def restrict_span_changes(self):
+        "restrict the changes in the span to the edit lines"
+        eids = self.edit_line_ids
+        delta = self.span.delta.for_input_range((eids[0], eids[-1] + 1))
+        span = replace(self.span, delta=delta)
+        return replace(self, span=span)
 
     @property
     def path(self) -> ProjectPath:
@@ -384,7 +395,7 @@ class C3GeneratorCache:
             if input_l in target_set:
                 line_ids.append(i)
             input_l += 1
-        code_span = dataclasses.replace(
+        code_span = replace(
             code_span, original=TkArray.new(changed_code), delta=TkDelta.empty()
         )
         relevant_unchanged = self.get_relevant_unchanged(code_span, target_usages)
@@ -512,7 +523,7 @@ class C3ProblemSimpleSplit(C3ProblemTransform):
             j = min(i + self.max_lines_to_edit, stop)
             sub_delta = delta.for_input_range((i, j))
             if sub_delta.num_changes() > 0:
-                sub_prob = dataclasses.replace(
+                sub_prob = replace(
                     prob, edit_line_ids=range(i, j), transformations=new_trans
                 )
                 problems.append(sub_prob)
@@ -591,9 +602,7 @@ class C3ProblemChangeDropout(C3ProblemTransform):
                 raise AssertionError("Empty delta2_groups")
             new_original = TkArray.new(delta1.apply_to_change(original.tolist()))
             new_trans = prob.transformations + ("split", "dropout")
-            new_span = dataclasses.replace(
-                prob.span, original=new_original, delta=delta2
-            )
+            new_span = replace(prob.span, original=new_original, delta=delta2)
         else:
             new_trans = prob.transformations + ("split",)
             new_span = prob.span
@@ -605,11 +614,11 @@ class C3ProblemChangeDropout(C3ProblemTransform):
             j = min(i + self.max_lines_to_edit, stop)
             edit_line_ids = range(i, j)
             if delta1 is not None:
-                edit_line_ids = delta1.get_new_target_lines(edit_line_ids)
+                edit_line_ids = delta1.get_new_line_ids(edit_line_ids)
             line_set = set(edit_line_ids)
             n_groups = sum(any(key[0] in line_set for key in g) for g in delta2_groups)
             if n_groups > 0:
-                sub_prob = dataclasses.replace(
+                sub_prob = replace(
                     prob,
                     span=new_span,
                     edit_line_ids=edit_line_ids,

@@ -2,6 +2,7 @@ import copy
 import dataclasses
 import logging
 import shutil
+from dataclasses import replace
 
 import torch
 import transformers
@@ -35,20 +36,24 @@ from coeditor.c3problem import (
     C3ProblemTransform,
     TkC3Problem,
 )
-from coeditor.change import Modified
+from coeditor.change import Modified, show_change
 from coeditor.encoding import (
     Add_id,
     BOS_id,
     Del_id,
+    DeltaKey,
     EOS_id,
+    Newline_id,
     PAD_id,
     TkDelta,
     _Tokenizer,
+    decode_tokens,
     encode_lines_join,
     get_tk_id,
     inline_output_tokens,
     output_ids_as_seqs,
     random_extra_id_map,
+    tk_splitlines,
     tokens_to_change,
 )
 from coeditor.tk_array import TkArray
@@ -57,6 +62,7 @@ from .common import *
 
 CheckNaN: bool = False
 CodeT5Model = T5ForConditionalGeneration
+LossReduction = Literal["none", "mean", "sum"]
 
 
 @dataclass
@@ -399,7 +405,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
             scores: Sequence[float],
         ) -> list[PredictedChange]:
             """For sampling techniques, all sample should have equal weights 1/N. For
-            search-based techniques, the `weights` should equal to the solutions' probabilities."""
+            search-based techniques, the `weights` should equal to the solutions' probabilities.
+            """
             assert preds
             groups = groupby(
                 range(len(preds)),
@@ -428,9 +435,11 @@ class RetrievalEditorModel(T5PreTrainedModel):
             N = dec_args.num_beams or 1
         gen_args = dec_args.to_model_args()
         input_ids = batch["input_ids"]
-        if not isinstance(input_ids, torch.LongTensor):
-            input_ids = torch.LongTensor(input_ids)
-        with timed("model.generate"), tqdm(total=dec_args.max_output_tks) as pbar:
+        if not isinstance(input_ids, LongTensor):
+            input_ids = LongTensor(input_ids)
+        with timed("model.generate"), tqdm(
+            total=dec_args.max_output_tks, disable=not dec_args.do_sample
+        ) as pbar:
             gen_out = self.generate(
                 input_ids.to(self.device),
                 references=batch["references"],
@@ -441,7 +450,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 **gen_args,
                 tqdm=pbar,
             )
-        assert not isinstance(gen_out, torch.LongTensor)
+        assert not isinstance(gen_out, LongTensor)
         out_tks = gen_out["sequences"]
         if isinstance(out_tks, torch.Tensor):
             out_tks = out_tks.tolist()
@@ -528,6 +537,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         decoder_attention_mask: Tensor | None = None,
         past_key_values=None,
         use_cache=None,
+        loss_reduction: LossReduction = "mean",
         # not used args below
         output_attentions=None,
         output_hidden_states=None,
@@ -647,7 +657,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
         loss = None
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction=loss_reduction)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
 
         return Seq2SeqLMOutput(
@@ -670,7 +680,6 @@ class RetrievalEditorModel(T5PreTrainedModel):
         use_cache=None,
         **kwargs,
     ):
-
         # cut decoder_input_ids if past is used
         if past is not None:
             input_ids = input_ids[:, -1:]
@@ -738,7 +747,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     @torch.no_grad()
     def sample(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: LongTensor,
         logits_processor=None,
         stopping_criteria=None,
         logits_warper=None,
@@ -769,7 +778,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         device = self.device
 
         # keep track of which sequences are already finished
-        unfinished_ids = torch.LongTensor(range(input_ids.shape[0])).to(device)
+        unfinished_ids = LongTensor(range(input_ids.shape[0])).to(device)
         sequences = input_ids.int().tolist()
         sequences_scores = [0.0 for _ in range(input_ids.shape[0])]
         # TODO: reduce cost using particle weights
@@ -808,7 +817,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
             # update generated ids, model inputs, and length for next step
             input_ids = cast(
-                torch.LongTensor,
+                LongTensor,
                 next_tokens[next_subset].unsqueeze(-1),
             )
             assert_eq(input_ids.ndim, 2)
@@ -825,7 +834,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 pbar.set_postfix({"unfinished": len(unfinished_ids)})
                 pbar.update()
             # stop when each sentence is finished, or if we exceed the maximum length
-            fake_input = torch.LongTensor([[1] * t]).to(device)
+            fake_input = LongTensor([[1] * t]).to(device)
             t += 1
             if len(unfinished_ids) == 0 or stopping_criteria(fake_input, None):  # type: ignore
                 break
@@ -834,6 +843,127 @@ class RetrievalEditorModel(T5PreTrainedModel):
             return {"sequences": sequences, "sequences_scores": sequences_scores}
         else:
             return sequences
+
+    def multi_round_edit_gain(
+        self,
+        problem: C3Problem,
+        tokenizer: C3ProblemTokenizer,
+        dec_args: DecodingArgs,
+        max_rounds: int = 6,
+        print_steps: bool = True,
+    ) -> "MultiRoundEditStats":
+        cost_model = EditCostModel()
+        problem = problem.restrict_span_changes()
+        span = problem.span
+        gold_change = span.get_change()
+        original = span.original.tolist()
+        if print_steps:
+            print_sections(("gold_change", show_change(gold_change)))
+            print("Remaining changes:")
+            print(span.delta)
+
+        gain = labe_gain = cost_model.get_edit_gain(original, span.delta, print_steps)
+        first_gain = 0
+        rounds = 0
+        for rounds in range(1, max_rounds + 1):
+            tk_prob = tokenizer.tokenize_problem(problem)
+
+            batch = C3DataLoader.pack_batch([tk_prob])
+            pred = self.predict_on_batch(batch, [problem], dec_args)[0][0]
+            pred_delta = TkDelta.from_output_tks(problem.edit_line_ids, pred.out_tks)
+
+            main_segs = output_ids_as_seqs(tk_prob.main_tks)
+            pred_str = TkC3Problem.show_predictions(pred.out_tks, main_segs)
+            if print_steps:
+                print_sections(("round", str(rounds)))
+                print(tk_prob.show(skip_ctx=True))
+                print("pred change:")
+                print(pred_str)
+
+            if code_equal(pred.change.after, gold_change.after):
+                accept_keys = list(pred_delta.keys())
+            else:
+                accept_keys = list[DeltaKey]()
+                for group in pred_delta.change_groups():
+                    expected = [span.delta.get(k) for k in group]
+                    actual = [pred_delta.get(k) for k in group]
+                    if expected == actual:
+                        accept_keys.extend(group)
+            if accept_keys:
+                accept_delta, rest_delta = span.delta.decompose_for_change(accept_keys)
+                if print_steps:
+                    cprint("green", "Accepted changes:")
+                    print(accept_delta)
+                if rounds == 1:
+                    first_gain = cost_model.get_edit_gain(
+                        original, accept_delta, print_steps
+                    )
+            else:
+                delta_keys = self._get_most_uncertain_edit(
+                    batch, span.delta, problem.edit_line_ids, print_steps=print_steps
+                )
+                accept_delta, rest_delta = span.delta.decompose_for_change(delta_keys)
+                if print_steps:
+                    cprint("red", "No accepted changes.")
+                    print("Most uncertain changes:")
+                    print(accept_delta)
+                gain -= cost_model.get_edit_gain(original, accept_delta, print_steps)
+
+            original = accept_delta.apply_to_change(original)
+            span = replace(span, original=TkArray.new(original), delta=rest_delta)
+            if print_steps:
+                print("Remaining changes:")
+                print(rest_delta)
+            if not rest_delta or rounds == max_rounds:
+                break
+            first_line = next(iter(rest_delta._deltas))
+            # shrink the edit range
+            edit_line_ids = accept_delta.get_new_line_ids(problem.edit_line_ids)
+            edit_line_ids = [l for l in edit_line_ids if l >= first_line]
+            problem = replace(problem, span=span, edit_line_ids=edit_line_ids)
+
+        # the remaining changes (if any) need to be applied manually
+        gain -= cost_model.get_edit_gain(original, span.delta, print_steps)
+
+        return MultiRoundEditStats(
+            label_edit_gain=labe_gain,
+            first_edit_gain=first_gain,
+            rounds=rounds,
+            total_edit_gain=gain,
+        )
+
+    @torch.autocast("cuda")
+    def _get_most_uncertain_edit(
+        self,
+        batch: dict,
+        delta: TkDelta,
+        edit_line_ids: Sequence[int],
+        print_steps: bool,
+    ) -> Sequence[DeltaKey]:
+        input_ids = cast(LongTensor, LongTensor(batch["input_ids"]).to(self.device))
+        labels = [wrap_bos(batch["labels"][0])]
+        labels = cast(LongTensor, LongTensor(labels).to(self.device))
+        assert_eq(input_ids.size(0), 1)
+
+        output = self.forward(
+            input_ids,
+            references=batch["references"],
+            query_ref_list=batch["query_ref_list"],
+            labels=labels,
+            loss_reduction="none",
+        )
+        loss = not_none(output.loss)
+
+        out_ranges = delta.change_groups_as_output_ranges(edit_line_ids)
+        group2loss = dict[Sequence[DeltaKey], float]()
+        for r, group in zip(out_ranges, delta.change_groups()):
+            r_loss = float(loss[r].sum())
+            group2loss[group] = r_loss
+            if print_steps:
+                tks = repr(decode_tokens(labels[0, r].tolist()))
+                print(f"range={(r.start, r.stop)}, loss={r_loss:.4g},\n\ttokens={tks}")
+
+        return max(group2loss.keys(), key=lambda k: group2loss[k])
 
     @staticmethod
     def from_code_t5(
@@ -887,6 +1017,86 @@ def show_prediction(prob: C3Problem, pred: RetrievalModelPrediction) -> str:
         commit=prob.src_info["commit"],
     )
     return tk_prob.show(pred["output_ids"])
+
+
+from difflib import Differ, SequenceMatcher
+
+
+@dataclass
+class EditCostModel:
+    cursor_jump_cost: int = 4  # the cost of jumping the cursor to a new location
+    delete_line_cost: int = 2  # the cost of deleting a line
+
+    def line_op_cost(self, opcode: tuple[str, int, int, int, int]) -> int:
+        "Measure the editing cost of an opcode returned by SequenceMatcher."
+        tag, i1, i2, j1, j2 = opcode
+        if tag == "equal":
+            return 0
+        elif tag == "delete":
+            # delete character-by-character
+            direct_cost = i2 - i1 + self.cursor_jump_cost
+            # delete the selected range
+            batch_cost = 2 * self.cursor_jump_cost + 2
+            return min(direct_cost, batch_cost)
+        elif tag == "insert":
+            return j2 - j1 + self.cursor_jump_cost
+        else:
+            assert_eq(tag, "replace")
+            return (i2 - i1) + (j2 - j1) + self.cursor_jump_cost
+
+    def get_edit_gain(
+        self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
+    ):
+        if not delta:
+            return 0
+        old_change = tokens_to_change(original)
+        new_change = tokens_to_change(delta.apply_to_change(original))
+        old_lines = old_change.after.splitlines()
+        new_lines = new_change.after.splitlines()
+
+        matcher = SequenceMatcher(None, old_lines, new_lines)
+        total = 0
+        for opcode in matcher.get_opcodes():
+            tag, i1, i2, j1, j2 = opcode
+            if tag == "equal":
+                continue
+            if tag == "delete":
+                # delete line-by-line
+                direct_cost = (i2 - i1) * self.delete_line_cost
+                # delete the selected range
+                batch_cost = self.cursor_jump_cost + 2
+                cost = min(direct_cost, batch_cost) + self.cursor_jump_cost
+                if print_steps:
+                    print(f"delete lines: ({i1},{i2}), {cost=}")
+            elif tag == "insert":
+                cost = len("\n".join(new_lines[j1:j2])) + self.cursor_jump_cost
+                if print_steps:
+                    print(f"insert lines: ({j1},{j2}), {cost=}")
+            else:
+                assert_eq(tag, "replace")
+                old_text = "\n".join(old_lines[i1:i2])
+                new_text = "\n".join(new_lines[j1:j2])
+                cost = keystroke_cost(old_text, new_text, self.cursor_jump_cost)
+                if print_steps:
+                    print(f"replace lines: ({i1},{i2}) -> ({j1},{j2}), {cost=}")
+                    for l in Differ().compare(
+                        old_text.splitlines(), new_text.splitlines()
+                    ):
+                        print("  " + l)
+
+            total += cost
+        if print_steps:
+            print("total cost:", total)
+
+        return total
+
+
+@dataclass
+class MultiRoundEditStats:
+    label_edit_gain: int
+    first_edit_gain: int
+    total_edit_gain: int
+    rounds: int
 
 
 @dataclass
@@ -1779,7 +1989,6 @@ class C3DataLoader:
         }
 
     def _problems_to_batches(self, problems: Iterable[TkC3Problem]) -> Iterable[dict]:
-
         tkn = self.tokenizer
         cost_limit = self._cost_limit()
         warned_batch_size = False
