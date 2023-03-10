@@ -61,7 +61,7 @@ RelPath = NewType("RelPath", Path)
 AbsPath = NewType("AbsPath", Path)
 
 
-def to_rel_path(path: os.PathLike) -> RelPath:
+def to_rel_path(path: os.PathLike | str) -> RelPath:
     path = Path(path)
     if path.is_absolute():
         raise ValueError(f"Expected a relative path, got: {path}")
@@ -508,6 +508,154 @@ class ProjectPath(NamedTuple):
 
 
 def keystroke_cost(
+    input: str,
+    output: str,
+    cursor_jump_cost: int = 4,
+    init_curosr_dis: int | None = None,  # default to cursor_jump_cost
+):
+    """
+    A string distance metric that takes the cost of moving the cursor into account.
+    This metric aim to approximate the number of key strokes required to
+    transform the input string into the output string.
+
+    Starting with the state `i = len(input), j = len(output), cursor_dis = init_curosr_dis, deleting = False`,
+    the cost is computed using the optimal combination of the following operations:
+    - M: match char (cost=0), require `input[-i] == output[-j], not deleting`, cause
+    `i -= 1, j -= 1, cursor_dis += 1`
+    - D: delete input char (cost=1), require `cursor_dis == 0, not deleting`, cause`i -= 1`.
+    - A: add output char (cost=1), require `cursor_dis == 0, not deleting`, cause`j -= 1`.
+    - C: bring cursor here (cost=min(curosr_dis, cursor_jump_cost)), require nothing, cause`cursor_dis = 0`.
+    - S: start deleting (cost=1), require `cursor_dis == 0, not deleting`, cause `deleting = True`.
+    - K: keep deleting (cost=0), require `deleting`, cause`i -= 1`.
+    - E: end deleting (cost=1), require `cursor_dis == 0, deleting`, cause`deleting = False`.
+
+    Worst-case complexity: `len(input) * len(output) * cursor_jump_cost`.
+
+    Unmodeled operations:
+    - Copy and paste
+    """
+    l_in = len(input)
+    l_out = len(output)
+    MaxCost = l_in + l_out + cursor_jump_cost + 1000
+    CacheKey = tuple[int, int, int, bool]
+    costs = dict[CacheKey, int]()
+
+    for c in range(cursor_jump_cost + 1):
+        costs[(0, 0, c, False)] = 0
+        costs[(0, 0, c, True)] = c + 1
+
+    for i in range(l_in + 1):
+        j_range = range(l_out + 1) if i != 0 else range(1, l_out + 1)
+        i_char = input[-i] if i > 0 else None
+        for j in j_range:
+            j_char = output[-j] if j > 0 else None
+            for cursor_dis in range(cursor_jump_cost + 1):
+                # --- if deleting ---
+                # 1: keep deleting
+                new_dis = min(cursor_dis + 1, cursor_jump_cost)
+                best_cost = costs[(i - 1, j, new_dis, True)] if i > 0 else MaxCost
+                # 2: end deleting
+                if cursor_dis > 0:
+                    best_cost = min(best_cost, 1 + cursor_dis + costs[(i, j, 0, False)])
+                costs[(i, j, cursor_dis, True)] = best_cost
+
+                # --- if not deleting ---
+                # 1: delete input char
+                cost1 = costs[(i - 1, j, 0, False)] if i > 0 else MaxCost
+                # 2: add output char
+                cost2 = costs[(i, j - 1, 0, False)] if j > 0 else MaxCost
+                # 3: start deleting
+                cost3 = costs[(i, j, 0, True)]
+
+                best_cost = min(cost1, cost2, cost3) + 1 + cursor_dis
+                # match char
+                if i_char == j_char:
+                    new_dis = min(cursor_dis + 1, cursor_jump_cost)
+                    best_cost = min(best_cost, costs[(i - 1, j - 1, new_dis, False)])
+                costs[(i, j, cursor_dis, False)] = best_cost
+
+    if init_curosr_dis is None:
+        init_curosr_dis = cursor_jump_cost
+
+    return costs[(l_in, l_out, init_curosr_dis, False)]
+
+
+def keystroke_cost_rec(
+    input: str,
+    output: str,
+    cursor_jump_cost: int = 4,
+    init_curosr_dis: int | None = None,  # default to cursor_jump_cost
+):
+    """
+    A string distance metric that takes the cost of moving the cursor into account.
+    This metric aim to approximate the number of key strokes required to
+    transform the input string into the output string.
+
+    Starting with the state `i = len(input), j = len(output), cursor_dis = init_curosr_dis, deleting = False`,
+    the cost is computed using the optimal combination of the following operations:
+    - M: match char (cost=0), require `input[-i] == output[-j], not deleting`, cause
+    `i -= 1, j -= 1, cursor_dis += 1`
+    - D: delete input char (cost=1), require `cursor_dis == 0, not deleting`, cause`i -= 1`.
+    - A: add output char (cost=1), require `cursor_dis == 0, not deleting`, cause`j -= 1`.
+    - C: bring cursor here (cost=min(curosr_dis, cursor_jump_cost)), require nothing, cause`cursor_dis = 0`.
+    - S: start deleting (cost=1), require `cursor_dis == 0, not deleting`, cause `deleting = True`.
+    - K: keep deleting (cost=0), require `deleting`, cause`i -= 1`.
+    - E: end deleting (cost=1), require `cursor_dis == 0, deleting`, cause`deleting = False`.
+
+    Worst-case complexity: `len(input) * len(output) * cursor_jump_cost`.
+
+    Unmodeled operations:
+    - Copy and paste
+    """
+    l_in = len(input)
+    l_out = len(output)
+    MaxCost = l_in + l_out + cursor_jump_cost + 1000
+    CacheKey = tuple[int, int, int, bool]
+    cache = dict[CacheKey, int]()
+
+    def rec(i: int, j: int, cursor_dis: int, deleting: bool) -> int:
+        "Return the cost of matching input[i:] and output[j:]]."
+        if i < 0 or j < 0:
+            return MaxCost
+        if i == 0 and j == 0 and not deleting:
+            return 0  # don't need to care about curosr in this case
+
+        key = (i, j, cursor_dis, deleting)
+        if key in cache:
+            return cache[key]
+
+        if deleting:
+            # keep deleting
+            new_dis = min(cursor_dis + 1, cursor_jump_cost)
+            best_cost = rec(i - 1, j, new_dis, deleting=True)
+            # end deleting
+            if cursor_dis > 0:
+                best_cost = min(
+                    best_cost, 1 + cursor_dis + rec(i, j, cursor_dis=0, deleting=False)
+                )
+        else:
+            # delete input char
+            cost1 = rec(i - 1, j, 0, False)
+            # add output char
+            cost2 = rec(i, j - 1, 0, False)
+            # start deleting
+            cost3 = rec(i, j, 0, True)
+
+            best_cost = min(cost1, cost2, cost3) + 1 + cursor_dis
+            # match char
+            if i > 0 and j > 0 and input[-i] == output[-j]:
+                new_dis = min(cursor_dis + 1, cursor_jump_cost)
+                best_cost = min(best_cost, rec(i - 1, j - 1, new_dis, False))
+        cache[key] = best_cost
+        return best_cost
+
+    if init_curosr_dis is None:
+        init_curosr_dis = cursor_jump_cost
+
+    return rec(l_in, l_out, init_curosr_dis, False)
+
+
+def keystroke_cost_old(
     input: str,
     output: str,
     cursor_jump_cost: int = 4,

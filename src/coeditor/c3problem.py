@@ -206,6 +206,8 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     VERSION = "2.9"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
+    # change spans with more than this many characters will be ignored
+    max_span_chars: int = 6000
 
     def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
         if analyzer is None:
@@ -307,6 +309,8 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 should_mk_problem = (
                     (span.change.as_char() == Modified.as_char())
                     and (self._is_training or span._is_func_body())
+                    and (len(span.change.earlier) <= self.max_span_chars)
+                    and (len(span.change.later) <= self.max_span_chars)
                     and (count_lines(span.change.earlier) <= self.max_span_lines)
                     and (count_lines(span.change.later) <= self.max_span_lines)
                 )

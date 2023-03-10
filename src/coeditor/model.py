@@ -849,9 +849,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
         problem: C3Problem,
         tokenizer: C3ProblemTokenizer,
         dec_args: DecodingArgs,
-        max_rounds: int = 6,
+        max_rounds: int = 8,
         print_steps: bool = True,
     ) -> "MultiRoundEditStats":
+        """Compute the total edit gain via multi-round interaction.
+        Note that this is a strict metric that does not perform code normalization
+        (since it's unclear how to define normalization for partial edits)."""
+
         cost_model = EditCostModel()
         problem = problem.restrict_span_changes()
         span = problem.span
@@ -880,15 +884,12 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 print("pred change:")
                 print(pred_str)
 
-            if code_equal(pred.change.after, gold_change.after):
-                accept_keys = list(pred_delta.keys())
-            else:
-                accept_keys = list[DeltaKey]()
-                for group in pred_delta.change_groups():
-                    expected = [span.delta.get(k) for k in group]
-                    actual = [pred_delta.get(k) for k in group]
-                    if expected == actual:
-                        accept_keys.extend(group)
+            accept_keys = list[DeltaKey]()
+            for group in pred_delta.change_groups():
+                expected = [span.delta.get(k) for k in group]
+                actual = [pred_delta.get(k) for k in group]
+                if expected == actual:
+                    accept_keys.extend(group)
             if accept_keys:
                 accept_delta, rest_delta = span.delta.decompose_for_change(accept_keys)
                 if print_steps:
