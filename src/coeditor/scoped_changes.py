@@ -754,27 +754,3 @@ def get_changed_spans(
 
 def code_to_module(code: str) -> ptree.Module:
     return parso.parse(code)
-
-
-def _search_in_scope(
-    self: ptree.Scope, filter: Callable[[ptree.PythonBaseNode], bool]
-) -> Iterable[ptree.PythonBaseNode]:
-    def scan(children: Sequence[ptree.PythonBaseNode]):
-        for element in children:
-            if filter(element):
-                yield element
-            if element.type in ptree._FUNC_CONTAINERS:
-                yield from scan(element.children)  # type: ignore
-
-    return scan(self.children)  # type: ignore
-
-
-def _to_decorated(tree: ptree.ClassOrFunc):
-    decorated = not_none(tree.parent)
-    if decorated.type == "async_funcdef":
-        decorated = not_none(decorated.parent)
-
-    if decorated.type == "decorated":
-        return cast(ptree.PythonNode, decorated)
-    else:
-        return tree

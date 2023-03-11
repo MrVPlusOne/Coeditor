@@ -53,6 +53,7 @@ from coeditor.encoding import (
     inline_output_tokens,
     output_ids_as_seqs,
     random_extra_id_map,
+    tk_get_lines,
     tk_splitlines,
     tokens_to_change,
 )
@@ -844,12 +845,41 @@ class RetrievalEditorModel(T5PreTrainedModel):
         else:
             return sequences
 
+    @staticmethod
+    def from_code_t5(
+        size: Literal["small", "base", "large"],
+        attention_mode: AttentionMode = AttentionMode.bidirectional,
+        reuse_embed: bool = False,
+        reinit_weights: bool = False,
+    ) -> "RetrievalEditorModel":
+        model_path = f"Salesforce/codet5-{size}"
+        if reinit_weights:
+            config = AutoConfig.from_pretrained(model_path)
+            model = RetrievalEditorModel(config)
+        else:
+            model = RetrievalEditorModel.from_pretrained(model_path)
+        assert isinstance(model, RetrievalEditorModel)
+        embed_layer = model.resize_token_embeddings(len(_Tokenizer))
+        if reuse_embed:
+            w_map = {Add_id: get_tk_id("+"), Del_id: get_tk_id("-")}
+            for k, v in w_map.items():
+                embed_layer.weight.data[k] = embed_layer.weight[v]
+        model.attention_mode = attention_mode
+        model.config.vocab_size = len(_Tokenizer)
+        return model
+
+
+@dataclass
+class MultiRoundEvaluator:
+    model: RetrievalEditorModel
+    tokenizer: C3ProblemTokenizer
+    dec_args: DecodingArgs
+    strategy: Literal["most_uncertain", "least_effort"] = "most_uncertain"
+    max_rounds: int = 8
+
     def multi_round_edit_gain(
         self,
         problem: C3Problem,
-        tokenizer: C3ProblemTokenizer,
-        dec_args: DecodingArgs,
-        max_rounds: int = 8,
         print_steps: bool = True,
     ) -> "MultiRoundEditStats":
         """Compute the total edit gain via multi-round interaction.
@@ -869,11 +899,11 @@ class RetrievalEditorModel(T5PreTrainedModel):
         gain = labe_gain = cost_model.get_edit_gain(original, span.delta, print_steps)
         first_gain = 0
         rounds = 0
-        for rounds in range(1, max_rounds + 1):
-            tk_prob = tokenizer.tokenize_problem(problem)
+        for rounds in range(1, self.max_rounds + 1):
+            tk_prob = self.tokenizer.tokenize_problem(problem)
 
             batch = C3DataLoader.pack_batch([tk_prob])
-            pred = self.predict_on_batch(batch, [problem], dec_args)[0][0]
+            pred = self.model.predict_on_batch(batch, [problem], self.dec_args)[0][0]
             pred_delta = TkDelta.from_output_tks(problem.edit_line_ids, pred.out_tks)
 
             main_segs = output_ids_as_seqs(tk_prob.main_tks)
@@ -900,13 +930,22 @@ class RetrievalEditorModel(T5PreTrainedModel):
                         original, accept_delta, print_steps
                     )
             else:
-                delta_keys = self._get_most_uncertain_edit(
-                    batch, span.delta, problem.edit_line_ids, print_steps=print_steps
-                )
+                if self.strategy == "most_uncertain":
+                    delta_keys = self._get_most_uncertain_edit(
+                        batch,
+                        span.delta,
+                        problem.edit_line_ids,
+                        print_steps=print_steps,
+                    )
+                else:
+                    assert_eq(self.strategy, "least_effort")
+                    delta_keys = self._get_least_effort_edit(
+                        original, span.delta, cost_model, print_steps=print_steps
+                    )
                 accept_delta, rest_delta = span.delta.decompose_for_change(delta_keys)
                 if print_steps:
                     cprint("red", "No accepted changes.")
-                    print("Most uncertain changes:")
+                    print("Manual changes:")
                     print(accept_delta)
                 gain -= cost_model.get_edit_gain(original, accept_delta, print_steps)
 
@@ -915,7 +954,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             if print_steps:
                 print("Remaining changes:")
                 print(rest_delta)
-            if not rest_delta or rounds == max_rounds:
+            if not rest_delta or rounds == self.max_rounds:
                 break
             first_line = next(iter(rest_delta._deltas))
             # shrink the edit range
@@ -941,12 +980,13 @@ class RetrievalEditorModel(T5PreTrainedModel):
         edit_line_ids: Sequence[int],
         print_steps: bool,
     ) -> Sequence[DeltaKey]:
-        input_ids = cast(LongTensor, LongTensor(batch["input_ids"]).to(self.device))
+        device = self.model.device
+        input_ids = cast(LongTensor, LongTensor(batch["input_ids"]).to(device))
         labels = [wrap_bos(batch["labels"][0])]
-        labels = cast(LongTensor, LongTensor(labels).to(self.device))
+        labels = cast(LongTensor, LongTensor(labels).to(device))
         assert_eq(input_ids.size(0), 1)
 
-        output = self.forward(
+        output = self.model.forward(
             input_ids,
             references=batch["references"],
             query_ref_list=batch["query_ref_list"],
@@ -966,28 +1006,23 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
         return max(group2loss.keys(), key=lambda k: group2loss[k])
 
-    @staticmethod
-    def from_code_t5(
-        size: Literal["small", "base", "large"],
-        attention_mode: AttentionMode = AttentionMode.bidirectional,
-        reuse_embed: bool = False,
-        reinit_weights: bool = False,
-    ) -> "RetrievalEditorModel":
-        model_path = f"Salesforce/codet5-{size}"
-        if reinit_weights:
-            config = AutoConfig.from_pretrained(model_path)
-            model = RetrievalEditorModel(config)
-        else:
-            model = RetrievalEditorModel.from_pretrained(model_path)
-        assert isinstance(model, RetrievalEditorModel)
-        embed_layer = model.resize_token_embeddings(len(_Tokenizer))
-        if reuse_embed:
-            w_map = {Add_id: get_tk_id("+"), Del_id: get_tk_id("-")}
-            for k, v in w_map.items():
-                embed_layer.weight.data[k] = embed_layer.weight[v]
-        model.attention_mode = attention_mode
-        model.config.vocab_size = len(_Tokenizer)
-        return model
+    def _get_least_effort_edit(
+        self,
+        original: TokenSeq,
+        delta: TkDelta,
+        cost_model: "EditCostModel",
+        print_steps: bool,
+    ) -> Sequence[DeltaKey]:
+        tk_lines = tk_splitlines(original)
+        group_costs = list[tuple]()
+        for group in delta.change_groups():
+            edit_lines = [k[0] for k in group]
+            a, b = edit_lines[0], edit_lines[-1]
+            subdelta = delta.for_keys(group).shifted(-a)
+            sub_input = join_list(tk_lines[a:b], Newline_id)
+            cost = cost_model.get_edit_gain(sub_input, subdelta, print_steps)
+            group_costs.append((group, cost))
+        return min(group_costs, key=lambda x: x[1])[0]
 
 
 def exact_match_correct(prob: C3Problem, mp: RetrievalModelPrediction) -> CountedSum:
@@ -1050,6 +1085,10 @@ class EditCostModel:
     ):
         if not delta:
             return 0
+        edit_lines = list(k[0] for k in delta.keys())
+        a, b = edit_lines[0], edit_lines[-1]
+        original = tk_get_lines(original, a, b + 1)
+        delta = delta.shifted(-a)
         old_change = tokens_to_change(original)
         new_change = tokens_to_change(delta.apply_to_change(original))
         old_lines = old_change.after.splitlines()

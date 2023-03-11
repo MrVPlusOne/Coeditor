@@ -26,6 +26,7 @@ from coeditor.encoding import (
     StrDelta,
     TkDelta,
     is_extra_id,
+    tk_get_lines,
     tk_splitlines,
     tokens_to_change,
 )
@@ -495,8 +496,8 @@ class EditPredictionService:
             .shifted(-edit_start)
         )
 
-        change1_tks = get_tk_lines(
-            problem.span.original.tolist(), range(edit_start, edit_stop)
+        change1_tks = tk_get_lines(
+            problem.span.original.tolist(), edit_start, edit_stop
         )
         change1 = tokens_to_change(change1_tks)
         change2_tks = delta.apply_to_change(change1_tks)
@@ -527,11 +528,6 @@ def get_diff_ops(
         (_tag_map[tag], (i1, i2), (j1, j2))
         for tag, i1, i2, j1, j2 in matcher.get_opcodes()
     ]
-
-
-def get_tk_lines(tks: TokenSeq, line_ids: Sequence[int]) -> TokenSeq:
-    lines = tk_splitlines(tks)
-    return join_list((lines[i] for i in line_ids), Newline_id)
 
 
 def show_location(loc: CodePosition):

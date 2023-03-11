@@ -44,23 +44,48 @@ def assert_tks_eq(actual: TokenSeq, expected: TokenSeq, name: str):
 
 def test_splitlines():
     rng = get_rng()
-    for n in range(100):
-        rand_input = [rng.choice(["a", "b", "c", "\n"]) for _ in range(n)]
-        input = "".join(rand_input).rstrip("\n")
-        lines = splitlines(input)
+    for n in range(60):
+        for _ in range(10):
+            rand_input = [rng.choice(["a", "b", "c", "\n"]) for _ in range(n)]
+            input = "".join(rand_input).rstrip("\n")
+            lines = splitlines(input)
 
-        # basic identity
-        assert "\n".join(lines) == input
-        assert count_lines(input) == len(lines)
+            # basic identity
+            assert "\n".join(lines) == input
+            assert count_lines(input) == len(lines)
 
-        # encode and decode
-        enc = encode_lines_join(input)
-        assert decode_tokens(enc) == input
+            # encode and decode
+            enc = encode_lines_join(input)
+            assert decode_tokens(enc) == input
 
-        # split tokens
-        tk_lines = tk_splitlines(enc)
-        assert len(tk_lines) == len(lines)
-        assert_tks_eq(join_list(tk_lines, Newline_id), enc, "join_list(tk_lines)")
+            # split tokens
+            tk_lines = tk_splitlines(enc)
+            assert len(tk_lines) == len(lines)
+            assert_tks_eq(join_list(tk_lines, Newline_id), enc, "join_list(tk_lines)")
+
+
+def test_get_lines():
+    def test_case(input: TokenSeq, a, b):
+        expect = join_list(tk_splitlines(input)[a:b], Newline_id)
+        assert_eq(
+            tk_get_lines(input, a, b),
+            expect,
+            extra_message=lambda: f"input={decode_tokens(input)}, {a=}, {b=}",
+        )
+
+    test_case([], 0, 0)
+    test_case([], 0, 1)
+    test_case([3], 0, 1)
+    test_case([3, Newline_id], 0, 1)
+    test_case([3, Newline_id, 4], 0, 1)
+    three_lines = [3, Newline_id, 4, Newline_id, 5]
+    test_case(three_lines, 0, 2)
+    test_case(three_lines, 0, 5)
+    test_case(three_lines, 1, 5)
+    test_case(three_lines, 2, 5)
+    test_case(three_lines, 3, 5)
+    test_case([Newline_id] * 5, 2, 3)
+    test_case([Newline_id] * 5, 2, 4)
 
 
 class TestChangeIdentities:

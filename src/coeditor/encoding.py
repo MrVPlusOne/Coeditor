@@ -84,6 +84,22 @@ def tk_splitlines(tks: TokenSeq):
     return split_list(tks, Newline_id)
 
 
+def tk_get_lines(tks: TokenSeq, start_line: int, until_line: int) -> TokenSeq:
+    """Get the token sequence for the lines between `start_line` and `until_line`."""
+    # use a loop to implement this
+    # line breaks are represented by the Newline_id token.
+    newline_pos = [-1]
+    for i, tk in enumerate(tks):
+        if tk == Newline_id:
+            newline_pos.append(i)
+    newline_pos.append(len(tks))
+    start_line = max(0, min(start_line, len(newline_pos) - 1))
+    until_line = max(0, min(until_line, len(newline_pos) - 1))
+    start = newline_pos[start_line] + 1
+    end = max(0, newline_pos[until_line])
+    return tks[start:end]
+
+
 def decode_tokens(tokens: TokenSeq, prettify: bool = False) -> str:
     text = _Tokenizer.decode(tokens, add_special_tokens=False)
     if prettify:
@@ -343,6 +359,17 @@ class TkDelta:
         a, b = line_range
         new_delta = {k: v for k, v in self._deltas.items() if a <= k < b}
         return TkDelta(new_delta)
+
+    def for_keys(self, keys: Collection[DeltaKey]) -> Self:
+        """Compute the delta for the given line range."""
+        key_set = set(keys)
+        acts1 = dict[int, list[TokenSeq]]()
+        for l, acts in self._deltas.items():
+            for i, act in enumerate(acts):
+                key = DeltaKey((l, i))
+                if key in key_set:
+                    acts1.setdefault(l, []).append(act)
+        return TkDelta({k: tuple(v) for k, v in acts1.items()})
 
     def shifted(self, shift_lines: int) -> Self:
         return TkDelta({k + shift_lines: v for k, v in self._deltas.items()})
@@ -1132,7 +1159,8 @@ __random_extra_ids = [get_extra_id(i) for i in range(100)]
 
 def random_extra_id_map() -> dict[Token, Token]:
     """Uniformly randomly map extra_ids to other extra_ids (1-to-1). This can be
-    used to improve the training such that every extra_id appears with the same frequency."""
+    used to improve the training such that every extra_id appears with the same frequency.
+    """
     random.shuffle(__random_extra_ids)
     return dict(zip(__ordered_extra_ids, __random_extra_ids))
 
