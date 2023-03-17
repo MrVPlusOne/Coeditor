@@ -105,7 +105,8 @@ def rec_iter_files(
 ) -> Generator[Path, None, None]:
     """Recursively iterate over all files in a directory whose parent dirs satisfies the given
     `dir_filter`. Note that unlike `glob`, if a directory is filtered out, all
-    its children won't be traversed, leading to potentially better performance in certain use cases."""
+    its children won't be traversed, leading to potentially better performance in certain use cases.
+    """
     assert dir.is_dir()
 
     def rec(path: Path) -> Generator[Path, None, None]:
@@ -551,19 +552,20 @@ def assert_eq(x: T1, *xs: T1, extra_message: Callable[[], str] = lambda: "") -> 
     for i in range(len(xs)):
         x = xs[i - 1] if i > 0 else x
         y = xs[i]
-        assert x == y, (
-            f"{x} (of type {type(x).__name__}) != {y} (of type {type(y).__name__}) at equality {i}.\n"
-            + extra_message()
-        )
+        if x != y:
+            raise AssertionError(
+                f"{x} (of type {type(x).__name__}) != {y} (of type {type(y).__name__}) at equality {i}.\n"
+                + extra_message()
+            )
 
 
 def scalar_stats(xs) -> dict[str, Any]:
     x = np.array(xs)
     return {
-        "mean": x.mean(),
-        "median": np.median(x),
-        "min": x.min(),
-        "max": x.max(),
+        "mean": float(x.mean()),
+        "median": float(np.median(x)),
+        "min": float(x.min()),
+        "max": float(x.max()),
     }
 
 
@@ -607,12 +609,20 @@ def pretty_print_dict(
     max_show_level: int = 1000,
     float_precision: int = 5,
 ):
+    def show_float(x: float):
+        return f"%.{float_precision}g" % x
+
     for k, v in d.items():
         print("   " * level, end="")
         if isinstance(v, float):
-            print(f"{k}: %.{float_precision}g" % v)
+            print(f"{k}: {show_float(v)}")
         elif isinstance(v, dict) or isinstance(v, list):
-            if level >= max_show_level:
+            if isinstance(v, dict) and all(isinstance(x, float) for x in v.values()):
+                dict_s = (
+                    "{" + ", ".join(f"{k}: {show_float(v)}" for k, v in v.items()) + "}"
+                )
+                print(f"{k}: {dict_s}")
+            elif level >= max_show_level:
                 print(f"{k}: ...")
             else:
                 print(f"{k}:")

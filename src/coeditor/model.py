@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import torch
 import transformers
+from editdistance import distance as levenshtein_distance
 from torch import BoolTensor, FloatTensor, LongTensor, Tensor, nn
 from transformers import (
     AutoConfig,
@@ -869,11 +870,132 @@ class RetrievalEditorModel(T5PreTrainedModel):
         return model
 
 
+from difflib import Differ, SequenceMatcher
+
+
+class EditCostModel(ABC):
+    name: str
+
+    @abstractmethod
+    def get_edit_gain(
+        self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
+    ) -> int:
+        ...
+
+
+class LineBasedCostModel(EditCostModel):
+    name = "diff-lines"
+
+    def get_edit_gain(
+        self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
+    ) -> int:
+        "Simply returns the number of lines changed."
+        return delta.change_size()
+
+
+class LevenshteinCostModel(EditCostModel):
+    name = "levenshtein"
+
+    def get_edit_gain(
+        self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
+    ) -> int:
+        "Measures the size of the change using Levenshtein distance."
+        if not delta:
+            return 0
+        edit_lines = list(k[0] for k in delta.keys())
+        a, b = edit_lines[0], edit_lines[-1]
+        original = tk_get_lines(original, a, b + 1)
+        delta = delta.shifted(-a)
+        old_change = tokens_to_change(original)
+        new_change = tokens_to_change(delta.apply_to_change(original))
+        return levenshtein_distance(old_change.after, new_change.after)
+
+
+@dataclass
+class KeystrokeCostModel(EditCostModel):
+    cursor_jump_cost: int = 4  # the cost of jumping the cursor to a new location
+    delete_line_cost: int = 2  # the cost of deleting a line
+
+    name = "keystrokes"
+
+    def line_op_cost(self, opcode: tuple[str, int, int, int, int]) -> int:
+        "Measure the editing cost of an opcode returned by SequenceMatcher."
+        tag, i1, i2, j1, j2 = opcode
+        if tag == "equal":
+            return 0
+        elif tag == "delete":
+            # delete character-by-character
+            direct_cost = i2 - i1 + self.cursor_jump_cost
+            # delete the selected range
+            batch_cost = 2 * self.cursor_jump_cost + 2
+            return min(direct_cost, batch_cost)
+        elif tag == "insert":
+            return j2 - j1 + self.cursor_jump_cost
+        else:
+            assert_eq(tag, "replace")
+            return (i2 - i1) + (j2 - j1) + self.cursor_jump_cost
+
+    def get_edit_gain(
+        self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
+    ) -> int:
+        if not delta:
+            return 0
+        edit_lines = list(k[0] for k in delta.keys())
+        a, b = edit_lines[0], edit_lines[-1]
+        original = tk_get_lines(original, a, b + 1)
+        delta = delta.shifted(-a)
+        old_change = tokens_to_change(original)
+        new_change = tokens_to_change(delta.apply_to_change(original))
+        old_lines = old_change.after.splitlines()
+        new_lines = new_change.after.splitlines()
+
+        matcher = SequenceMatcher(None, old_lines, new_lines)
+        total = 0
+        for opcode in matcher.get_opcodes():
+            tag, i1, i2, j1, j2 = opcode
+            if tag == "equal":
+                continue
+            if tag == "delete":
+                # delete line-by-line
+                direct_cost = (i2 - i1) * self.delete_line_cost
+                # delete the selected range
+                batch_cost = self.cursor_jump_cost + 2
+                cost = min(direct_cost, batch_cost) + self.cursor_jump_cost
+                if print_steps:
+                    print(f"delete lines: ({i1},{i2}), {cost=}")
+            elif tag == "insert":
+                cost = len("\n".join(new_lines[j1:j2])) + self.cursor_jump_cost
+                if print_steps:
+                    print(f"insert lines: ({j1},{j2}), {cost=}")
+            else:
+                assert_eq(tag, "replace")
+                old_text = "\n".join(old_lines[i1:i2])
+                new_text = "\n".join(new_lines[j1:j2])
+                cost = keystroke_cost(old_text, new_text, self.cursor_jump_cost)
+                if print_steps:
+                    print(f"replace lines: ({i1},{i2}) -> ({j1},{j2}), {cost=}")
+                    for l in Differ().compare(
+                        old_text.splitlines(), new_text.splitlines()
+                    ):
+                        print("  " + l)
+
+            total += cost
+        if print_steps:
+            print("total cost:", total)
+
+        return total
+
+
 @dataclass
 class MultiRoundEvaluator:
     model: RetrievalEditorModel
     tokenizer: C3ProblemTokenizer
     dec_args: DecodingArgs
+    cost_models: Sequence[EditCostModel] = (
+        KeystrokeCostModel(),
+        LineBasedCostModel(),
+        LevenshteinCostModel(),
+    )
     strategy: Literal["most_uncertain", "least_effort"] = "most_uncertain"
     max_rounds: int = 8
 
@@ -881,12 +1003,13 @@ class MultiRoundEvaluator:
         self,
         problem: C3Problem,
         print_steps: bool = True,
-    ) -> "MultiRoundEditStats":
+    ) -> "dict[str, MultiRoundEditStats]":
         """Compute the total edit gain via multi-round interaction.
         Note that this is a strict metric that does not perform code normalization
         (since it's unclear how to define normalization for partial edits)."""
 
-        cost_model = EditCostModel()
+        cost_models = self.cost_models
+        main_cost_model = cost_models[0]
         problem = problem.restrict_span_changes()
         span = problem.span
         gold_change = span.get_change()
@@ -896,8 +1019,12 @@ class MultiRoundEvaluator:
             print("Remaining changes:")
             print(span.delta)
 
-        gain = labe_gain = cost_model.get_edit_gain(original, span.delta, print_steps)
-        first_gain = 0
+        gains = {
+            cm.name: cm.get_edit_gain(original, span.delta, print_steps)
+            for cm in cost_models
+        }
+        label_gains = gains.copy()
+        first_gains = {cm.name: 0 for cm in cost_models}
         rounds = 0
         for rounds in range(1, self.max_rounds + 1):
             tk_prob = self.tokenizer.tokenize_problem(problem)
@@ -926,9 +1053,10 @@ class MultiRoundEvaluator:
                     cprint("green", "Accepted changes:")
                     print(accept_delta)
                 if rounds == 1:
-                    first_gain = cost_model.get_edit_gain(
-                        original, accept_delta, print_steps
-                    )
+                    first_gains = {
+                        cm.name: cm.get_edit_gain(original, accept_delta, print_steps)
+                        for cm in cost_models
+                    }
             else:
                 if self.strategy == "most_uncertain":
                     delta_keys = self._get_most_uncertain_edit(
@@ -940,14 +1068,17 @@ class MultiRoundEvaluator:
                 else:
                     assert_eq(self.strategy, "least_effort")
                     delta_keys = self._get_least_effort_edit(
-                        original, span.delta, cost_model, print_steps=print_steps
+                        original, span.delta, main_cost_model, print_steps=print_steps
                     )
                 accept_delta, rest_delta = span.delta.decompose_for_change(delta_keys)
                 if print_steps:
                     cprint("red", "No accepted changes.")
                     print("Manual changes:")
                     print(accept_delta)
-                gain -= cost_model.get_edit_gain(original, accept_delta, print_steps)
+                for cm in cost_models:
+                    gains[cm.name] -= cm.get_edit_gain(
+                        original, accept_delta, print_steps
+                    )
 
             original = accept_delta.apply_to_change(original)
             span = replace(span, original=TkArray.new(original), delta=rest_delta)
@@ -963,14 +1094,18 @@ class MultiRoundEvaluator:
             problem = replace(problem, span=span, edit_line_ids=edit_line_ids)
 
         # the remaining changes (if any) need to be applied manually
-        gain -= cost_model.get_edit_gain(original, span.delta, print_steps)
+        for cm in cost_models:
+            gains[cm.name] -= cm.get_edit_gain(original, span.delta, print_steps)
 
-        return MultiRoundEditStats(
-            label_edit_gain=labe_gain,
-            first_edit_gain=first_gain,
-            rounds=rounds,
-            total_edit_gain=gain,
-        )
+        return {
+            cm.name: MultiRoundEditStats(
+                label_edit_gain=label_gains[cm.name],
+                first_edit_gain=first_gains[cm.name],
+                rounds=rounds,
+                total_edit_gain=gains[cm.name],
+            )
+            for cm in cost_models
+        }
 
     @torch.autocast("cuda")
     def _get_most_uncertain_edit(
@@ -1053,82 +1188,6 @@ def show_prediction(prob: C3Problem, pred: RetrievalModelPrediction) -> str:
         commit=prob.src_info["commit"],
     )
     return tk_prob.show(pred["output_ids"])
-
-
-from difflib import Differ, SequenceMatcher
-
-
-@dataclass
-class EditCostModel:
-    cursor_jump_cost: int = 4  # the cost of jumping the cursor to a new location
-    delete_line_cost: int = 2  # the cost of deleting a line
-
-    def line_op_cost(self, opcode: tuple[str, int, int, int, int]) -> int:
-        "Measure the editing cost of an opcode returned by SequenceMatcher."
-        tag, i1, i2, j1, j2 = opcode
-        if tag == "equal":
-            return 0
-        elif tag == "delete":
-            # delete character-by-character
-            direct_cost = i2 - i1 + self.cursor_jump_cost
-            # delete the selected range
-            batch_cost = 2 * self.cursor_jump_cost + 2
-            return min(direct_cost, batch_cost)
-        elif tag == "insert":
-            return j2 - j1 + self.cursor_jump_cost
-        else:
-            assert_eq(tag, "replace")
-            return (i2 - i1) + (j2 - j1) + self.cursor_jump_cost
-
-    def get_edit_gain(
-        self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
-    ):
-        if not delta:
-            return 0
-        edit_lines = list(k[0] for k in delta.keys())
-        a, b = edit_lines[0], edit_lines[-1]
-        original = tk_get_lines(original, a, b + 1)
-        delta = delta.shifted(-a)
-        old_change = tokens_to_change(original)
-        new_change = tokens_to_change(delta.apply_to_change(original))
-        old_lines = old_change.after.splitlines()
-        new_lines = new_change.after.splitlines()
-
-        matcher = SequenceMatcher(None, old_lines, new_lines)
-        total = 0
-        for opcode in matcher.get_opcodes():
-            tag, i1, i2, j1, j2 = opcode
-            if tag == "equal":
-                continue
-            if tag == "delete":
-                # delete line-by-line
-                direct_cost = (i2 - i1) * self.delete_line_cost
-                # delete the selected range
-                batch_cost = self.cursor_jump_cost + 2
-                cost = min(direct_cost, batch_cost) + self.cursor_jump_cost
-                if print_steps:
-                    print(f"delete lines: ({i1},{i2}), {cost=}")
-            elif tag == "insert":
-                cost = len("\n".join(new_lines[j1:j2])) + self.cursor_jump_cost
-                if print_steps:
-                    print(f"insert lines: ({j1},{j2}), {cost=}")
-            else:
-                assert_eq(tag, "replace")
-                old_text = "\n".join(old_lines[i1:i2])
-                new_text = "\n".join(new_lines[j1:j2])
-                cost = keystroke_cost(old_text, new_text, self.cursor_jump_cost)
-                if print_steps:
-                    print(f"replace lines: ({i1},{i2}) -> ({j1},{j2}), {cost=}")
-                    for l in Differ().compare(
-                        old_text.splitlines(), new_text.splitlines()
-                    ):
-                        print("  " + l)
-
-            total += cost
-        if print_steps:
-            print("total cost:", total)
-
-        return total
 
 
 @dataclass
