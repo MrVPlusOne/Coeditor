@@ -279,6 +279,7 @@ def make_or_load_dataset(
         eval_probs = cache.cached(
             f"{prob_config}-{trans_config}",
             lambda: transform_eval_problems(problems),
+            remake=remake_problems,
         )
 
     return C3ProblemDataset(

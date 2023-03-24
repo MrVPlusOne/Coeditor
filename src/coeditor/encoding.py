@@ -429,7 +429,7 @@ class TkDelta:
 
     def change_groups(self) -> Sequence[tuple[DeltaKey, ...]]:
         """Group individual changes into logical groups using heuristics.
-        Currently, this only groups a <del> immediately followed by an <add>,
+        Currently, this only groups an <add> immediately followed by a <del>,
         as well as contiguous <del> blocks."""
 
         def is_key_type(key_id: int, type: Token):

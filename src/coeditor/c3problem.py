@@ -293,6 +293,10 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         mod2usages: Mapping[ModuleName, LineUsageAnalysis],
         module_order: Sequence[ModuleName],
     ) -> Sequence[C3Problem]:
+        """
+        Return (untransformed) c3 problems for the given project change.
+        Each problem contains a code change and a list of previous changes.
+        """
         before_mod_map = {m.mname: m for m in pchange.all_modules.before}
         cache = C3GeneratorCache(before_mod_map)
 
@@ -341,6 +345,11 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
 
 class C3GeneratorCache:
+    """
+    Cache various information needed for constructing C3 problems.
+    A new cache should be created for each project change (i.e., each commit).
+    """
+
     def __init__(self, pre_module_map: Mapping[ModuleName, JModule]):
         # stores the changed headers
         self._header_cache = dict[ProjectPath, ChangedHeader]()
@@ -635,6 +644,64 @@ class C3ProblemChangeDropout(C3ProblemTransform):
         return probs[: self.max_split_factor]
 
 
+@dataclass
+class C3ToCodeCompletion(C3ProblemTransform):
+    """Convert the C3 problem into an edit-oriented code completion problem by
+    randomly picking a changed line as the completion target, deleting its
+    old version, and treating the new version as the desired output.
+
+    ### Change log
+    - empty
+    """
+
+    VERSION = "1.0"
+    min_target_size = 6
+
+    def __post_init__(self):
+        self._rng = random.Random()
+
+    def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
+        original = prob.span.original
+        delta = prob.span.delta
+
+        def group_filter(group: tuple) -> bool:
+            segs = [delta[k] for k in group]
+            return (
+                segs[0][0] == Add_id
+                and sum(len(s) for s in segs) >= self.min_target_size
+            )
+
+        add_groups = [ks for ks in delta.change_groups() if group_filter(ks)]
+        if not add_groups:
+            return []
+        # sample the completion target
+        target = self._rng.choice(add_groups)
+
+        prev_changes = [k for k in delta.keys() if k < target[0]]
+        if delta[target[-1]][0] == Del_id:
+            # if the last change is a deletion, move it into prev_changesine into before_changes
+            prev_changes.append(target[-1])
+            target = target[:-1]
+            assert target
+        prev_delta, rest_delta = delta.decompose_for_change(prev_changes)
+        new_original = prev_delta.apply_to_change(original.tolist())
+        new_delta_keys = tuple(rest_delta.keys())[: len(target)]
+        new_delta = rest_delta.for_keys(new_delta_keys)
+        assert new_delta, "the remaining delta should not be empty"
+        new_span = replace(
+            prob.span, original=TkArray.new(new_original), delta=new_delta
+        )
+        new_trans = prob.transformations + ("code_completion",)
+        new_lines = tuple(set(k[0] for k in new_delta.keys()))
+        new_prob = replace(
+            prob,
+            span=new_span,
+            edit_line_ids=new_lines,
+            transformations=new_trans,
+        )
+        return [new_prob]
+
+
 @dataclass(frozen=True)
 class TkC3Problem(TokenizedEdit):
     "Tokenized contextual code change prediction problem."
@@ -829,7 +896,7 @@ class C3ProblemTokenizer:
         # take until we hit the limit
         ref_size_sum = 0
         kept_refs = list[tuple[str, TkArray]]()
-        for (name, ref) in all_refs:
+        for name, ref in all_refs:
             if ref_size_sum + len(ref) > self.max_ref_tks_sum:
                 continue
             ref_size_sum += len(ref)
