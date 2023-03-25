@@ -517,11 +517,11 @@ def _edits_from_commit_history(
     scripts = dict[RelPath, jedi.Script]()
     results = list[TProb]()
 
-    def has_timeouted():
+    def has_timeouted(step):
         if time_limit and (time.time() - start_time > time_limit):
             warnings.warn(
                 f"_edits_from_commit_history timed out for {project}. ({time_limit=}) "
-                f"Partial results ({len(results)}/{len(history)-1}) will be returned."
+                f"Partial results ({step}/{len(history)-1}) will be returned."
             )
             return True
         else:
@@ -569,10 +569,13 @@ def _edits_from_commit_history(
         return path.suffix == ".py" and all(p not in ignore_dirs for p in path.parts)
 
     future_commits = list(reversed(history[:-1]))
-    for commit_next in tqdm(
-        future_commits, smoothing=0, desc="processing commits", disable=silent
+    for step, commit_next in tqdm(
+        enumerate(future_commits),
+        smoothing=0,
+        desc="processing commits",
+        disable=silent,
     ):
-        if has_timeouted():
+        if has_timeouted(step):
             return results
         # get changed files
         changed_files = run_command(
@@ -645,7 +648,7 @@ def _edits_from_commit_history(
                     changed[mod_new.mname] = JModuleChange.from_modules(
                         Modified(mod_old, mod_new)
                     )
-            if has_timeouted():
+            if has_timeouted(step):
                 return results
 
         with _tlogger.timed("post_edit_analysis"):
@@ -654,7 +657,7 @@ def _edits_from_commit_history(
                 new_path2module,
                 changed,
             )
-        if has_timeouted():
+        if has_timeouted(step):
             return results
 
         # now go backwards in time to perform pre-edit analysis
