@@ -7,7 +7,7 @@ import wandb
 from prepare_data import make_or_load_dataset
 
 from coeditor._utils import cprint, run_long_task
-from coeditor.c3problem import C3ProblemChangeDropout
+from coeditor.c3problem import C3ProblemChangeInlining, C3ToCodeCompletion, TkC3Problem
 from coeditor.common import *
 from coeditor.dataset import C3CombinedEncoder, C3ProblemDataset
 from coeditor.model import (
@@ -31,8 +31,6 @@ def train_model(
     eval_only: bool = False,
     quicktest: bool = False,
 ):
-    assert dataset_name in model_name, "Model name should contain dataset name."
-
     dec_args = DecodingArgs()
     if quicktest:
         model_name = "quicktest-" + model_name
@@ -47,6 +45,9 @@ def train_model(
         encoder.problem_tranform,
         remake_problems=recreate_data,
     )
+    # limit the number of examples for faster testing
+    datasets["valid"] = random_subset(datasets["valid"], 10000, rng=42)
+    datasets["test"] = random_subset(datasets["test"], 10000, rng=42)
 
     config_dict = {
         k: get_modified_args(v)
@@ -90,55 +91,69 @@ def train_model(
     eval_tkn.max_output_tks *= 2
     eval_tkn.max_ref_tks_sum *= 2
 
-    eval_loader = C3DataLoader(
+    valid_loader = C3DataLoader(
         datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
     )
 
-    if not eval_only and resumed_from is None:
-        with timed_action("Warm-up Training"):
+    if not eval_only:
+        # follow a 3-stage training pipeline
+        with timed_action("stage 1 training"):
             warmup_bargs = copy.deepcopy(batch_args)
             warmup_bargs.min_queries *= 4
-            warmup_bargs.max_queries *= 2
-
-            warm_up_data = random_subset(
-                datasets["train"], len(datasets["train"]) // 4, rng=42
-            )
             warmup_tkn = copy.copy(train_tkn)
-            warmup_tkn.max_ref_tks_sum //= 3
+            warmup_tkn.max_ref_tks_sum //= 4
             warmup_loader = C3DataLoader(
-                warm_up_data,
+                datasets["train"],
                 encoder.problem_tranform,
                 warmup_tkn,
-                warmup_bargs,
+                batch_args,
+                filter=_not_truncated,
                 shuffle=True,
-                desc="warm-up training",
+                desc="stage 1 training",
             )
-            print("Warmup batch stats:")
-            pprint(warmup_loader.get_batch_stats())
-
             warmup_targs = copy.deepcopy(train_args)
             warmup_targs.learning_rate *= 4
             warmup_targs.max_train_epochs = 1
-            model.train_on_data(model_name, warmup_loader, eval_loader, warmup_targs)
+            model.train_on_data(model_name, warmup_loader, valid_loader, warmup_targs)
 
-    if not eval_only:
-        with timed_action("Fine-tune Training"):
-            # we attach the problem transform to the dataloader to generate data on-the-fly
+        with timed_action("stage 2 training"):
+            warmup_bargs = copy.deepcopy(batch_args)
+            warmup_bargs.min_queries *= 2
+            warmup_tkn = copy.copy(train_tkn)
+            warmup_tkn.max_ref_tks_sum //= 2
+            warmup_loader = C3DataLoader(
+                random_subset(datasets["train"], len(datasets["train"]) // 2),
+                encoder.problem_tranform,
+                warmup_tkn,
+                batch_args,
+                filter=_not_truncated,
+                shuffle=True,
+                desc="stage 2 training",
+            )
+            warmup_targs = copy.deepcopy(train_args)
+            warmup_targs.learning_rate *= 2
+            warmup_targs.max_train_epochs = 1
+            model.train_on_data(model_name, warmup_loader, valid_loader, warmup_targs)
+
+        with timed_action("final stage training"):
             train_loader = C3DataLoader(
-                datasets["train"],
+                random_subset(datasets["train"], len(datasets["train"]) // 4),
                 encoder.problem_tranform,
                 train_tkn,
                 batch_args,
                 shuffle=True,
-                desc="training",
+                desc="final stage training",
             )
-            print("Fine-tune batch stats:")
-            pprint(train_loader.get_batch_stats())
-            model.train_on_data(model_name, train_loader, eval_loader, train_args)
+            model.train_on_data(model_name, train_loader, valid_loader, train_args)
 
     model.to("cuda")
+    test_loader = C3DataLoader(
+        datasets["test"], None, eval_tkn, eval_batch_args, shuffle=False, desc="test"
+    )
+    print(f"{len(test_loader)}")
+    print(f"{len(test_loader.all_probs)}")
     with timed_action("Loss Evaluation"):
-        eval_result = model.eval_loss_on_loader(eval_loader)
+        eval_result = model.eval_loss_on_loader(test_loader)
         eval_dict = {f"test/{k}": v.average() for k, v in eval_result.items()}
         wandb.log(eval_dict)
 
@@ -146,8 +161,7 @@ def train_model(
         out_dir = get_model_dir() / model_name / "exact_match_samples"
         exact_acc = model.eval_on_data(
             datasets["test"],
-            eval_tkn,
-            eval_batch_args,
+            test_loader,
             dec_args,
             out_dir,
             probs_to_save=300,
@@ -157,6 +171,10 @@ def train_model(
         cprint("blue", "Exact-match samples saved to:", out_dir)
 
     return model
+
+
+def _not_truncated(p: TkC3Problem) -> bool:
+    return not p.truncated
 
 
 def check_save_dir(model_name: str) -> None:
@@ -180,23 +198,35 @@ def check_save_dir(model_name: str) -> None:
             exit(1)
 
 
+def eval_code_completion():
+    train_model(
+        model_name="coeditor-xl-c3-completion-v1.6-resumed",
+        dataset_name="tiny",
+        encoder=C3CombinedEncoder(
+            problem_tranform=C3ToCodeCompletion(),
+        ),
+        resumed_from=(get_model_dir(True) / "coeditor-xl-c3-dropout-v1.6-resumed"),
+        eval_only=True,
+    )
+
+
+def train_new_model():
+    train_model(
+        model_name="coeditor-perm2k-c3-multi-v1.7",
+        dataset_name="perm2k",
+        train_args=TrainingArgs(
+            max_train_epochs=1,
+        ),
+        encoder=C3CombinedEncoder(
+            problem_tranform=C3ProblemChangeInlining(),
+        ),
+        recreate_data=False,
+        quicktest=False,
+    )
+
+
 if __name__ == "__main__":
     os.chdir(proj_root())
 
     with run_long_task("train_model.py"):
-        train_model(
-            model_name="coeditor-xl-c3-dropout-v1.6-resumed",
-            dataset_name="xl",
-            train_args=TrainingArgs(
-                max_train_epochs=1,
-            ),
-            encoder=C3CombinedEncoder(
-                problem_tranform=C3ProblemChangeDropout(),
-            ),
-            resumed_from=(
-                get_model_dir(False) / "coeditor-xl-c3-dropout-v1.6/checkpoint-125000"
-            ),
-            eval_only=False,
-            recreate_data=False,
-            quicktest=False,
-        )
+        train_new_model()

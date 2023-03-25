@@ -323,8 +323,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def eval_on_data(
         self,
         eval_problems: Sequence[C3Problem],
-        tokenizer: C3ProblemTokenizer,
-        batch_args: "BatchArgs",
+        eval_loader: "C3DataLoader",
         dec_args: DecodingArgs,
         out_dir: Path,
         probs_to_save: int = 300,
@@ -332,20 +331,6 @@ class RetrievalEditorModel(T5PreTrainedModel):
         shutil.rmtree(out_dir, ignore_errors=True)
         (out_dir / "correct").mkdir(parents=True, exist_ok=True)
         (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
-
-        if batch_args.shuffle_extra_ids:
-            warnings.warn(
-                "Shuffling extra ids during eval can lead to incorrect results."
-            )
-
-        eval_loader = C3DataLoader(
-            eval_problems,
-            None,
-            tokenizer,
-            batch_args,
-            shuffle=False,
-            desc="predict_on_data",
-        )
 
         save_ids = set(
             random_subset(range(0, len(eval_problems)), probs_to_save, rng=42)
@@ -1186,6 +1171,7 @@ def show_prediction(prob: C3Problem, pred: RetrievalModelPrediction) -> str:
         ],
         project=prob.src_info["project"],
         commit=prob.src_info["commit"],
+        truncated=False,
     )
     return tk_prob.show(pred["output_ids"])
 
@@ -1961,6 +1947,10 @@ class BatchArgs:
         )
 
 
+def _always_true(*args):
+    return True
+
+
 @dataclass
 class C3DataLoader:
     all_probs: Sequence[C3Problem]
@@ -1969,6 +1959,8 @@ class C3DataLoader:
     batch_args: BatchArgs
     shuffle: bool
     desc: str
+    # a problem filter can be used to filter out problems that are not suitable for training
+    filter: Callable[[TkC3Problem], bool] = _always_true
     tqdm_args: dict | None = None
     chunk_size: int = 1000
     workers: int = DefaultWorkers
@@ -2004,12 +1996,14 @@ class C3DataLoader:
         for i in range(0, len(probs), self.chunk_size):
             # we can only afford to tokenize the problems on-the-fly
             group = probs[i : i + self.chunk_size]
-            yield from pmap(
+            for tkprob in pmap(
                 self.tokenizer.tokenize_problem,
                 group,
                 tqdm_args={"disable": True},
                 max_workers=self.workers,
-            )
+            ):
+                if self.filter(tkprob):
+                    yield tkprob
 
     def estimate_batch_stats(self):
         factor = 10

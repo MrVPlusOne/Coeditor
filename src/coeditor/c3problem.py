@@ -89,6 +89,9 @@ class ChangedCodeSpan:
         change_tks = self.delta.apply_to_change(self.original.tolist())
         return tokens_to_change(change_tks)
 
+    def change_size(self) -> int:
+        return len(self.original) + self.delta.change_size()
+
 
 class SrcInfo(TypedDict):
     project: str
@@ -546,7 +549,7 @@ class C3ProblemSimpleSplit(C3ProblemTransform):
 
 
 @dataclass
-class C3ProblemChangeDropout(C3ProblemTransform):
+class C3ProblemChangeInlining(C3ProblemTransform):
     """Split the problem into fixed-sized editing ranges like `C3ProblemSimpleSplit`,
     but also randomly keep some subset of changes in the input.
 
@@ -714,6 +717,7 @@ class TkC3Problem(TokenizedEdit):
     named_references: Sequence[tuple[str, TkArray]]
     project: str
     commit: CommitInfo | None
+    truncated: bool
 
     @property
     def references(self) -> Sequence[TkArray]:
@@ -768,16 +772,17 @@ class C3TokenizerArgs(TypedDict):
 class C3ProblemTokenizer:
     """
     ## Change log
+    - 2.6: increase max_ref_tks_sum from 512 * 12 to 512 * 16.
     - 2.5: Sort used references by path.
     - 2.4: Encode each changed reference individually. Encode signatures for unchanged.
     """
 
-    VERSION = "2.5"
+    VERSION = "2.6"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
     max_scope_tks: int = 128
-    max_ref_tks_sum: int = 512 * 12
+    max_ref_tks_sum: int = 512 * 16
     ref_chunk_overlap: int = 32
 
     def get_args(self):
@@ -882,23 +887,29 @@ class C3ProblemTokenizer:
         all_refs = above_chunks + below_chunks
         ref_size_sum = sum(len(ref) for _, ref in all_refs)
 
+        truncated = False
         if ref_size_sum < self.max_ref_tks_sum:
             unchanged = self._group_encode_unchanged_refs(problem.relevant_unchanged)
             for i, chunk in enumerate(unchanged):
                 all_refs.append((f"unchanged ref {i}", chunk))
+        else:
+            truncated = True
 
         if ref_size_sum < self.max_ref_tks_sum:
             changed = self._group_encode_changed_refs(problem.relevant_changes)
             for i, chunk in enumerate(changed):
                 all_refs.append((f"changed ref {i}", chunk))
             ref_size_sum += sum(len(x) for x in changed)
+        else:
+            truncated = True
 
         # take until we hit the limit
         ref_size_sum = 0
         kept_refs = list[tuple[str, TkArray]]()
         for name, ref in all_refs:
             if ref_size_sum + len(ref) > self.max_ref_tks_sum:
-                continue
+                truncated = True
+                break
             ref_size_sum += len(ref)
             kept_refs.append((name, ref))
 
@@ -911,6 +922,7 @@ class C3ProblemTokenizer:
             named_references=kept_refs,
             project=problem.src_info["project"],
             commit=problem.src_info["commit"],
+            truncated=truncated,
         )
 
     def _encode_headers(

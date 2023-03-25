@@ -234,7 +234,7 @@ class C3ProblemDataset(TypedDict):
 def make_or_load_dataset(
     dataset_name: str,
     change_processor: ProjectChangeProcessor[C3Problem],
-    problem_transformer: C3ProblemTransform,
+    eval_transformer: C3ProblemTransform,
     remake_problems: bool = False,
     workers: int = DefaultWorkers,
 ) -> C3ProblemDataset:
@@ -246,7 +246,7 @@ def make_or_load_dataset(
             if split == "train":
                 continue
             prob_lists = pmap(
-                problem_transformer.transform,
+                eval_transformer.transform,
                 probs,
                 desc=f"transform({split})",
                 chunksize=1000,
@@ -271,13 +271,13 @@ def make_or_load_dataset(
     size_mb = (processed_dir / prob_config).stat().st_size / (1024**2)
     print(f"Problems total size: {size_mb:.2f} MB")
 
-    trans_config = repr_modified_args(problem_transformer)
+    trans_config = repr_modified_args(eval_transformer)
     transformed_dir = get_dataset_dir(dataset_name) / "transformed"
     cache = PickleCache(transformed_dir)
 
     with timed_action("Making or loading transformed C3 problems for eval"):
         eval_probs = cache.cached(
-            f"{prob_config}-{trans_config}",
+            f"eval-{prob_config}-{trans_config}",
             lambda: transform_eval_problems(problems),
             remake=remake_problems,
         )
