@@ -1,14 +1,14 @@
 from coeditor._utils import run_long_task
-from coeditor.c3problem import C3ProblemChangeDropout, C3ProblemGenerator
+from coeditor.c3problem import C3ProblemChangeInlining, C3ProblemGenerator
 from coeditor.common import *
 from coeditor.dataset import *
 
 if __name__ == "__main__":
     os.chdir(proj_root())
 
-    dataset_name = "xl"
+    dataset_name = "perm2K"
     generator = C3ProblemGenerator()
-    transform = C3ProblemChangeDropout()
+    transform = C3ProblemChangeInlining()
     with run_long_task(f"Preparing dataset {dataset_name} with encoder {generator}"):
         problems = make_or_load_dataset(
             dataset_name, generator, transform, remake_problems=False

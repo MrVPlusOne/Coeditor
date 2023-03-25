@@ -1,3 +1,8 @@
+import shutil
+from datetime import datetime
+
+import dateparser
+
 from coeditor.common import *
 
 
@@ -57,3 +62,96 @@ def file_content_from_commit(
         ["git", "show", f"{commit}:{path}"],
         cwd=project_dir,
     )
+
+
+@dataclass
+class GitRepo:
+    author: str
+    name: str
+    url: str
+    stars: int
+    forks: int
+    description: str
+    license: str
+    archived: bool
+    last_update: Optional[datetime] = None
+    num_commits: Optional[int] = None
+
+    def authorname(self):
+        return f"{self.author}~{self.name}"
+
+    def get_root(self, repos_dir: Path) -> Path:
+        return repos_dir / "downloaded" / self.authorname()
+
+    def download(
+        self, repos_dir: Path, full_history: bool = True, timeout=None
+    ) -> bool:
+        depth = "--depth=1" if not full_history else ""
+        subprocess.run(
+            ["git", "clone", *depth, self.url, self.authorname()],
+            cwd=(repos_dir / "downloading"),
+            timeout=timeout,
+            capture_output=True,
+        )
+        if not (repos_dir / "downloading" / self.authorname()).is_dir():
+            # git clone failed. Possibly caused by invalid url?
+            return False
+        shutil.move(
+            repos_dir / "downloading" / self.authorname(), (repos_dir / "downloaded")
+        )
+        return True
+
+    def read_last_update(self, repos_dir):
+        d = self.get_root(repos_dir)
+        s = subprocess.run(
+            ["git", "log", "-1", "--format=%cd"], cwd=d, capture_output=True, text=True
+        ).stdout
+        lu = dateparser.parse(s.split("+")[0])
+        assert lu is not None
+        self.last_update = lu.replace(tzinfo=None)
+        return self.last_update
+
+    def count_lines_of_code(self, repos_dir):
+        n_lines = 0
+        for src in self.get_root(repos_dir).glob("**/*.py"):
+            with open(src, "r") as fp:
+                n_lines += sum(1 for line in fp if line.rstrip())
+        self.lines_of_code = n_lines
+        return n_lines
+
+    def count_commits(self, repos_dir) -> int:
+        result = run_command(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=self.get_root(repos_dir),
+        )
+        n = int(result)
+        self.num_commits = n
+        return n
+
+    def revert_changes(self, repos_dir):
+        rd = self.get_root(repos_dir)
+        result = subprocess.run(
+            ["git", "diff", "--name-only"], cwd=rd, capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip() != "":
+            print("Reverting changes in", rd)
+            subprocess.run(
+                ["git", "checkout", "."],
+                cwd=rd,
+            )
+
+    @staticmethod
+    def from_github_item(item: dict):
+        return GitRepo(
+            author=item["owner"]["login"],
+            name=item["name"],
+            url=item["html_url"],
+            description=item["description"],
+            license=item["license"]["key"],
+            stars=item["stargazers_count"],
+            forks=item["forks_count"],
+            archived=item["archived"],
+            last_update=not_none(dateparser.parse(item["pushed_at"])).replace(
+                tzinfo=None
+            ),
+        )
