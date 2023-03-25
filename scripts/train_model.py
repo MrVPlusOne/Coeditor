@@ -1,15 +1,20 @@
 import copy
+import multiprocessing
 import os
 import shutil
 import warnings
 
 import wandb
-from prepare_data import make_or_load_dataset
 
 from coeditor._utils import cprint, run_long_task
 from coeditor.c3problem import C3ProblemChangeInlining, C3ToCodeCompletion, TkC3Problem
 from coeditor.common import *
-from coeditor.dataset import C3CombinedEncoder, C3ProblemDataset
+from coeditor.dataset import (
+    C3CombinedEncoder,
+    C3ProblemDataset,
+    make_or_load_dataset,
+    make_or_load_transformed_dataset,
+)
 from coeditor.model import (
     BatchArgs,
     C3DataLoader,
@@ -42,12 +47,23 @@ def train_model(
     datasets = make_or_load_dataset(
         dataset_name,
         encoder.change_processor,
-        encoder.problem_tranform,
         remake_problems=recreate_data,
+        workers=multiprocessing.cpu_count(),
     )
+
+    with timed_action("Making or loading transformed C3 problems for eval"):
+        # it's important to cache these due to randomness in the transformations
+        eval_probs = make_or_load_transformed_dataset(
+            dataset_name,
+            datasets,
+            encoder,
+            remake_problems=recreate_data,
+            workers=multiprocessing.cpu_count(),
+        )
+
     # limit the number of examples for faster testing
-    datasets["valid"] = random_subset(datasets["valid"], 10000, rng=42)
-    datasets["test"] = random_subset(datasets["test"], 10000, rng=42)
+    datasets["valid"] = random_subset(eval_probs["valid"], 10000, rng=42)
+    datasets["test"] = random_subset(eval_probs["test"], 10000, rng=42)
 
     config_dict = {
         k: get_modified_args(v)
@@ -97,54 +113,33 @@ def train_model(
 
     if not eval_only:
         # follow a 3-stage training pipeline
-        with timed_action("stage 1 training"):
-            warmup_bargs = copy.deepcopy(batch_args)
-            warmup_bargs.min_queries *= 4
-            warmup_tkn = copy.copy(train_tkn)
-            warmup_tkn.max_ref_tks_sum //= 4
-            warmup_loader = C3DataLoader(
-                datasets["train"],
+        scales = [4, 2, 1]
+        for stage, scale in enumerate(scales):
+            s_bargs = copy.deepcopy(batch_args)
+            s_bargs.min_queries *= scale
+            s_tkn = copy.copy(train_tkn)
+            s_tkn.max_ref_tks_sum //= scale
+            s_probs = [
+                x
+                for x in datasets["train"]
+                if sum(c.change_size() for c in x.relevant_changes)
+                <= s_tkn.max_ref_tks_sum
+            ]
+            s_probs = random_subset(s_probs, len(s_probs) // 4 * scale)
+            s_loader = C3DataLoader(
+                s_probs,
                 encoder.problem_tranform,
-                warmup_tkn,
+                s_tkn,
                 batch_args,
                 filter=_not_truncated,
                 shuffle=True,
-                desc="stage 1 training",
+                desc=f"stage {stage} training",
             )
-            warmup_targs = copy.deepcopy(train_args)
-            warmup_targs.learning_rate *= 4
-            warmup_targs.max_train_epochs = 1
-            model.train_on_data(model_name, warmup_loader, valid_loader, warmup_targs)
-
-        with timed_action("stage 2 training"):
-            warmup_bargs = copy.deepcopy(batch_args)
-            warmup_bargs.min_queries *= 2
-            warmup_tkn = copy.copy(train_tkn)
-            warmup_tkn.max_ref_tks_sum //= 2
-            warmup_loader = C3DataLoader(
-                random_subset(datasets["train"], len(datasets["train"]) // 2),
-                encoder.problem_tranform,
-                warmup_tkn,
-                batch_args,
-                filter=_not_truncated,
-                shuffle=True,
-                desc="stage 2 training",
-            )
-            warmup_targs = copy.deepcopy(train_args)
-            warmup_targs.learning_rate *= 2
-            warmup_targs.max_train_epochs = 1
-            model.train_on_data(model_name, warmup_loader, valid_loader, warmup_targs)
-
-        with timed_action("final stage training"):
-            train_loader = C3DataLoader(
-                random_subset(datasets["train"], len(datasets["train"]) // 4),
-                encoder.problem_tranform,
-                train_tkn,
-                batch_args,
-                shuffle=True,
-                desc="final stage training",
-            )
-            model.train_on_data(model_name, train_loader, valid_loader, train_args)
+            s_targs = copy.deepcopy(train_args)
+            s_targs.learning_rate *= scale
+            s_targs.max_train_epochs = 1
+            with timed_action(f"stage {stage} training"):
+                model.train_on_data(model_name, s_loader, valid_loader, s_targs)
 
     model.to("cuda")
     test_loader = C3DataLoader(
@@ -212,7 +207,7 @@ def eval_code_completion():
 
 def train_new_model():
     train_model(
-        model_name="coeditor-perm2k-c3-multi-v1.7",
+        model_name="coeditor-perm2k-c3-multi-v1.7.1",
         dataset_name="perm2k",
         train_args=TrainingArgs(
             max_train_epochs=1,
