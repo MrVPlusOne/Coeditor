@@ -268,12 +268,19 @@ class ChangeDetector:
 StatusTag = Literal["A", "D", "R", " ", "RA", "RD"]
 
 
+class LineChange(TypedDict):
+    start: int
+    until: int
+    old_str: str
+    new_str: str
+
+
 class EditSuggestion(TypedDict):
     score: float
     change_preview: str
-    new_code: str
     input_status: list[tuple[int, StatusTag]]
     output_status: list[tuple[int, StatusTag]]
+    changes: list[LineChange]
 
 
 def path_to_module_name(rel_path: RelPath) -> ModuleName:
@@ -429,18 +436,22 @@ class EditPredictionService:
                         splitlines(pred_change.after),
                     )
                 )
-                input_status, change_status = compute_line_status(pred_change)
+                input_status, diff_status, changes = compute_line_status(pred_change)
+                line_offset = target_lines[0]
                 input_status = [
-                    (i + target_lines[0], tag) for i, tag in input_status.items()
+                    (i + line_offset, tag) for i, tag in input_status.items()
                 ]
-                output_status = list(change_status.items())
+                output_status = list(diff_status.items())
+                for c in changes:
+                    c["start"] += line_offset
+                    c["until"] += line_offset
 
                 suggestion = EditSuggestion(
                     score=pred.score,
                     change_preview=preview,
-                    new_code=pred_change.after,
                     input_status=input_status,
                     output_status=output_status,
+                    changes=changes,
                 )
                 suggestions.append(suggestion)
 
@@ -534,31 +545,47 @@ def show_location(loc: CodePosition):
     return f"{loc[0]}:{loc[1]}"
 
 
+def _join_lines(lines: Sequence[str]) -> str:
+    return "".join(l + "\n" for l in lines)
+
+
 def compute_line_status(change: Modified[str]):
-    diff_ops = get_diff_ops(splitlines(change.before), splitlines(change.after))
+    """Given a str change, compute the line status for the input ('A', 'D', or 'R')
+    and the line status for the change diff ('A', 'D', 'RA', or 'RD')."""
+    in_lines = splitlines(change.before)
+    out_lines = splitlines(change.after)
+    diff_ops = get_diff_ops(in_lines, out_lines)
     offset = 0
     # the line status for the lines before the edit
-    before_status = dict[int, StatusTag]()
+    input_status = dict[int, StatusTag]()
     # the line status for the lines in the delta file
-    change_status = dict[int, StatusTag]()
+    diff_status = dict[int, StatusTag]()
+    # the line change operations
+    changes = list[LineChange]()
     for tag, (i1, i2), (j1, j2) in diff_ops:
+        if tag != " ":
+            old_str = _join_lines(in_lines[i1:i2])
+            new_str = _join_lines(out_lines[j1:j2])
+            changes.append(
+                LineChange(start=i1, until=i2, old_str=old_str, new_str=new_str)
+            )
         if tag == "A":
-            before_status[i1] = "A"
+            input_status[i1] = "A"
             for j in range(j1, j2):
-                change_status[offset + j] = "A"
+                diff_status[offset + j] = "A"
             continue
         if tag == "D":
             for _ in range(i2 - i1):
-                change_status[offset + j1] = "D"
+                diff_status[offset + j1] = "D"
                 offset += 1
         if tag == "R":
             for _ in range(i2 - i1):
-                change_status[offset + j1] = "RD"
+                diff_status[offset + j1] = "RD"
                 offset += 1
             for j in range(j1, j2):
-                change_status[offset + j] = "RA"
+                diff_status[offset + j] = "RA"
         for i in range(i1, i2):
-            if i not in before_status:
-                before_status[i] = tag
+            if i not in input_status:
+                input_status[i] = tag
 
-    return before_status, change_status
+    return input_status, diff_status, changes
