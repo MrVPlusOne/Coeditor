@@ -7,7 +7,7 @@ import warnings
 import wandb
 
 from coeditor._utils import cprint, run_long_task
-from coeditor.c3problem import C3ProblemChangeInlining, C3ToCodeCompletion, TkC3Problem
+from coeditor.c3problem import C3ProblemChangeInlining, C3ToCodeCompletion
 from coeditor.common import *
 from coeditor.dataset import (
     C3CombinedEncoder,
@@ -27,6 +27,7 @@ from coeditor.model import (
 def train_model(
     model_name: str,
     dataset_name: str,
+    description: str,
     encoder: C3CombinedEncoder = C3CombinedEncoder(),
     batch_args=BatchArgs.train_default(),
     eval_batch_args=BatchArgs.eval_default(),
@@ -68,6 +69,7 @@ def train_model(
     config_dict = {
         k: get_modified_args(v)
         for k, v in {
+            "description": description,
             "edit_tokenizer": encoder.edit_tokenizer.get_args(),
             "batch_args": batch_args,
             "train_args": train_args,
@@ -112,34 +114,31 @@ def train_model(
     )
 
     if not eval_only:
-        # follow a 3-stage training pipeline
+        # gradually increase the ctx size during training
         scales = [4, 2, 1]
-        for stage, scale in enumerate(scales):
-            s_bargs = copy.deepcopy(batch_args)
-            s_bargs.min_queries *= scale
+        for scale in scales:
             s_tkn = copy.copy(train_tkn)
             s_tkn.max_ref_tks_sum //= scale
             s_probs = [
                 x
                 for x in datasets["train"]
                 if sum(c.change_size() for c in x.relevant_changes)
-                <= s_tkn.max_ref_tks_sum
+                < s_tkn.max_ref_tks_sum
             ]
-            s_probs = random_subset(s_probs, len(s_probs) // 4 * scale)
+            n_probs = max(1, len(s_probs) // max(scales) // 2) * scale
+            s_probs = random_subset(s_probs, n_probs)
+            desc = f"training (ctx={s_tkn.max_ref_tks_sum})"
             s_loader = C3DataLoader(
                 s_probs,
                 encoder.problem_tranform,
                 s_tkn,
                 batch_args,
-                filter=_not_truncated,
                 shuffle=True,
-                desc=f"stage {stage} training",
+                desc=desc,
             )
-            s_targs = copy.deepcopy(train_args)
-            s_targs.learning_rate *= scale
-            s_targs.max_train_epochs = 1
-            with timed_action(f"stage {stage} training"):
-                model.train_on_data(model_name, s_loader, valid_loader, s_targs)
+
+            with timed_action(desc):
+                model.train_on_data(model_name, s_loader, valid_loader, train_args)
 
     model.to("cuda")
     test_loader = C3DataLoader(
@@ -168,10 +167,6 @@ def train_model(
     return model
 
 
-def _not_truncated(p: TkC3Problem) -> bool:
-    return not p.truncated
-
-
 def check_save_dir(model_name: str) -> None:
     "Prompt user to remove existing training directory or abort."
     training_dir = get_model_dir(False) / model_name
@@ -197,6 +192,7 @@ def eval_code_completion():
     train_model(
         model_name="coeditor-xl-c3-completion-v1.6-resumed",
         dataset_name="tiny",
+        description="",
         encoder=C3CombinedEncoder(
             problem_tranform=C3ToCodeCompletion(),
         ),
@@ -207,13 +203,15 @@ def eval_code_completion():
 
 def train_new_model():
     train_model(
-        model_name="coeditor-perm2k-c3-multi-v1.7.1",
+        model_name="coeditor-perm2k-c3-multi-v1.7.2",
         dataset_name="perm2k",
+        description="Use fixed batch size.",
         train_args=TrainingArgs(
             max_train_epochs=1,
         ),
         encoder=C3CombinedEncoder(
             problem_tranform=C3ProblemChangeInlining(),
+            # edit_tokenizer=C3ProblemTokenizer(disable_unchanged_refs=True),
         ),
         recreate_data=False,
         quicktest=False,

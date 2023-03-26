@@ -1920,8 +1920,7 @@ def retrieval_cost_model(ref_size: int, query_size: int, output_size: int) -> fl
 
 @dataclass
 class BatchArgs:
-    min_queries: int = 1
-    max_queries: int = 8
+    batch_size: int = 1
     shuffle_extra_ids: bool = True
 
     @classmethod
@@ -1931,7 +1930,7 @@ class BatchArgs:
     @classmethod
     def eval_default(cls) -> Self:
         return BatchArgs(
-            max_queries=32,
+            batch_size=2,
             shuffle_extra_ids=False,
         )
 
@@ -1975,23 +1974,17 @@ class C3DataLoader:
     batch_args: BatchArgs
     shuffle: bool
     desc: str
-    # a problem filter can be used to filter out problems that are not suitable for training
-    filter: Callable[[TkC3Problem], bool] = _always_true
     tqdm_args: dict | None = None
     chunk_size: int = 1000
     workers: int = DefaultWorkers
 
     def __post_init__(self):
-        n_batches, batch_stats = self.estimate_batch_stats()
+        n_batches = self.estimate_n_batches()
         self._len_est = n_batches
-        self._batch_stast = batch_stats
         self.epochs = 0
 
     def __len__(self) -> int:
         return self._len_est
-
-    def get_batch_stats(self):
-        return self._batch_stast
 
     def _to_tokenized(self, probs: Sequence[C3Problem]) -> Iterable[TkC3Problem]:
         probs = list(probs)
@@ -2013,27 +2006,32 @@ class C3DataLoader:
         for i in range(0, len(probs), self.chunk_size):
             # we can only afford to tokenize the problems on-the-fly
             group = probs[i : i + self.chunk_size]
-            for tkprob in pmap(
+            yield from pmap(
                 post.tokenize,
                 group,
                 tqdm_args={"disable": True},
                 max_workers=self.workers,
-            ):
-                if self.filter(tkprob):
-                    yield tkprob
+            )
 
-    def estimate_batch_stats(self):
+    def estimate_n_batches(self) -> int:
         factor = 10
         n = max(1, len(self.all_probs) // factor)
         subset = random_subset(self.all_probs, n, rng=42)
-        batches = self._problems_to_batches(self._to_tokenized(subset))
-        bsizes = list[int]()
-        for b in tqdm(batches, desc="estimate_batch_stats", smoothing=0.0):
-            bsizes.append(len(b["input_ids"]))
-        batch_stats = {k: f"{v:.1f}" for k, v in scalar_stats(bsizes).items()}
+        probs = list(subset)
+        if self.transform is not None:
+            # we can afford to store all transformed problems beforehand
+            probs = join_list(
+                pmap(
+                    self.transform.transform,
+                    probs,
+                    chunksize=self.chunk_size // 2,
+                    max_workers=self.workers,
+                )
+            )
         # better to have a smaller estimate to avoid triggering data regeneration
-        size_est = max(1, int(len(self.all_probs) / n * len(bsizes) * 0.99))
-        return size_est, batch_stats
+        n_batches = max(1, len(probs) // self.batch_args.batch_size)
+        est = max(1, int(len(self.all_probs) / n * n_batches * 0.99))
+        return est
 
     def __iter__(self) -> Iterable[dict]:
         batches = self._problems_to_batches(self._to_tokenized(self.all_probs))
@@ -2054,13 +2052,6 @@ class C3DataLoader:
             }
         self.epochs += 1
 
-    def _cost_limit(self) -> float:
-        min_queries = self.batch_args.min_queries
-        tkn = self.tokenizer
-        return min_queries * retrieval_cost_model(
-            tkn.max_ref_tks_sum, tkn.max_query_tks, tkn.max_output_tks
-        )
-
     @staticmethod
     def pack_batch(probs: Sequence[TkC3Problem]):
         assert probs, "Empty batch found"
@@ -2079,21 +2070,28 @@ class C3DataLoader:
         }
 
     def _problems_to_batches(self, problems: Iterable[TkC3Problem]) -> Iterable[dict]:
-        if self.batch_args.max_queries == self.batch_args.min_queries:
-            bsize = self.batch_args.max_queries
-            # group problems into fixed-size batches
-            current_batch = list[TkC3Problem]()
-            for tk_prob in problems:
-                current_batch.append(tk_prob)
-                if len(current_batch) == bsize:
-                    yield self.pack_batch(current_batch)
-                    current_batch = list[TkC3Problem]()
-            if current_batch:
+        bsize = self.batch_args.batch_size
+        # group problems into fixed-size batches
+        current_batch = list[TkC3Problem]()
+        for tk_prob in problems:
+            current_batch.append(tk_prob)
+            if len(current_batch) == bsize:
                 yield self.pack_batch(current_batch)
-            return
+                current_batch = list[TkC3Problem]()
+        if current_batch:
+            yield self.pack_batch(current_batch)
+
+    def _problems_to_batches_dynamic(
+        self, problems: Iterable[TkC3Problem], min_queries: int, max_queries: int
+    ) -> Iterable[dict]:
+        def _cost_limit() -> float:
+            tkn = self.tokenizer
+            return min_queries * retrieval_cost_model(
+                tkn.max_ref_tks_sum, tkn.max_query_tks, tkn.max_output_tks
+            )
 
         tkn = self.tokenizer
-        cost_limit = self._cost_limit()
+        cost_limit = _cost_limit()
         warned_batch_size = False
         # sample references for each query
         current_batch = list[TkC3Problem]()
@@ -2111,8 +2109,7 @@ class C3DataLoader:
                 warned_batch_size = True
                 warnings.warn("Batch cost limit is too small.")
             if (not current_batch) or (
-                cost + current_cost <= cost_limit
-                and len(current_batch) < self.batch_args.max_queries
+                cost + current_cost <= cost_limit and len(current_batch) < max_queries
             ):
                 current_batch.append(tk_prob)
                 current_cost += cost
