@@ -567,7 +567,7 @@ class C3ProblemChangeInlining(C3ProblemTransform):
 
     max_lines_to_edit: int = 25
     max_split_factor: int = 4
-    # when dropping the changes into the input, the biggest ratio of changes to drop
+    # when dropping the changes into the input, the biggest ratio of changes to inline
     max_dropout_ratio: float = 0.5
     _test_prob: float = 0.01
 
@@ -784,6 +784,7 @@ class C3ProblemTokenizer:
     max_scope_tks: int = 128
     max_ref_tks_sum: int = 512 * 16
     ref_chunk_overlap: int = 32
+    disable_unchanged_refs: bool = False
 
     def get_args(self):
         return C3TokenizerArgs(
@@ -889,9 +890,12 @@ class C3ProblemTokenizer:
 
         truncated = False
         if ref_size_sum < self.max_ref_tks_sum:
-            unchanged = self._group_encode_unchanged_refs(problem.relevant_unchanged)
-            for i, chunk in enumerate(unchanged):
-                all_refs.append((f"unchanged ref {i}", chunk))
+            if not self.disable_unchanged_refs:
+                unchanged = self._group_encode_unchanged_refs(
+                    problem.relevant_unchanged
+                )
+                for i, chunk in enumerate(unchanged):
+                    all_refs.append((f"unchanged ref {i}", chunk))
         else:
             truncated = True
 

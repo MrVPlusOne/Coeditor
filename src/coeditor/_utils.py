@@ -180,7 +180,8 @@ def pmap(
         return outs
 
     if chunksize is None:
-        chunksize = max(1, n // (20 * max_workers))
+        chunksize = n // (20 * max_workers)
+    chunksize = max(1, chunksize)
 
     tag_f = _TaggedFunc(f, key_args)
     arg_tuples = zip(range(n), *f_args)

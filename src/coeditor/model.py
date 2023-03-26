@@ -487,26 +487,15 @@ class RetrievalEditorModel(T5PreTrainedModel):
             )
         return model
 
-    def encode_token_seqs(
-        self, references: Sequence[TokenSeq] | Sequence[str], pad_id=None
-    ) -> LongTensor:
-        references = [
-            encode_lines_join(ref) if isinstance(ref, str) else ref
-            for ref in references
-        ]
-        out = pad_token_seqs(references, pad_id=pad_id)
-        out = out.to(self.device)
-        return cast(LongTensor, out)
-
-    def profile_run(self, repeats: int = 10, max_refs: int = 10):
+    def profile_run(self, repeats: int = 10, max_refs: int = 20):
         rand = random.Random(42)
         for i in tqdm(range(repeats), "test run"):
-            input_ids = 5 * torch.ones(
-                1, rand.randint(64, 512), dtype=torch.long, device=self.device
-            )
+            len_in = rand.randint(64, 512)
+            len_out = rand.randint(14, 256)
+            input_ids = 5 * torch.ones(1, len_in, dtype=torch.long, device=self.device)
             n_refs = rand.randint(max_refs // 2, max_refs)
             references = [[5] * rand.randint(64, 512) for _ in range(n_refs)]
-            labels = 5 * torch.ones(1, 128, dtype=torch.long, device=self.device)
+            labels = 5 * torch.ones(1, len_out, dtype=torch.long, device=self.device)
             with torch.autocast("cuda"):
                 self.forward(as_any(input_ids), references, labels=as_any(labels))
 
@@ -1952,6 +1941,33 @@ def _always_true(*args):
 
 
 @dataclass
+class _C3PostProcess:
+    tokenizer: C3ProblemTokenizer
+    batch_args: BatchArgs
+
+    def tokenize(self, prob: C3Problem) -> TkC3Problem:
+        tk_prob = self.tokenizer.tokenize_problem(prob)
+        max_output_tks = self.tokenizer.max_output_tks
+        shuffle_extra_ids = self.batch_args.shuffle_extra_ids
+        output_tks = tk_prob.output_tks
+        output_tks = wrap_bos(output_tks)
+
+        if len(output_tks) > max_output_tks:
+            output_tks = output_tks[:max_output_tks]
+
+        main_input = tk_prob.main_input.tolist()
+
+        if shuffle_extra_ids and random.random() < 0.5:
+            id_map = random_extra_id_map()
+            main_input = [id_map.get(tk, tk) for tk in main_input]
+            output_tks = [id_map.get(tk, tk) for tk in output_tks]
+
+        return dataclasses.replace(
+            tk_prob, main_input=TkArray.new(main_input), output=TkArray.new(output_tks)
+        )
+
+
+@dataclass
 class C3DataLoader:
     all_probs: Sequence[C3Problem]
     transform: C3ProblemTransform | None
@@ -1985,7 +2001,7 @@ class C3DataLoader:
                 pmap(
                     self.transform.transform,
                     probs,
-                    chunksize=500,
+                    chunksize=self.chunk_size // 2,
                     max_workers=self.workers,
                 )
             )
@@ -1993,11 +2009,12 @@ class C3DataLoader:
             # we need to shuffle after the transform to help serialization
             # this also mixes the problems better
             random.shuffle(probs)
+        post = _C3PostProcess(self.tokenizer, self.batch_args)
         for i in range(0, len(probs), self.chunk_size):
             # we can only afford to tokenize the problems on-the-fly
             group = probs[i : i + self.chunk_size]
             for tkprob in pmap(
-                self.tokenizer.tokenize_problem,
+                post.tokenize,
                 group,
                 tqdm_args={"disable": True},
                 max_workers=self.workers,
@@ -2037,26 +2054,6 @@ class C3DataLoader:
             }
         self.epochs += 1
 
-    def _post_process(self, e: TkC3Problem) -> TkC3Problem:
-        max_output_tks = self.tokenizer.max_output_tks
-        shuffle_extra_ids = self.batch_args.shuffle_extra_ids
-        output_tks = e.output_tks
-        output_tks = wrap_bos(output_tks)
-
-        if len(output_tks) > max_output_tks:
-            output_tks = output_tks[:max_output_tks]
-
-        main_input = e.main_input.tolist()
-
-        if shuffle_extra_ids and random.random() < 0.5:
-            id_map = random_extra_id_map()
-            main_input = [id_map.get(tk, tk) for tk in main_input]
-            output_tks = [id_map.get(tk, tk) for tk in output_tks]
-
-        return dataclasses.replace(
-            e, main_input=TkArray.new(main_input), output=TkArray.new(output_tks)
-        )
-
     def _cost_limit(self) -> float:
         min_queries = self.batch_args.min_queries
         tkn = self.tokenizer
@@ -2082,6 +2079,19 @@ class C3DataLoader:
         }
 
     def _problems_to_batches(self, problems: Iterable[TkC3Problem]) -> Iterable[dict]:
+        if self.batch_args.max_queries == self.batch_args.min_queries:
+            bsize = self.batch_args.max_queries
+            # group problems into fixed-size batches
+            current_batch = list[TkC3Problem]()
+            for tk_prob in problems:
+                current_batch.append(tk_prob)
+                if len(current_batch) == bsize:
+                    yield self.pack_batch(current_batch)
+                    current_batch = list[TkC3Problem]()
+            if current_batch:
+                yield self.pack_batch(current_batch)
+            return
+
         tkn = self.tokenizer
         cost_limit = self._cost_limit()
         warned_batch_size = False
@@ -2092,7 +2102,6 @@ class C3DataLoader:
             all_refs = [x[1] for x in tk_prob.named_references]
             ref_size_sum = sum(len(ref) for ref in all_refs)
             assert ref_size_sum <= tkn.max_ref_tks_sum, f"{ref_size_sum=}"
-            tk_prob = self._post_process(tk_prob)
             cost = retrieval_cost_model(
                 ref_size=ref_size_sum,
                 query_size=len(tk_prob.input_tks),
