@@ -196,6 +196,7 @@ class LineUsageAnalysis:
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     ### Change log
+    - v2.9 (fix): Remove builtin usages by default.
     - v2.9: Add sibling usages for class members. Improve statement signatures.
     - v2.8: Fix module usages in `pre_edit_analysis`. Sort changes using heuristic.
     - v2.7: Use new PyDefiniton that includes signatures.
@@ -1046,6 +1047,7 @@ class C3ProblemTokenizer:
 @dataclass
 class JediUsageAnalyzer:
     include_parent_usages: bool = True
+    include_builtins: bool = False
 
     _KnownJediErrors = {
         "not enough values to unpack (expected 2",
@@ -1075,17 +1077,19 @@ class JediUsageAnalyzer:
             fname = cname.full_name
             if fname is None:
                 return
+            if not self.include_builtins and fname.startswith("builtins."):
+                return
             fname = PyFullName(fname)
             usages.add(fname)
             name2def_node.setdefault(fname, list()).append(cname)
-            # FIXME: wait until the jedi bug is fixed
-            # if self.include_parent_usages and (parent := cname.parent()):
-            # if cname.type == "statement" and parent.type == "class":
-            # register_usage(parent, usages)
 
         def register_class_usage(cname: classes.Name, usages: set[PyFullName]):
             assert_eq(cname.type, "class")
             if not cname.full_name or cname.full_name in registered_classes:
+                return
+            if not self.include_parent_usages and cname.full_name.startswith(
+                "builtins."
+            ):
                 return
             for n in cname.defined_names():
                 if n.type == "statement":
