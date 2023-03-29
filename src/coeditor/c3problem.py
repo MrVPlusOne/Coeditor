@@ -773,19 +773,22 @@ class C3TokenizerArgs(TypedDict):
 class C3ProblemTokenizer:
     """
     ## Change log
+    - 2.7: support `disable_builtin_defs`, `disable_unchanged_refs` and `current_code_only`.
     - 2.6: increase max_ref_tks_sum from 512 * 12 to 512 * 16.
-    - 2.5: Sort used references by path.
-    - 2.4: Encode each changed reference individually. Encode signatures for unchanged.
+    - 2.5: sort used references by path.
+    - 2.4: encode each changed reference individually. Encode signatures for unchanged.
     """
 
-    VERSION = "2.6"
+    VERSION = "2.7"
     max_ref_tks: int = 512
     max_query_tks: int = 512
     max_output_tks: int = 256
     max_scope_tks: int = 128
     max_ref_tks_sum: int = 512 * 16
     ref_chunk_overlap: int = 32
+    disable_builtin_defs: bool = True
     disable_unchanged_refs: bool = False
+    current_code_only: bool = False
 
     def get_args(self):
         return C3TokenizerArgs(
@@ -808,12 +811,14 @@ class C3ProblemTokenizer:
         self,
         problem: C3Problem,
     ) -> TkC3Problem:
+        if self.current_code_only:
+            problem = _problem_to_current(problem)
         span = problem.span
-
         original: TokenSeq = span.original.tolist()
         tk_delta: TkDelta = span.delta
         origin_lines = tk_splitlines(original)
-        edit_start = problem.edit_line_ids[0]
+        edit_lines = list(sorted(problem.edit_line_ids))
+        edit_start = edit_lines[0]
         scope_tks = self._encode_headers(span.headers, 0)
         input_limit = self.max_query_tks - len(scope_tks)
 
@@ -821,7 +826,7 @@ class C3ProblemTokenizer:
         chunk_output = TokenSeq()
         last_line = edit_start
 
-        for i, l in enumerate(problem.edit_line_ids):
+        for i, l in enumerate(edit_lines):
             for line in origin_lines[last_line + 1 : l]:
                 chunk_input.extend(line)
                 chunk_input.append(Newline_id)
@@ -848,7 +853,11 @@ class C3ProblemTokenizer:
 
         # try move some prev_change_tks into the input
         above_tks = join_list(origin_lines[:edit_start] + [TokenSeq()], Newline_id)
-        above_tks = tk_delta.for_input_range((0, edit_start)).apply_to_change(above_tks)
+        above_delta = tk_delta.for_input_range((0, edit_start))
+        if self.current_code_only:
+            above_tks = above_delta.apply_to_input(above_tks)
+        else:
+            above_tks = above_delta.apply_to_change(above_tks)
         below_tks = join_list(origin_lines[edit_stop:] + [TokenSeq()], Newline_id)
         chunk_input, above_tks, below_tks = self._inline_some_context(
             chunk_input, above_tks, below_tks, input_limit
@@ -891,12 +900,15 @@ class C3ProblemTokenizer:
 
         truncated = False
         if ref_size_sum < self.max_ref_tks_sum:
-            if not self.disable_unchanged_refs:
-                unchanged = self._group_encode_unchanged_refs(
-                    problem.relevant_unchanged
-                )
-                for i, chunk in enumerate(unchanged):
-                    all_refs.append((f"unchanged ref {i}", chunk))
+            unchanged = problem.relevant_unchanged
+            if self.disable_unchanged_refs:
+                unchanged = {}
+            if self.disable_builtin_defs:
+                unchanged = {
+                    k: v for k, v in unchanged.items() if not k.startswith("builtins.")
+                }
+            for i, chunk in enumerate(self._group_encode_unchanged_refs(unchanged)):
+                all_refs.append((f"unchanged ref {i}", chunk))
         else:
             truncated = True
 
@@ -1042,6 +1054,83 @@ class C3ProblemTokenizer:
 
     def __repr__(self):
         return repr_modified_args(self)
+
+
+# Utils to convert code changes into the current version of the code
+
+
+def _change_to_current(change_tks: TokenSeq) -> TokenSeq:
+    new_lines = list[TokenSeq]()
+    for line in tk_splitlines(change_tks):
+        if line and line[0] == Add_id:
+            new_lines.append(line[1:])
+        elif line and line[0] == Del_id:
+            pass
+        else:
+            new_lines.append(line)
+    return join_list(new_lines, Newline_id)
+
+
+def _header_to_current(header: ChangedHeader) -> ChangedHeader:
+    tks = header.change_tks.tolist()
+    change_tks = TkArray.new(_change_to_current(tks))
+    return replace(header, change_tks=change_tks)
+
+
+def _span_to_current(span: ChangedCodeSpan) -> ChangedCodeSpan:
+    original = span.original.tolist()
+    original = span.delta.apply_to_input(original)
+    original = TkArray.new(original)
+    delta = TkDelta.empty()
+    headers = [_header_to_current(h) for h in span.headers]
+    return replace(span, original=original, delta=delta, headers=headers)
+
+
+def _problem_to_current(prob: C3Problem):
+    span = prob.span
+    original = span.original.tolist()
+    delta = span.delta
+    edit_line_ids = set(prob.edit_line_ids)
+
+    shift = 0
+    new_lines = list[TokenSeq]()
+    new_delta = dict[int, tuple]()
+    new_edit_line_ids = set[int]()
+    assert edit_line_ids
+    i = -1
+    for i, line in enumerate(tk_splitlines(original)):
+        if line and line[0] == Add_id:
+            new_lines.append(line[1:])
+        elif line and line[0] == Del_id:
+            shift -= 1
+        else:
+            new_lines.append(line)
+        if actions := delta.get_line_change(i):
+            assert (i + shift) not in new_delta
+            new_delta[i + shift] = actions
+        if i in edit_line_ids:
+            new_edit_line_ids.add(i + shift)
+    if (i + 1) in edit_line_ids:
+        new_edit_line_ids.add(i + shift + 1)
+
+    if not new_edit_line_ids:
+        raise ValueError(f"No edit lines left. {prob.edit_line_ids=}")
+
+    new_edit_line_ids = list(sorted(new_edit_line_ids))
+    new_original = TkArray.new(join_list(new_lines, Newline_id))
+    new_delta = TkDelta(new_delta)
+    new_headers = [_header_to_current(h) for h in span.headers]
+    new_span = replace(
+        span, original=new_original, delta=new_delta, headers=new_headers
+    )
+    relevant_changes = [_span_to_current(c) for c in prob.relevant_changes]
+
+    return replace(
+        prob,
+        span=new_span,
+        edit_line_ids=new_edit_line_ids,
+        relevant_changes=relevant_changes,
+    )
 
 
 @dataclass

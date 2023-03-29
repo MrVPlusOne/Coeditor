@@ -227,7 +227,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         train_args: "TrainingArgs",
     ) -> None:
         train_dir = get_model_dir(trained=False) / training_name
-        eval_loader.tqdm_args = {"disable": True}
+        # eval_loader.tqdm_args = {"disable": True}
 
         model = self
         # model = torch.compile(self.to("cuda"))  # pytorch doesn't support python 3.11 yet.
@@ -266,7 +266,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             overwrite_output_dir=True,
             evaluation_strategy="epoch",
             save_strategy="steps",
-            save_steps=max(500, min(5000, epoch_steps // 5)),
+            save_steps=max(500, min(10000, epoch_steps // 5)),
             logging_steps=max(1, min(1000, epoch_steps // 10)),
             num_train_epochs=train_args.max_train_epochs,
             save_total_limit=3,

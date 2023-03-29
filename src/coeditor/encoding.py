@@ -1010,8 +1010,7 @@ class TokenizedEdit(ABC):
                     origin_line = section_lines[0]
                 else:
                     origin_line = cls.BAD_DELETE
-                origin_line.append(Newline_id)
-                seg = seg + origin_line
+                seg = seg + origin_line + [Newline_id]
             label = cls.show_label(id_map.get(k, -1))
             lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
         return "".join(lines)

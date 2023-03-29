@@ -105,7 +105,7 @@ def train_model(
 
     train_tkn = encoder.edit_tokenizer
     eval_tkn = copy.deepcopy(train_tkn)
-    eval_tkn.max_query_tks *= 2
+    eval_tkn.max_query_tks = 1024
     eval_tkn.max_output_tks *= 2
     eval_tkn.max_ref_tks_sum *= 2
 

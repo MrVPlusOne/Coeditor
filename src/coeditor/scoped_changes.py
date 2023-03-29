@@ -570,7 +570,7 @@ def _edits_from_commit_history(
 
     future_commits = list(reversed(history[:-1]))
     for step, commit_next in tqdm(
-        enumerate(future_commits),
+        list(enumerate(future_commits)),
         smoothing=0,
         desc="processing commits",
         disable=silent,
