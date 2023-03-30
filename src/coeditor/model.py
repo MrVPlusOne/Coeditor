@@ -169,6 +169,7 @@ class AttentionMode(enum.Enum):
     basic = enum.auto()
     query2ref = enum.auto()
     bidirectional = enum.auto()
+    dense = enum.auto()
 
 
 class RetrievalEditorModel(T5PreTrainedModel):
@@ -1237,6 +1238,22 @@ class RetrivalEncoder:
             last_hidden_state, hidden_state_mask = stack_pad_tensors(hidden_rows)
             return RetrivalEncoderOutputs(
                 last_hidden_state=last_hidden_state, hidden_state_mask=hidden_state_mask
+            )
+        elif self.attention_mode.value == AttentionMode.dense.value:
+            # use dense implementation
+            rows = list[Tensor]()
+            for i, l in enumerate(q_lens):
+                query = input_ids[i, :l]
+                ref_list = query_ref_list[i]
+                ref_tensors = [to_long_tensor(references[rid]) for rid in ref_list]
+                rows.append(torch.cat(ref_tensors + [query]))
+            tks_tensor, tks_mask = stack_pad_tensors(rows)
+            enc_out = self.encoder.forward(
+                tks_tensor, attention_mask=tks_mask, return_dict=True
+            )
+            return RetrivalEncoderOutputs(
+                last_hidden_state=enc_out.last_hidden_state,
+                hidden_state_mask=tks_mask,
             )
 
         def split_outputs(
