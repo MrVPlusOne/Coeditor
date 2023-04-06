@@ -514,7 +514,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         decoder_attention_mask: Tensor | None = None,
         past_key_values=None,
         use_cache=None,
-        loss_reduction: LossReduction = "mean",
+        loss_reduction: LossReduction = "sum",
         # not used args below
         output_attentions=None,
         output_hidden_states=None,
@@ -636,6 +636,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
         if labels is not None:
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction=loss_reduction)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
+            if loss_reduction == "sum":
+                loss = loss / (25 * labels.size(0))
 
         return Seq2SeqLMOutput(
             loss=loss,

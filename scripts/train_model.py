@@ -7,7 +7,11 @@ import warnings
 import wandb
 
 from coeditor._utils import cprint, run_long_task
-from coeditor.c3problem import C3ProblemChangeInlining, C3ToCodeCompletion
+from coeditor.c3problem import (
+    C3ProblemChangeInlining,
+    C3ProblemTokenizer,
+    C3ToCodeCompletion,
+)
 from coeditor.common import *
 from coeditor.dataset import (
     C3CombinedEncoder,
@@ -33,7 +37,9 @@ def train_model(
     eval_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
     recreate_data: bool = False,
+    multi_stage: bool = False,
     resumed_from: Path | None = None,
+    model_size: Literal["small", "base", "large"] = "base",
     eval_only: bool = False,
     quicktest: bool = False,
 ):
@@ -66,15 +72,12 @@ def train_model(
     datasets["valid"] = random_subset(eval_probs["valid"], 10000, rng=42)
     datasets["test"] = random_subset(eval_probs["test"], 10000, rng=42)
 
-    config_dict = {
-        k: get_modified_args(v)
-        for k, v in {
-            "description": description,
-            "edit_tokenizer": encoder.edit_tokenizer.get_args(),
-            "batch_args": batch_args,
-            "train_args": train_args,
-            "dec_args": dec_args,
-        }.items()
+    config_dict: dict[str, Any] = {
+        "description": description,
+        "edit_tokenizer": encoder.edit_tokenizer.get_args(),
+        "batch_args": batch_args,
+        "train_args": train_args,
+        "dec_args": dec_args,
     }
 
     project = "Coeditor" if not quicktest else "Coeditor-quicktest"
@@ -92,7 +95,7 @@ def train_model(
         )
 
     if resumed_from is None:
-        model = RetrievalEditorModel.from_code_t5("base", reuse_embed=True)
+        model = RetrievalEditorModel.from_code_t5(model_size, reuse_embed=True)
     else:
         model = RetrievalEditorModel.load(resumed_from)
 
@@ -113,7 +116,7 @@ def train_model(
         datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
     )
 
-    if not eval_only:
+    if not eval_only and multi_stage:
         # gradually increase the ctx size during training
         scales = [4, 2, 1]
         for scale in scales:
@@ -139,6 +142,25 @@ def train_model(
 
             with timed_action(desc):
                 model.train_on_data(model_name, s_loader, valid_loader, train_args)
+    elif not eval_only:
+        desc = f"training (ctx={train_tkn.max_ref_tks_sum})"
+        s_probs = [
+            x
+            for x in datasets["train"]
+            if sum(c.change_size() for c in x.relevant_changes)
+            < C3ProblemTokenizer.max_ref_tks_sum
+        ]
+        s_loader = C3DataLoader(
+            s_probs,
+            encoder.problem_tranform,
+            train_tkn,
+            batch_args,
+            shuffle=True,
+            desc=desc,
+        )
+
+        with timed_action(desc):
+            model.train_on_data(model_name, s_loader, valid_loader, train_args)
 
     model.to("cuda")
     test_loader = C3DataLoader(
@@ -203,16 +225,17 @@ def eval_code_completion():
 
 def train_new_model():
     train_model(
-        model_name="coeditor-perm2k-c3-multi-v1.7.2",
+        model_name="coeditor-perm2k-sum_loss-v1.8",
         dataset_name="perm2k",
-        description="Use fixed batch size.",
+        description="Training with sum (instead of mean) loss reduction.",
         train_args=TrainingArgs(
             max_train_epochs=1,
         ),
         encoder=C3CombinedEncoder(
             problem_tranform=C3ProblemChangeInlining(),
-            # edit_tokenizer=C3ProblemTokenizer(disable_unchanged_refs=True),
+            # edit_tokenizer=C3ProblemTokenizer(max_ref_tks_sum=512 * 6),
         ),
+        multi_stage=True,
         recreate_data=False,
         quicktest=False,
     )

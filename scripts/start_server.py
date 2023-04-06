@@ -30,8 +30,8 @@ class LazyVal(Generic[T1]):
 
 
 def start_server(device, port: int, print_stats: bool = True):
-    model_path = "MrVPlusOne/coeditor-xl-c3-dropout-v1.5"
-    # model_path = get_model_dir() / "coeditor-xl-c3-dropout-v1.5"
+    # model_path = "MrVPlusOne/coeditor-perm2k-base-v1.7.3"
+    model_path = "MrVPlusOne/coeditor-perm2k-base-v1.7.3"
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)

@@ -688,7 +688,7 @@ class _ModifiedDiffer(difflib.Differ):
         else:
             first = self._dump("-", a, alo, ahi)
             second = self._dump("+", b, blo, bhi)
-        # TODO: this changed
+
         for g in second, first:
             yield from g
 
