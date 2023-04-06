@@ -343,11 +343,18 @@ class JModuleChange:
         )
 
     @staticmethod
-    def from_modules(module_change: Change[JModule], only_ast_changes: bool = True):
+    def from_modules(
+        module_change: Change[JModule],
+        only_ast_changes: bool = True,
+        return_unchanged: bool = False,
+    ):
         "Compute the change spans from two versions of the same module."
         with _tlogger.timed("JModuleChange.from_modules"):
             changed = get_changed_spans(
-                module_change.map(lambda m: m.as_scope), tuple(), only_ast_changes
+                module_change.map(lambda m: m.as_scope),
+                tuple(),
+                only_ast_changes=only_ast_changes,
+                return_unchanged=return_unchanged,
             )
             return JModuleChange(module_change, changed)
 
@@ -423,6 +430,9 @@ class ProjectChangeProcessor(Generic[TProb], ABC):
 
     def set_training(self, is_training: bool) -> None:
         return None
+
+    def use_unchanged(self) -> bool:
+        return False
 
 
 class NoProcessing(ProjectChangeProcessor[JProjectChange]):
@@ -646,7 +656,8 @@ def _edits_from_commit_history(
                     mod_old = new_path2module.pop(rel_path)
                     new_path2module[rel_path] = mod_new = parse_module(path)
                     changed[mod_new.mname] = JModuleChange.from_modules(
-                        Modified(mod_old, mod_new)
+                        Modified(mod_old, mod_new),
+                        return_unchanged=change_processor.use_unchanged(),
                     )
             if has_timeouted(step):
                 return results
@@ -687,6 +698,7 @@ def get_changed_spans(
     scope_change: Change[ChangeScope],
     parent_changes: tuple[Change[ChangeScope], ...] = (),
     only_ast_changes: bool = True,
+    return_unchanged: bool = False,
 ) -> list[ChangedSpan]:
     """
     Extract the change spans from scope change.
@@ -699,6 +711,8 @@ def get_changed_spans(
     ## Args:
     - `only_ast_changes`: if True, will skip the changes that are just caused by
     comments or formatting changes.
+    - `return_unchanged`: if True, unchanged code spans will also be returned as
+    ChangedSpan.
     """
 
     def get_modified_spans(
@@ -706,21 +720,32 @@ def get_changed_spans(
         new_scope: ChangeScope,
         parent_changes: Sequence[Change[ChangeScope]],
     ) -> Iterable[ChangedSpan]:
-        if only_ast_changes and code_equal(old_scope.spans_code, new_scope.spans_code):
+        if (
+            not return_unchanged
+            and only_ast_changes
+            and code_equal(old_scope.spans_code, new_scope.spans_code)
+        ):
             return
         diffs = change_to_line_diffs(
             Modified(old_scope.spans_code, new_scope.spans_code)
         )
-        original, delta = line_diffs_to_original_delta(diffs)
+        _, delta = line_diffs_to_original_delta(diffs)
         line = 0
         for span in old_scope.spans:
             code = span.code
             line_range = (line, line + count_lines(code))
-            if subdelta := delta.for_input_range(line_range).shifted(-line):
+            subdelta = delta.for_input_range(line_range).shifted(-line)
+            if subdelta:
                 new_code = subdelta.apply_to_input(code)
                 change = Modified(code, new_code)
                 yield ChangedSpan(
                     change,
+                    parent_changes,
+                    span.line_range,
+                )
+            elif return_unchanged:
+                yield ChangedSpan(
+                    Modified.from_unchanged(code),
                     parent_changes,
                     span.line_range,
                 )

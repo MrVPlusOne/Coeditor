@@ -22,6 +22,10 @@ class _ChangeBase(Generic[E1]):
     def later(self) -> E1:
         ...
 
+    @property
+    def changed(self) -> bool:
+        return True
+
 
 @dataclass(frozen=True)
 class Added(_ChangeBase[E1]):
@@ -100,6 +104,10 @@ class Modified(_ChangeBase[E1]):
     @property
     def later(self) -> E1:
         return self.after
+
+    @property
+    def changed(self) -> bool:
+        return not self.unchanged
 
     @staticmethod
     def as_char():

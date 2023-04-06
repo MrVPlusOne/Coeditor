@@ -18,6 +18,7 @@ from .common import *
 from .encoding import (
     Add_id,
     Del_id,
+    N_Extra_Ids,
     Newline_id,
     TkDelta,
     TokenizedEdit,
@@ -195,6 +196,8 @@ class LineUsageAnalysis:
 
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
+    Generate `C3Problem`s from git histories.
+
     ### Change log
     - v2.9 (fix): Remove builtin usages by default.
     - v2.9: Add sibling usages for class members. Improve statement signatures.
@@ -303,6 +306,10 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         """
         before_mod_map = {m.mname: m for m in pchange.all_modules.before}
         cache = C3GeneratorCache(before_mod_map)
+        src_info: SrcInfo = {
+            "project": pchange.project_name,
+            "commit": pchange.commit_info,
+        }
 
         processed_cspans = list[ChangedCodeSpan]()
         problems = list[C3Problem]()
@@ -329,10 +336,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                     relevant_changes = cache.sort_changes(
                         code_span, relevant_unchanged, relevant_changes
                     )
-                    src_info: SrcInfo = {
-                        "project": pchange.project_name,
-                        "commit": pchange.commit_info,
-                    }
+
                     n_lines = span.line_range[1] - span.line_range[0]
                     prob = C3Problem(
                         code_span,
@@ -659,27 +663,28 @@ class C3ToCodeCompletion(C3ProblemTransform):
     """
 
     VERSION = "1.0"
-    min_target_size = 6
+    min_target_size: int = 6
 
-    def __post_init__(self):
-        self._rng = random.Random()
+    def extract_completion(
+        self, original: TokenSeq, delta: TkDelta
+    ) -> tuple[TokenSeq, TkDelta] | None:
+        """
+        Try to extract a code completion instance from the given change, return None if
+        not suitable. This works by taking the last addition from the changes as the
+        code completion target and applying all the changes before it to the original
+        code to get the context. Note that if this addition is part of a replacement,
+        the deletion is applied to the context as well.
+        """
 
-    def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
-        original = prob.span.original
-        delta = prob.span.delta
-
-        def group_filter(group: tuple) -> bool:
-            segs = [delta[k] for k in group]
-            return (
-                segs[0][0] == Add_id
-                and sum(len(s) for s in segs) >= self.min_target_size
-            )
-
-        add_groups = [ks for ks in delta.change_groups() if group_filter(ks)]
-        if not add_groups:
-            return []
-        # sample the completion target
-        target = self._rng.choice(add_groups)
+        target = delta.change_groups()[-1]
+        segs = [delta[k] for k in target]
+        good = (
+            len(segs) <= 2
+            and segs[0][0] == Add_id
+            and len(segs[0]) >= self.min_target_size
+        )
+        if not good:
+            return None
 
         prev_changes = [k for k in delta.keys() if k < target[0]]
         if delta[target[-1]][0] == Del_id:
@@ -687,16 +692,25 @@ class C3ToCodeCompletion(C3ProblemTransform):
             prev_changes.append(target[-1])
             target = target[:-1]
             assert target
+
         prev_delta, rest_delta = delta.decompose_for_change(prev_changes)
-        new_original = prev_delta.apply_to_change(original.tolist())
+        new_original = prev_delta.apply_to_change(original)
         new_delta_keys = tuple(rest_delta.keys())[: len(target)]
         new_delta = rest_delta.for_keys(new_delta_keys)
         assert new_delta, "the remaining delta should not be empty"
-        new_span = replace(
-            prob.span, original=TkArray.new(new_original), delta=new_delta
-        )
+        return new_original, new_delta
+
+    def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
+        original = prob.span.original.tolist()
+        delta = prob.span.delta
+
+        sampled = self.extract_completion(original, delta)
+        if sampled is None:
+            return []
+        original, delta = sampled
+        new_span = replace(prob.span, original=TkArray.new(original), delta=delta)
         new_trans = prob.transformations + ("code_completion",)
-        new_lines = tuple(set(k[0] for k in new_delta.keys()))
+        new_lines = tuple(set(k[0] for k in delta.keys()))
         new_prob = replace(
             prob,
             span=new_span,
@@ -826,7 +840,7 @@ class C3ProblemTokenizer:
         chunk_output = TokenSeq()
         last_line = edit_start
 
-        for i, l in enumerate(edit_lines):
+        for i, l in enumerate(edit_lines[:N_Extra_Ids]):
             for line in origin_lines[last_line + 1 : l]:
                 chunk_input.extend(line)
                 chunk_input.append(Newline_id)

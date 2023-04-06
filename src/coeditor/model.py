@@ -974,6 +974,7 @@ class MultiRoundEvaluator:
     strategy: Literal["most_uncertain", "least_effort"] = "most_uncertain"
     max_rounds: int = 8
 
+    @torch.no_grad()
     def multi_round_edit_gain(
         self,
         problem: C3Problem,
@@ -1082,6 +1083,7 @@ class MultiRoundEvaluator:
             for cm in cost_models
         }
 
+    @torch.no_grad()
     @torch.autocast("cuda")
     def _get_most_uncertain_edit(
         self,
