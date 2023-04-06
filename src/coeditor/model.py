@@ -460,7 +460,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 original = prob.span.original.tolist()
                 pred = tokens_to_change(delta.apply_to_change(original))
                 pred_changes.append(pred)
-        assert_eq(len(pred_changes), len(out_tks), len(pred_scores))
+        assert_all_eq(len(pred_changes), len(out_tks), len(pred_scores))
 
         solutions = list[list[PredictedChange]]()
         for i in range(0, len(pred_changes), N):
@@ -1409,7 +1409,7 @@ class RetrivalEncoder:
             assert row_tensor.ndim == 2  # (sum(ref_lens) + query_len, model_dim)
             qref_rows.append(row_tensor)
         qref_states, qref_masks = stack_pad_tensors(qref_rows)
-        assert_eq(qref_states.ndim == 3)
+        assert_eq(qref_states.ndim, 3)
         assert_eq(qref_states.size(0), n_queries)
 
         return qref_states, qref_masks

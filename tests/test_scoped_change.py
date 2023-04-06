@@ -142,7 +142,7 @@ class TestChangedSpan:
             assert_eq(type(span.change), change_type)
             nl_change = span.change.map(count_lines)
             line_change = nl_change.later - nl_change.earlier
-            assert_eq(line_change, n, extra_message=lambda: f"{i=}, {span.change=}")
+            assert_eq(line_change, n, lambda: f"{i=}, {span.change=}")
 
     def test_same_size_update(self):
         code2 = dedent(

@@ -140,9 +140,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
         assert_eq(delta.num_changes(), 1)
         lines = tk_splitlines(origin)
         key, action = list(delta.items())[0]
-        assert_eq(
-            action[0], Add_id, extra_message=lambda: "delta must be a single addition"
-        )
+        assert_eq(action[0], Add_id, lambda: "delta must be a single addition")
         target_line = key[0]
         left = join_list(
             (

@@ -160,7 +160,7 @@ def pmap(
     Parallel map with progress displaying.
     """
     n = len(f_args[0])
-    assert_eq(n, *(len(xs) for xs in f_args))
+    assert_all_eq(n, *(len(xs) for xs in f_args))
 
     tqdm_args = dict(tqdm_args) if tqdm_args else {}
     tqdm_args.setdefault("smoothing", 0.0)
@@ -549,7 +549,17 @@ class PickleCache:
             warnings.warn(f"No cache found at: {self.cache_dir}, skip clearing.")
 
 
-def assert_eq(x: T1, *xs: T1, extra_message: Callable[[], str] = lambda: "") -> None:
+def assert_eq(x: T1, y: T1, message: Callable[[], str] = lambda: "") -> None:
+    if x != y:
+        raise AssertionError(
+            f"{x} (of type {type(x).__name__}) != {y} (of type {type(y).__name__}).\n"
+            + message()
+        )
+
+
+def assert_all_eq(
+    x: T1, *xs: T1, extra_message: Callable[[], str] = lambda: ""
+) -> None:
     for i in range(len(xs)):
         x = xs[i - 1] if i > 0 else x
         y = xs[i]

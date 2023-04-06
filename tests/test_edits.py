@@ -70,7 +70,7 @@ def test_get_lines():
         assert_eq(
             tk_get_lines(input, a, b),
             expect,
-            extra_message=lambda: f"input={decode_tokens(input)}, {a=}, {b=}",
+            lambda: f"input={decode_tokens(input)}, {a=}, {b=}",
         )
 
     test_case([], 0, 0)
