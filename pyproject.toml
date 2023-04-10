@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "coeditor"
+version = "0.3.0"
+description = "Coeditor: AI assisted code editing"
+authors = ["Jiayi Wei <wjydzh1@gmail.com>"]
+license = "bsd-3-clause"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "3.11.*"
+tqdm = "4.65.*"
+dateparser = "1.1.*"
+pyrsistent = "0.19.*"
+pandas = "1.4.*"
+torch = "2.0.*"
+datasets = "2.8.*"
+transformers = "4.27.*"
+wandb = "0.13.*"
+colored = "1.4.*"
+termcolor = "1.0.*"
+prettytable = "3.4.*"
+nltk = "3.8.*"
+jsonrpcserver = "5.0.*"
+jedi = "~0.18.2"
+parso = "0.8.*"
+cachetools = "5.3.*"
+editdistance = "~0.6.2"
+tokenizers = "^0.12"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.2.2"
+black = "^23.3.0"
+snakeviz = "^2.1.1"
+line-profiler = "^4.0.3"
+matplotlib = "^3.7.1"
+ipykernel = "^6.22.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

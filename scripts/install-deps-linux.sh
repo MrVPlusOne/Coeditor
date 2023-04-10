@@ -1,6 +1,5 @@
 #! /bin/bash
-conda create -n coeditor python=3.11
-python_loc=$(conda info --envs | grep "coeditor" | awk '{print $2}')
-"$python_loc/bin/pip" install pipenv --user
-pipenv --python="$python_loc/bin/python"
-pipenv sync
+# install poetry
+curl -sSL https://install.python-poetry.org | python3 -
+poetry completions bash >> ~/.bash_completion
+poetry install
