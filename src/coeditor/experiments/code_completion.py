@@ -1,3 +1,5 @@
+import torch
+
 from coeditor.c3problem import C3Problem, C3ToCodeCompletion, SrcInfo
 from coeditor.change import Change, Modified
 from coeditor.common import *
@@ -9,13 +11,19 @@ from coeditor.encoding import (
     Newline_id,
     TkDelta,
     TruncateAt,
+    _Tokenizer,
     change_tks_to_original_delta,
     change_to_tokens,
+    decode_tokens,
     encode_lines_join,
+    encode_single_line,
     get_extra_id,
+    inline_output_tokens,
+    output_ids_as_seqs,
     tk_splitlines,
     truncate_sections,
 )
+from coeditor.model import CodeT5Model
 from coeditor.scoped_changes import (
     ChangedSpan,
     ChangeScope,
@@ -50,6 +58,10 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
     VERSION = "1.0"
     max_ctx_tks = 2048
     min_target_size: int = C3ToCodeCompletion.min_target_size
+    # change spans with more than this many lines will be ignored
+    max_span_lines: int = 500
+    # change spans with more than this many characters will be ignored
+    max_span_chars: int = 6000
 
     def __post_init__(self):
         self._sampler = C3ToCodeCompletion(self.min_target_size)
@@ -73,11 +85,12 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
             all_spans.sort(key=lambda s: s.line_range)
             old_spans, new_spans = self._get_old_new_spans(all_spans)
             for i, span in enumerate(all_spans):
-                if (
-                    not isinstance(span.change, Modified)
-                    or not span.change.changed
-                    or code_equal(span.change.earlier, span.change.later)
-                ):
+                if not self.should_mk_problem(
+                    span,
+                    func_only=not self.is_training,
+                    max_chars=self.max_span_chars,
+                    max_lines=self.max_span_lines,
+                ) or code_equal(span.change.earlier, span.change.later):
                     # only keep non-trivial modifications
                     continue
                 origin, delta = change_tks_to_original_delta(
@@ -164,3 +177,49 @@ def _change_line_to_result(line: TokenSeq) -> TokenSeq | None:
         return None
     else:
         return line
+
+
+@dataclass
+class InfillResult:
+    text: str  # the completed document (with infills inserted)
+    infills: Sequence[str]  # the list of infills generated
+
+
+@dataclass
+class CodeT5Wrapper:
+    model: CodeT5Model
+
+    def infill(self, parts: Sequence[str], max_to_generate: int = 128) -> InfillResult:
+        input = self.input_from_parts(parts)
+        out_seq = self.infill_tks(input, max_to_generate)
+        print(f"{decode_tokens(out_seq)=}")
+        infill_seqs = list(output_ids_as_seqs(out_seq).values())
+        infills = [decode_tokens(s) for s in infill_seqs[: len(parts) - 1]]
+        print(f"{infills=}")
+
+        inlined = inline_output_tokens(input, out_seq, leave_unpredicted=True)
+        text = decode_tokens(inlined)
+        return InfillResult(text, infills)
+
+    def input_from_parts(self, parts: Sequence[str]) -> TokenSeq:
+        segs = list[str]()
+        for i, s in enumerate(parts):
+            segs.append(s)
+            if i < len(parts) - 1:
+                segs.append(f"<extra_id_{i}>")
+        return _Tokenizer.encode("".join(segs))
+
+    def infill_tks(self, input: TokenSeq, max_to_generate: int) -> TokenSeq:
+        print(f"{decode_tokens(input)=}")
+        device = self.model.device
+        input_ids = torch.LongTensor([input]).to(device)
+        with torch.autocast("cuda"):
+            output = self.model.generate(input_ids, max_length=max_to_generate)
+        assert isinstance(output, torch.Tensor)
+        return output[0].tolist()
+
+    @staticmethod
+    def from_pretrained(model_name: str = "Salesforce/codet5-base"):
+        model = CodeT5Model.from_pretrained(model_name)
+        assert isinstance(model, CodeT5Model)
+        return CodeT5Wrapper(model)

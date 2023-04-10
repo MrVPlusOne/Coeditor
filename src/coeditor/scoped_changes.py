@@ -429,10 +429,27 @@ class ProjectChangeProcessor(Generic[TProb], ABC):
         return None
 
     def set_training(self, is_training: bool) -> None:
-        return None
+        self._is_training = is_training
+
+    @property
+    def is_training(self) -> bool:
+        return getattr(self, "_is_training", False)
 
     def use_unchanged(self) -> bool:
         return False
+
+    @staticmethod
+    def should_mk_problem(
+        span: ChangedSpan, func_only: bool, max_chars: int, max_lines: int
+    ):
+        return (
+            (span.change.as_char() == Modified.as_char())
+            and (not func_only or span._is_func_body())
+            and (len(span.change.earlier) <= max_chars)
+            and (len(span.change.later) <= max_chars)
+            and (count_lines(span.change.earlier) <= max_lines)
+            and (count_lines(span.change.later) <= max_lines)
+        )
 
 
 class NoProcessing(ProjectChangeProcessor[JProjectChange]):

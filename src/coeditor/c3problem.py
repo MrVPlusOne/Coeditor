@@ -221,8 +221,6 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             analyzer = JediUsageAnalyzer()
 
         self.analyzer = analyzer
-        # whether to only generate problems for editing functions
-        self._is_training: bool = False
 
     def __repr__(self) -> str:
         return repr_modified_args(self)
@@ -232,9 +230,6 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
 
     def clear_stats(self) -> None:
         return self.analyzer.error_counts.clear()
-
-    def set_training(self, is_training: bool) -> None:
-        self._is_training = is_training
 
     def pre_edit_analysis(
         self,
@@ -301,8 +296,9 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
         module_order: Sequence[ModuleName],
     ) -> Sequence[C3Problem]:
         """
-        Return (untransformed) c3 problems for the given project change.
-        Each problem contains a code change and a list of previous changes.
+        Return (untransformed) c3 problems from the given project change.
+        Each problem contains a code change, a list of relevant (previous) changes,
+        and other extra informaton about the code change.
         """
         before_mod_map = {m.mname: m for m in pchange.all_modules.before}
         cache = C3GeneratorCache(before_mod_map)
@@ -321,32 +317,30 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 warnings.warn("Unexpected: usages missing for module: " + str(m))
             for span in mchange.changed:
                 code_span = cache.to_code_span(span)
-                should_mk_problem = (
-                    (span.change.as_char() == Modified.as_char())
-                    and (self._is_training or span._is_func_body())
-                    and (len(span.change.earlier) <= self.max_span_chars)
-                    and (len(span.change.later) <= self.max_span_chars)
-                    and (count_lines(span.change.earlier) <= self.max_span_lines)
-                    and (count_lines(span.change.later) <= self.max_span_lines)
+                if not self.should_mk_problem(
+                    span,
+                    func_only=not self.is_training,
+                    max_chars=self.max_span_chars,
+                    max_lines=self.max_span_lines,
+                ):
+                    continue
+                # latest changes are more relevant
+                relevant_unchanged = cache.get_relevant_unchanged(code_span, usages)
+                relevant_changes = list(reversed(processed_cspans))
+                relevant_changes = cache.sort_changes(
+                    code_span, relevant_unchanged, relevant_changes
                 )
-                if should_mk_problem:
-                    # latest changes are more relevant
-                    relevant_unchanged = cache.get_relevant_unchanged(code_span, usages)
-                    relevant_changes = list(reversed(processed_cspans))
-                    relevant_changes = cache.sort_changes(
-                        code_span, relevant_unchanged, relevant_changes
-                    )
 
-                    n_lines = span.line_range[1] - span.line_range[0]
-                    prob = C3Problem(
-                        code_span,
-                        range(0, n_lines + 1),  # one additional line for appending
-                        relevant_changes=relevant_changes,
-                        relevant_unchanged=relevant_unchanged,
-                        change_type=span.change.map(lambda _: None),
-                        src_info=src_info,
-                    )
-                    problems.append(prob)
+                n_lines = span.line_range[1] - span.line_range[0]
+                prob = C3Problem(
+                    code_span,
+                    range(0, n_lines + 1),  # one additional line for appending
+                    relevant_changes=relevant_changes,
+                    relevant_unchanged=relevant_unchanged,
+                    change_type=span.change.map(lambda _: None),
+                    src_info=src_info,
+                )
+                problems.append(prob)
 
                 processed_cspans.append(code_span)
         return problems
