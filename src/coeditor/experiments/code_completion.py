@@ -1,6 +1,14 @@
 import torch
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from coeditor.c3problem import C3Problem, C3ToCodeCompletion, SrcInfo
+from coeditor.c3problem import (
+    C3Problem,
+    C3ProblemGenerator,
+    C3ToCodeCompletion,
+    JediUsageAnalyzer,
+    SrcInfo,
+    TkC3Problem,
+)
 from coeditor.change import Change, Modified
 from coeditor.common import *
 from coeditor.encoding import (
@@ -23,7 +31,7 @@ from coeditor.encoding import (
     tk_splitlines,
     truncate_sections,
 )
-from coeditor.model import CodeT5Model
+from coeditor.model import C3DataLoader, CodeT5Model, RetrievalEditorModel
 from coeditor.scoped_changes import (
     ChangedSpan,
     ChangeScope,
@@ -31,56 +39,88 @@ from coeditor.scoped_changes import (
     ProjectChangeProcessor,
 )
 
+CodeT5TKN = _Tokenizer
+
 
 @dataclass(frozen=True)
 class FIMProblem:
     "A fill-in-the-middle problem."
-    left_ctx: Sequence[TokenSeq]
-    right_ctx: Sequence[TokenSeq]
-    middle_tks: TokenSeq
+    left_ctx: Sequence[str]
+    right_ctx: Sequence[str]
+    middle: str
     src_info: SrcInfo
     max_ctx_tks: int
 
-    def to_codet5_format(self) -> tuple[TokenSeq, TokenSeq]:
-        left, right = truncate_sections(
-            self.max_ctx_tks - 1,
-            (join_list(self.left_ctx, Newline_id), TruncateAt.Left),
-            (join_list(self.right_ctx, Newline_id), TruncateAt.Right),
-            add_bos=True,
+    def get_contexts(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        tks_limit: int = 2040,
+        max_output: int = 256,
+    ) -> tuple[str, str]:
+        """Get the left and right contexts, truncated to the given token limit.
+        This is mostly for visualization as the FIM model handles context truncation
+        internally (in a more efficient way)."""
+        left_tks: TokenSeq = tokenizer.encode(
+            "\n".join(self.left_ctx) + "\n", add_special_tokens=False
         )
-        input = left + [Newline_id, get_extra_id(0), Newline_id] + right
-        output = [BOS_id, get_extra_id(0)] + self.middle_tks + [EOS_id]
-        return input, output
+        right_tks: TokenSeq = tokenizer.encode(
+            "\n" + "".join(self.right_ctx), add_special_tokens=False
+        )
+        left_tks, right_tks = truncate_sections(
+            tks_limit - max_output,
+            (left_tks, TruncateAt.Left),
+            (right_tks, TruncateAt.Right),
+            add_bos=False,
+        )
+        left = tokenizer.decode(left_tks, clean_up_tokenization_spaces=False)
+        right = tokenizer.decode(right_tks, clean_up_tokenization_spaces=False)
+        return left, right
 
 
 @dataclass
 class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
-    VERSION = "1.0"
-    max_ctx_tks = 2048
+    """
+    Extract fiil-in-the-middle problems from code changes.
+
+    ## Arguments
+    - `addition_only`: whether to only extract from problems where the last change is
+    a pure additon (rather than a replacement). `addition_only` problems are easier
+    for code completion models since they don't see any code that get deleted.
+
+    ## Change log
+    - version 1.2: Add `addition-only` option.
+    - version 1.1: Limit context str length to `10 * max_ctx_tks`.
+    """
+
+    VERSION = "1.1"
+    max_ctx_tks: int = 2048
     min_target_size: int = C3ToCodeCompletion.min_target_size
-    # change spans with more than this many lines will be ignored
-    max_span_lines: int = 500
-    # change spans with more than this many characters will be ignored
-    max_span_chars: int = 6000
+    addition_only: bool = C3ToCodeCompletion.addition_only
+    generator: C3ProblemGenerator = field(default_factory=C3ProblemGenerator)
 
     def __post_init__(self):
-        self._sampler = C3ToCodeCompletion(self.min_target_size)
+        self._sampler = C3ToCodeCompletion(self.min_target_size, self.addition_only)
 
     def use_unchanged(self) -> bool:
         return True
+
+    def post_edit_analysis(self, *args, **kwargs) -> list[ModuleName]:
+        return self.generator.post_edit_analysis(*args, **kwargs)
 
     def process_change(
         self,
         pchange: JProjectChange,
         pre_analysis: None,
-        post_analysis: None,
+        module_order: Sequence[ModuleName],
     ) -> Sequence[FIMProblem]:
         probs = list[FIMProblem]()
         src_info: SrcInfo = {
             "project": pchange.project_name,
             "commit": pchange.commit_info,
         }
-        for m, mchange in pchange.changed.items():
+        for m in module_order:
+            if (mchange := pchange.changed.get(m)) is None:
+                continue
             all_spans = list(mchange.changed)
             all_spans.sort(key=lambda s: s.line_range)
             old_spans, new_spans = self._get_old_new_spans(all_spans)
@@ -88,8 +128,8 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 if not self.should_mk_problem(
                     span,
                     func_only=not self.is_training,
-                    max_chars=self.max_span_chars,
-                    max_lines=self.max_span_lines,
+                    max_chars=self.generator.max_span_chars,
+                    max_lines=self.generator.max_span_lines,
                 ) or code_equal(span.change.earlier, span.change.later):
                     # only keep non-trivial modifications
                     continue
@@ -105,7 +145,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 # add previous spans until total size exceeds max_ctx_tks
                 above_sum = len(left)
                 for span in reversed(new_spans[: 2 * i + 1]):
-                    if above_sum + len(span) >= self.max_ctx_tks:
+                    if above_sum + len(span) >= self.max_ctx_tks * 10:
                         break
                     above_sum += len(span)
                     above_spans.append(span)
@@ -114,7 +154,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 below_sum = len(right)
                 for span in old_spans[2 * i + 2 :]:
                     # take until below sum exceeds max_ctx_tks
-                    if below_sum + len(span) >= self.max_ctx_tks:
+                    if below_sum + len(span) >= self.max_ctx_tks * 10:
                         break
                     below_sum += len(span)
                     below_spans.append(span)
@@ -127,9 +167,9 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
 
     def _get_old_new_spans(
         self, spans: Sequence[ChangedSpan]
-    ) -> tuple[list[TokenSeq], list[TokenSeq]]:
-        old_spans = list[TokenSeq]()
-        new_spans = list[TokenSeq]()
+    ) -> tuple[list[str], list[str]]:
+        old_spans = list[str]()
+        new_spans = list[str]()
         last_scope = []
         for span in spans:
             scope_diff = list[Change[ChangeScope]]()
@@ -140,16 +180,14 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 s.earlier.header_code.strip("\n") for s in scope_diff
             )
             new_header = "\n".join(s.later.header_code.strip("\n") for s in scope_diff)
-            old_spans.append(encode_lines_join(old_header))
-            old_spans.append(encode_lines_join(span.change.earlier))
-            new_spans.append(encode_lines_join(new_header))
-            new_spans.append(encode_lines_join(span.change.later))
+            old_spans.append(old_header)
+            old_spans.append(span.change.earlier)
+            new_spans.append(new_header)
+            new_spans.append(span.change.later)
             last_scope = span.parent_scopes
         return old_spans, new_spans
 
-    def _split_change(
-        self, origin: TokenSeq, delta: TkDelta
-    ) -> tuple[TokenSeq, TokenSeq, TokenSeq]:
+    def _split_change(self, origin: TokenSeq, delta: TkDelta) -> tuple[str, str, str]:
         assert_eq(delta.num_changes(), 1)
         lines = tk_splitlines(origin)
         key, action = list(delta.items())[0]
@@ -165,7 +203,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
         )
         right = join_list(lines[target_line:], Newline_id)
         middle = action[1:]
-        return left, middle, right
+        return tuple(decode_tokens(x) for x in (left, middle, right))
 
 
 def _change_line_to_result(line: TokenSeq) -> TokenSeq | None:
@@ -179,47 +217,75 @@ def _change_line_to_result(line: TokenSeq) -> TokenSeq | None:
         return line
 
 
-@dataclass
-class InfillResult:
-    text: str  # the completed document (with infills inserted)
-    infills: Sequence[str]  # the list of infills generated
+class FIMModel(ABC):
+    model: PreTrainedModel
+    tokenizer: PreTrainedTokenizerBase
+
+    @abstractmethod
+    def infill(self, left: str, right: str, max_length: int) -> str:
+        ...
 
 
 @dataclass
-class CodeT5Wrapper:
+class CodeT5Wrapper(FIMModel):
     model: CodeT5Model
+    tks_limit: int = 2048
+    tokenizer = CodeT5TKN
 
-    def infill(self, parts: Sequence[str], max_to_generate: int = 128) -> InfillResult:
-        input = self.input_from_parts(parts)
-        out_seq = self.infill_tks(input, max_to_generate)
-        print(f"{decode_tokens(out_seq)=}")
-        infill_seqs = list(output_ids_as_seqs(out_seq).values())
-        infills = [decode_tokens(s) for s in infill_seqs[: len(parts) - 1]]
-        print(f"{infills=}")
-
-        inlined = inline_output_tokens(input, out_seq, leave_unpredicted=True)
-        text = decode_tokens(inlined)
-        return InfillResult(text, infills)
-
-    def input_from_parts(self, parts: Sequence[str]) -> TokenSeq:
-        segs = list[str]()
-        for i, s in enumerate(parts):
-            segs.append(s)
-            if i < len(parts) - 1:
-                segs.append(f"<extra_id_{i}>")
-        return _Tokenizer.encode("".join(segs))
-
-    def infill_tks(self, input: TokenSeq, max_to_generate: int) -> TokenSeq:
-        print(f"{decode_tokens(input)=}")
+    def infill(self, left: str, right: str, max_length: int = 128) -> str:
+        tkn = self.tokenizer
         device = self.model.device
-        input_ids = torch.LongTensor([input]).to(device)
-        with torch.autocast("cuda"):
-            output = self.model.generate(input_ids, max_length=max_to_generate)
-        assert isinstance(output, torch.Tensor)
-        return output[0].tolist()
+        left_tks: TokenSeq = tkn.encode(left, add_special_tokens=False)
+        right_tks: TokenSeq = tkn.encode(right, add_special_tokens=False)
+        left_tks, right_tks = truncate_sections(
+            self.tks_limit - max_length - 8,
+            (left_tks, TruncateAt.Left),
+            (right_tks, TruncateAt.Right),
+            add_bos=False,
+        )
+        input_ids = join_list(
+            [[BOS_id], left_tks, [get_extra_id(0)], right_tks, [EOS_id]]
+        )
+        input_ids = torch.LongTensor([input_ids]).to(device)
+        output_ids = self.model.generate(
+            input_ids=input_ids,
+            do_sample=False,
+            max_length=max_length,
+        )
+        assert isinstance(output_ids, torch.Tensor)
+        output_ids = output_ids[0].tolist()
+        infill_ids = output_ids_as_seqs(output_ids)[get_extra_id(0)]
+        return decode_tokens(infill_ids)
 
     @staticmethod
     def from_pretrained(model_name: str = "Salesforce/codet5-base"):
         model = CodeT5Model.from_pretrained(model_name)
         assert isinstance(model, CodeT5Model)
         return CodeT5Wrapper(model)
+
+
+_infill_prefix = _Tokenizer.encode("<s><extra_id_0><add>", add_special_tokens=False)
+
+
+def infill_with_coeditor(
+    coeditor: RetrievalEditorModel, tk_prob: TkC3Problem, max_length: int = 128
+) -> TokenSeq:
+    """Run the Coeditor model on the (inifilling version) C3 Problem, return the
+    model output."""
+
+    device = coeditor.device
+    batch = C3DataLoader.pack_batch([tk_prob])
+    # the prefix is always an addition
+    prefix_allowed_tokens_fn = RetrievalEditorModel._prefix_constraint([_infill_prefix])
+    input_ids = torch.LongTensor(batch["input_ids"]).to(device)
+    output_ids = coeditor.generate(
+        input_ids=input_ids,
+        references=batch["references"],
+        query_ref_list=batch["query_ref_list"],
+        do_sample=False,
+        max_length=max_length,
+        prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+    )
+    assert isinstance(output_ids, torch.Tensor)
+    output_ids = output_ids[0].tolist()
+    return output_ids

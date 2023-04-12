@@ -824,6 +824,20 @@ class RetrievalEditorModel(T5PreTrainedModel):
             return sequences
 
     @staticmethod
+    def _prefix_constraint(output_prefix: list[TokenSeq]):
+        all_tks = list(range(len(_Tokenizer)))
+
+        def constraint(batch: int, decoded: torch.Tensor) -> list[Token]:
+            t = decoded.size(0) - 1
+            prefix = output_prefix[batch]
+            if t < len(prefix):
+                return [prefix[t]]
+            else:
+                return all_tks
+
+        return constraint
+
+    @staticmethod
     def from_code_t5(
         size: Literal["small", "base", "large"],
         attention_mode: AttentionMode = AttentionMode.bidirectional,

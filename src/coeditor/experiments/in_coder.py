@@ -8,8 +8,8 @@ from transformers.models.xglm.modeling_xglm import XGLMForCausalLM
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 from coeditor.common import *
-
-from .code_completion import InfillResult
+from coeditor.encoding import TruncateAt, truncate_sections
+from coeditor.experiments.code_completion import FIMModel
 
 InCoderModelType = XGLMForCausalLM
 InCoderTokenizerType = PreTrainedTokenizerFast
@@ -26,11 +26,65 @@ def make_sentinel(i) -> str:
 
 
 @dataclass
-class InCoderWrapper:
+class InCoderWrapper(FIMModel):
     model: InCoderModelType
     tokenizer: InCoderTokenizerType
+    tks_limit: int = 2048
 
-    def infill(
+    def __post_init__(self):
+        self.bos_ids = self.tokenizer.encode(BOS, add_special_tokens=False)
+        self.mask0_ids = self.tokenizer.encode(
+            make_sentinel(0), add_special_tokens=False
+        )
+        self.mask1_ids = self.tokenizer.encode(
+            make_sentinel(1), add_special_tokens=False
+        )
+
+    def infill(self, left: str, right: str, max_length: int) -> str:
+        tkn = self.tokenizer
+        device = self.model.device
+        left_tks: TokenSeq = tkn.encode(left, add_special_tokens=False)
+        right_tks: TokenSeq = tkn.encode(right, add_special_tokens=False)
+        left_tks, right_tks = truncate_sections(
+            self.tks_limit - max_length - 8,
+            (left_tks, TruncateAt.Left),
+            (right_tks, TruncateAt.Right),
+            add_bos=False,
+        )
+
+        input_ids = join_list(
+            [
+                self.bos_ids,
+                left_tks,
+                self.mask0_ids,
+                right_tks,
+                self.mask1_ids,
+                self.mask0_ids,
+            ]
+        )
+        total_length = len(input_ids) + max_length
+        if total_length > self.tks_limit:
+            warnings.warn(
+                f"Total length too large: {total_length=} (> {self.tks_limit})"
+            )
+        input_ids = torch.LongTensor([input_ids]).to(device)
+        output = self.model.generate(
+            input_ids=input_ids,
+            do_sample=False,
+            max_length=total_length,
+        )
+        assert isinstance(output, Tensor)
+        output_ids = output[0].tolist()
+        output_ids = output_ids[input_ids.size(1) :]
+        completion: str = tkn.decode(output_ids, clean_up_tokenization_spaces=False)
+
+        if EOM not in completion:
+            completion += EOM
+        completion = completion[: completion.index(EOM) + len(EOM)]
+        infilled = completion[: -len(EOM)]
+        return infilled
+
+    def infill_multi(
         self,
         parts: Sequence[str],
         max_to_generate: int = 128,
@@ -39,26 +93,6 @@ class InCoderWrapper:
         max_retries: int = 1,
         VERBOSE: bool = False,
     ):
-        """
-        Generate infills to complete a partial document, e.g.
-        [A C E] -> [A B C D E], where B and D are infills that have been generated.
-        parts: List[str]. list of parts of the document. One string will be
-                inserted in between each element, i.e. infilling N-1 locations for a list
-                of length N.
-        max_to_generate: int. maximum number of tokens to generate. Keep in mind
-                that the model context size is 2048.
-        temperature: float. temperature parameter for sampling.
-        extra_sentinel: bool. we recommend setting this to True, as it makes it
-                easier for the model to end generated infills. See the footnote in
-                section 2.2 of our paper for details.
-        max_retries: int. if > 1, use rejection sampling to keep sampling infills until
-                all infills sample a completion token.
-        returns a dictionary containing the following:
-            text:  str, the completed document (with infills inserted)
-            parts:  List[str], length N. Same as passed to the method
-            infills:  List[str], length N-1. The list of infills generated
-            retries_attempted:  number of retries used (if max_retries > 1)
-        """
         retries_attempted = 0
         done = False
         prompt = text = ""
@@ -81,14 +115,12 @@ class InCoderWrapper:
                     if extra_sentinel or (sentinel_ix < len(parts) - 1):
                         prompt += make_sentinel(sentinel_ix)
 
-            infills = []
-            complete = []
+            infills = list[str]()
 
             done = True
 
             ## (2) generate infills
             for sentinel_ix, part in enumerate(parts[:-1]):
-                complete.append(part)
                 prompt += make_sentinel(sentinel_ix)
                 # TODO: this is inefficient as it requires re-encoding prefixes repeatedly
                 completion = self.generate(prompt, max_to_generate, temperature)
@@ -101,15 +133,9 @@ class InCoderWrapper:
                 completion = completion[: completion.index(EOM) + len(EOM)]
                 infilled = completion[: -len(EOM)]
                 infills.append(infilled)
-                complete.append(infilled)
                 prompt += completion
-            complete.append(parts[-1])
-            text = "".join(complete)
 
-        return InfillResult(
-            text,
-            infills,
-        )
+        return infills
 
     def generate(
         self, input: str, max_to_generate: int = 128, temperature: float = 0.2
@@ -145,7 +171,7 @@ class InCoderWrapper:
 
     @staticmethod
     def from_pretrained(
-        model_name: str = "facebook/incoder-1B", half_precision: bool = False
+        model_name: str = "facebook/incoder-1B", half_precision: bool = True
     ):
         model = AutoModelForCausalLM.from_pretrained(model_name)
         tokenizer = AutoTokenizer.from_pretrained(model_name)

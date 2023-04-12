@@ -101,7 +101,9 @@ def tk_get_lines(tks: TokenSeq, start_line: int, until_line: int) -> TokenSeq:
 
 
 def decode_tokens(tokens: TokenSeq, prettify: bool = False) -> str:
-    text = _Tokenizer.decode(tokens, add_special_tokens=False)
+    text = _Tokenizer.decode(
+        tokens, add_special_tokens=False, clean_up_tokenization_spaces=False
+    )
     if prettify:
         text = text.replace("<extra_id_", "<mask_")
     return text

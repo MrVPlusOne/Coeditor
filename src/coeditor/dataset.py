@@ -18,7 +18,7 @@ from .change import Added
 from .common import *
 from .encoding import TEdit
 from .git import CommitInfo, get_commit_history
-from .scoped_changes import ProjectChangeProcessor, edits_from_commit_history
+from .scoped_changes import ProjectChangeProcessor, TProb, edits_from_commit_history
 
 
 @dataclass
@@ -67,11 +67,8 @@ class C3CombinedEncoder:
 
 @dataclass
 class _ProcessingResult:
-    edits: Sequence[C3Problem]
+    edits: Sequence
     stats: dict[str, dict | Any]
-
-
-time_limit_per_commit = 10.0
 
 
 def _process_commits(
@@ -80,6 +77,7 @@ def _process_commits(
     commits: Sequence[CommitInfo],
     is_training: bool,
     change_processor: ProjectChangeProcessor[C3Problem],
+    time_limit_per_commit: float = 10.0,
 ) -> _ProcessingResult:
     # use process-specific parso cache
     fix_jedi_cache(workdir)
@@ -110,11 +108,12 @@ def _process_commits(
 
 def dataset_from_projects(
     project_roots: Sequence[Path],
-    change_processor: ProjectChangeProcessor[C3Problem],
+    change_processor: ProjectChangeProcessor[TProb],
     repo_training: Sequence[bool],
-    max_history_per_repo: int = 1000,
+    max_history_per_repo: int,
+    time_limit_per_commit: float,
     workers: int = DefaultWorkers,
-) -> "Mapping[Path, Sequence[C3Problem]]":
+) -> "Mapping[Path, Sequence[TProb]]":
     """
     Create a TokenizedEditDataset from a list of project roots and a given encoder.
     Args:
@@ -152,7 +151,10 @@ def dataset_from_projects(
             workdirs,
             chunked_histories,
             chunk_training,
-            key_args={"change_processor": change_processor},
+            key_args={
+                "change_processor": change_processor,
+                "time_limit_per_commit": time_limit_per_commit,
+            },
             max_workers=workers,
             tqdm_args={"unit": "chunk"},
         )
@@ -161,7 +163,7 @@ def dataset_from_projects(
             shutil.rmtree(workdir)
             print("Workdir removed:", workdir)
 
-    project2edits = dict[Path, list[C3Problem]]()
+    project2edits = dict[Path, list[TProb]]()
 
     try:
         stats = dict[str, Any]()
@@ -194,11 +196,12 @@ def dataset_from_projects(
 
 def datasets_from_repos(
     repos_root: Path,
-    change_processor: ProjectChangeProcessor[C3Problem],
+    change_processor: ProjectChangeProcessor[TProb],
+    splits: Sequence[str] = ("test", "valid", "train"),
     max_history_per_repo: int = 1000,
+    time_limit_per_commit: float = 10.0,
     workers: int = DefaultWorkers,
-) -> dict[str, Sequence[C3Problem]]:
-    splits = ["test", "valid", "train"]
+) -> dict[str, Sequence[TProb]]:
     projects = dict[str, list[Path]]()
     split_is_training = dict[str, list[bool]]()
     for split in splits:
@@ -216,45 +219,53 @@ def datasets_from_repos(
         join_list(projects.values()),
         change_processor=change_processor,
         repo_training=join_list(split_is_training.values()),
+        time_limit_per_commit=time_limit_per_commit,
         max_history_per_repo=max_history_per_repo,
         workers=workers,
     )
     return {k: join_list(dataset[r] for r in repos) for k, repos in projects.items()}
 
 
-class C3ProblemDataset(TypedDict):
-    train: Sequence[C3Problem]
-    valid: Sequence[C3Problem]
-    test: Sequence[C3Problem]
+class C3ProblemDataset(TypedDict, Generic[TProb]):
+    train: Sequence[TProb]
+    valid: Sequence[TProb]
+    test: Sequence[TProb]
 
 
 def make_or_load_dataset(
     dataset_name: str,
-    change_processor: ProjectChangeProcessor[C3Problem],
+    change_processor: ProjectChangeProcessor[TProb],
+    splits: Sequence[str],
     remake_problems: bool = False,
+    time_limit_per_commit: float = 10.0,
     workers: int = DefaultWorkers,
-) -> C3ProblemDataset:
+) -> C3ProblemDataset[TProb]:
     prob_config = repr_modified_args(change_processor)
     processed_dir = get_dataset_dir(dataset_name) / "processed"
     cache = PickleCache(processed_dir)
-    with timed_action("Making or loading C3 problems"):
-        problems = cache.cached(
-            prob_config,
-            lambda: datasets_from_repos(
-                get_dataset_dir(dataset_name) / "repos",
-                change_processor,
-                workers=workers,
-            ),
-            remake=remake_problems,
-        )
-
-    size_mb = (processed_dir / prob_config).stat().st_size / (1024**2)
-    print(f"Problems total size: {size_mb:.2f} MB")
+    results = dict[str, Sequence[TProb]]()
+    for split in splits:
+        with timed_action(f"Making or loading: {split}"):
+            file_name = f"{split}-{prob_config}.pkl"
+            problems = cache.cached(
+                file_name,
+                lambda: datasets_from_repos(
+                    get_dataset_dir(dataset_name) / "repos",
+                    change_processor,
+                    workers=workers,
+                    splits=[split],
+                    time_limit_per_commit=time_limit_per_commit,
+                ),
+                remake=remake_problems,
+            )
+            results[split] = problems[split]
+        size_mb = (processed_dir / file_name).stat().st_size / (1024**2)
+        print(f"Split total size: {size_mb:.2f} MB")
 
     return C3ProblemDataset(
-        train=problems.get("train", []),
-        valid=problems.get("valid", []),
-        test=problems.get("test", []),
+        train=results.get("train", []),
+        valid=results.get("valid", []),
+        test=results.get("test", []),
     )
 
 

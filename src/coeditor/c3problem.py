@@ -194,6 +194,111 @@ class LineUsageAnalysis:
     line2usages: Mapping[int, Sequence[PyDefinition]]
 
 
+@dataclass
+class JediUsageAnalyzer:
+    include_parent_usages: bool = True
+    include_builtins: bool = False
+
+    _KnownJediErrors = {
+        "not enough values to unpack (expected 2",
+        "'Newline' object has no attribute 'children'",
+        "trailer_op is actually ",
+        "There's a scope that was not managed: <Module",
+        "maximum recursion depth exceeded",
+        "'NoneType' object has no attribute 'type'",
+    }
+
+    def __post_init__(self):
+        self.error_counts = dict[str, int]()
+        self.tlogger: TimeLogger = TimeLogger()
+
+    def get_line_usages(
+        self,
+        script: jedi.Script,
+        lines_to_analyze: Collection[int],
+        silent: bool = False,
+    ):
+        jmod: tree.Module = script._module_node
+        name2def_node = dict[PyFullName, list[classes.Name]]()
+        line2usages = dict[int, set[PyFullName]]()
+        registered_classes = set[PyFullName]()
+
+        def register_usage(cname: classes.Name, usages: set[PyFullName]):
+            fname = cname.full_name
+            if fname is None:
+                return
+            if not self.include_builtins and fname.startswith("builtins."):
+                return
+            fname = PyFullName(fname)
+            usages.add(fname)
+            name2def_node.setdefault(fname, list()).append(cname)
+
+        def register_class_usage(cname: classes.Name, usages: set[PyFullName]):
+            assert_eq(cname.type, "class")
+            if not cname.full_name or cname.full_name in registered_classes:
+                return
+            if not self.include_parent_usages and cname.full_name.startswith(
+                "builtins."
+            ):
+                return
+            for n in cname.defined_names():
+                if n.type == "statement":
+                    register_usage(n, usages)
+            registered_classes.add(PyFullName(cname.full_name))
+
+        all_names = [
+            name for names in jmod.get_used_names()._dict.values() for name in names
+        ]
+        all_names.sort(key=lambda x: x.start_pos)
+        all_names = [n for n in all_names if n.start_pos[0] in lines_to_analyze]
+        name2pydef = dict[PyFullName, PyDefinition]()
+
+        try:
+            for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
+                name: tree.Name
+                line = name.start_pos[0]
+                usages = line2usages.setdefault(line, set())
+                cnames = _fast_goto(
+                    script,
+                    name,
+                    follow_imports=True,
+                    follow_builtin_imports=False,
+                )
+                for cname in cnames:
+                    register_usage(cname, usages)
+                    if (parent := cname.parent()) and parent.type == "class":
+                        register_class_usage(parent, usages)
+
+            for fname, nodes in name2def_node.items():
+                pdef = PyDefinition(fname, set(), set())
+                for n in nodes:
+                    pdef.update(n)
+                name2pydef[fname] = pdef
+        except Exception as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            err_text = repr(e)
+            str_limit = 80
+            if len(err_text) > str_limit:
+                err_text = err_text[:str_limit] + "..."
+            self.add_error(err_text)
+
+        return LineUsageAnalysis(
+            {
+                k: [name2pydef[n] for n in sorted(names) if n in name2pydef]
+                for k, names in line2usages.items()
+            }
+        )
+
+    def add_error(self, err_text: str):
+        self.error_counts[err_text] = self.error_counts.get(err_text, 0) + 1
+
+    @staticmethod
+    def is_known_error(err_text: str):
+        return any(k in err_text for k in JediUsageAnalyzer._KnownJediErrors)
+
+
+@dataclass
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     Generate `C3Problem`s from git histories.
@@ -215,12 +320,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     max_span_lines: int = 500
     # change spans with more than this many characters will be ignored
     max_span_chars: int = 6000
-
-    def __init__(self, analyzer: "JediUsageAnalyzer | None" = None):
-        if analyzer is None:
-            analyzer = JediUsageAnalyzer()
-
-        self.analyzer = analyzer
+    analyzer: JediUsageAnalyzer = field(default_factory=JediUsageAnalyzer)
 
     def __repr__(self) -> str:
         return repr_modified_args(self)
@@ -653,11 +753,12 @@ class C3ToCodeCompletion(C3ProblemTransform):
     old version, and treating the new version as the desired output.
 
     ### Change log
-    - empty
+    - v1.1: add `addition_only`.
     """
 
-    VERSION = "1.0"
+    VERSION = "1.1"
     min_target_size: int = 6
+    addition_only: bool = False
 
     def extract_completion(
         self, original: TokenSeq, delta: TkDelta
@@ -671,17 +772,18 @@ class C3ToCodeCompletion(C3ProblemTransform):
         """
 
         target = delta.change_groups()[-1]
-        segs = [delta[k] for k in target]
+        acts = [delta[k] for k in target]
         good = (
-            len(segs) <= 2
-            and segs[0][0] == Add_id
-            and len(segs[0]) >= self.min_target_size
+            len(acts) <= 2
+            and acts[0][0] == Add_id
+            and not (self.addition_only and acts[-1][0] == Del_id)
+            and len(acts[0]) >= self.min_target_size
         )
         if not good:
             return None
 
         prev_changes = [k for k in delta.keys() if k < target[0]]
-        if delta[target[-1]][0] == Del_id:
+        if acts[-1][0] == Del_id:
             # if the last change is a deletion, move it into prev_changesine into before_changes
             prev_changes.append(target[-1])
             target = target[:-1]
@@ -917,6 +1019,7 @@ class C3ProblemTokenizer:
                 }
             for i, chunk in enumerate(self._group_encode_unchanged_refs(unchanged)):
                 all_refs.append((f"unchanged ref {i}", chunk))
+                ref_size_sum += len(chunk)
         else:
             truncated = True
 
@@ -924,7 +1027,7 @@ class C3ProblemTokenizer:
             changed = self._group_encode_changed_refs(problem.relevant_changes)
             for i, chunk in enumerate(changed):
                 all_refs.append((f"changed ref {i}", chunk))
-            ref_size_sum += sum(len(x) for x in changed)
+                ref_size_sum += len(changed)
         else:
             truncated = True
 
@@ -1063,6 +1166,14 @@ class C3ProblemTokenizer:
     def __repr__(self):
         return repr_modified_args(self)
 
+    @staticmethod
+    def for_eval() -> "C3ProblemTokenizer":
+        tkn = C3ProblemTokenizer()
+        tkn.max_query_tks *= 2
+        tkn.max_ref_tks *= 2
+        tkn.max_ref_tks_sum *= 2
+        return tkn
+
 
 # Utils to convert code changes into the current version of the code
 
@@ -1139,110 +1250,6 @@ def _problem_to_current(prob: C3Problem):
         edit_line_ids=new_edit_line_ids,
         relevant_changes=relevant_changes,
     )
-
-
-@dataclass
-class JediUsageAnalyzer:
-    include_parent_usages: bool = True
-    include_builtins: bool = False
-
-    _KnownJediErrors = {
-        "not enough values to unpack (expected 2",
-        "'Newline' object has no attribute 'children'",
-        "trailer_op is actually ",
-        "There's a scope that was not managed: <Module",
-        "maximum recursion depth exceeded",
-        "'NoneType' object has no attribute 'type'",
-    }
-
-    def __post_init__(self):
-        self.error_counts = dict[str, int]()
-        self.tlogger: TimeLogger = TimeLogger()
-
-    def get_line_usages(
-        self,
-        script: jedi.Script,
-        lines_to_analyze: Collection[int],
-        silent: bool = False,
-    ):
-        jmod: tree.Module = script._module_node
-        name2def_node = dict[PyFullName, list[classes.Name]]()
-        line2usages = dict[int, set[PyFullName]]()
-        registered_classes = set[PyFullName]()
-
-        def register_usage(cname: classes.Name, usages: set[PyFullName]):
-            fname = cname.full_name
-            if fname is None:
-                return
-            if not self.include_builtins and fname.startswith("builtins."):
-                return
-            fname = PyFullName(fname)
-            usages.add(fname)
-            name2def_node.setdefault(fname, list()).append(cname)
-
-        def register_class_usage(cname: classes.Name, usages: set[PyFullName]):
-            assert_eq(cname.type, "class")
-            if not cname.full_name or cname.full_name in registered_classes:
-                return
-            if not self.include_parent_usages and cname.full_name.startswith(
-                "builtins."
-            ):
-                return
-            for n in cname.defined_names():
-                if n.type == "statement":
-                    register_usage(n, usages)
-            registered_classes.add(PyFullName(cname.full_name))
-
-        all_names = [
-            name for names in jmod.get_used_names()._dict.values() for name in names
-        ]
-        all_names.sort(key=lambda x: x.start_pos)
-        all_names = [n for n in all_names if n.start_pos[0] in lines_to_analyze]
-        name2pydef = dict[PyFullName, PyDefinition]()
-
-        try:
-            for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
-                name: tree.Name
-                line = name.start_pos[0]
-                usages = line2usages.setdefault(line, set())
-                cnames = _fast_goto(
-                    script,
-                    name,
-                    follow_imports=True,
-                    follow_builtin_imports=False,
-                )
-                for cname in cnames:
-                    register_usage(cname, usages)
-                    if (parent := cname.parent()) and parent.type == "class":
-                        register_class_usage(parent, usages)
-
-            for fname, nodes in name2def_node.items():
-                pdef = PyDefinition(fname, set(), set())
-                for n in nodes:
-                    pdef.update(n)
-                name2pydef[fname] = pdef
-        except Exception as e:
-            if isinstance(e, KeyboardInterrupt):
-                raise
-            err_text = repr(e)
-            str_limit = 80
-            if len(err_text) > str_limit:
-                err_text = err_text[:str_limit] + "..."
-            self.add_error(err_text)
-
-        return LineUsageAnalysis(
-            {
-                k: [name2pydef[n] for n in sorted(names) if n in name2pydef]
-                for k, names in line2usages.items()
-            }
-        )
-
-    def add_error(self, err_text: str):
-        self.error_counts[err_text] = self.error_counts.get(err_text, 0) + 1
-
-    @staticmethod
-    def is_known_error(err_text: str):
-        return any(k in err_text for k in JediUsageAnalyzer._KnownJediErrors)
 
 
 def _fast_goto(

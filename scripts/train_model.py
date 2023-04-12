@@ -55,6 +55,7 @@ def train_model(
         dataset_name,
         encoder.change_processor,
         remake_problems=recreate_data,
+        splits=("valid", "test", "train"),
         workers=multiprocessing.cpu_count(),
     )
 
