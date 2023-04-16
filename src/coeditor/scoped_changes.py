@@ -1,4 +1,5 @@
 import copy
+import gc
 import shutil
 import sys
 import time
@@ -497,6 +498,7 @@ def edits_from_commit_history(
     finally:
         shutil.rmtree(tempdir)
         jedi.settings.fast_parser = use_fast_parser
+        gc.collect()
 
 
 def _deep_copy_subset_(dict: dict[T1, T2], keys: Collection[T1]) -> dict[T1, T2]:
@@ -584,7 +586,7 @@ def _edits_from_commit_history(
     init_srcs = [
         to_rel_path(f.relative_to(project))
         for f in rec_iter_files(project, dir_filter=lambda d: d.name not in ignore_dirs)
-        if f.suffix == ".py"
+        if f.suffix == ".py" and (project / f).exists()
     ]
     path2module = {
         f: parse_module(project / f)
@@ -679,6 +681,9 @@ def _edits_from_commit_history(
             if has_timeouted(step):
                 return results
 
+        modules_mod = Modified(path2module.values(), new_path2module.values())
+        pchange = JProjectChange(project.name, changed, modules_mod, commit_next)
+
         with _tlogger.timed("post_edit_analysis"):
             post_analysis = change_processor.post_edit_analysis(
                 pstate,
@@ -696,10 +701,9 @@ def _edits_from_commit_history(
                 path2module,
                 changed,
             )
+        if has_timeouted(step):
+            return results
         checkout_commit(commit_next.hash)
-
-        modules_mod = Modified(path2module.values(), new_path2module.values())
-        pchange = JProjectChange(project.name, changed, modules_mod, commit_next)
 
         with _tlogger.timed("process_change"):
             processed = change_processor.process_change(

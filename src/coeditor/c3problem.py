@@ -18,6 +18,7 @@ from .common import *
 from .encoding import (
     Add_id,
     Del_id,
+    DeltaKey,
     N_Extra_Ids,
     Newline_id,
     TkDelta,
@@ -114,6 +115,10 @@ class C3Problem:
     src_info: SrcInfo
     transformations: tuple[str, ...] = ()
 
+    def __post_init__(self):
+        if not self.edit_line_ids:
+            raise ValueError(f"edit_line_ids is empty. Problem: {self.summary()}")
+
     def restrict_span_changes(self):
         "restrict the changes in the span to the edit lines"
         eids = self.edit_line_ids
@@ -135,13 +140,16 @@ class C3Problem:
     def summary(self) -> str:
         return "\n".join(self.meta_data_lines())
 
-    def print(self):
-        main_change = self.span.delta.apply_to_change(self.span.original.tolist())
-        print_sections(
+    def show(self) -> str:
+        return show_sections(
             ("summary", self.summary()),
-            ("main change", decode_tokens(main_change)),
+            ("delta", str(self.span.delta)),
+            ("main input", decode_tokens(self.span.original.tolist())),
             ("edit_line_ids", str(self.edit_line_ids)),
         )
+
+    def print(self):
+        print(self.show())
 
     def line_ids_to_input_lines(self, line_ids: Sequence[int]) -> Sequence[int]:
         """Convert the edit lines (which are line ids including deleted lines) into
@@ -304,8 +312,9 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     Generate `C3Problem`s from git histories.
 
     ### Change log
-    - v2.9 (fix): Remove builtin usages by default.
+    - v3.0: Support `sample_unmodified_ratio`. Fix missing changes in `relevant_changes`.
     - v2.9: Add sibling usages for class members. Improve statement signatures.
+        - fix 1: Remove builtin usages by default.
     - v2.8: Fix module usages in `pre_edit_analysis`. Sort changes using heuristic.
     - v2.7: Use new PyDefiniton that includes signatures.
     - v2.6: fix missing changes in `JModuleChanges`. Rename to edit_line_ids.
@@ -315,11 +324,13 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "2.9"
+    VERSION = "3.0"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
     # change spans with more than this many characters will be ignored
     max_span_chars: int = 6000
+    # the ratio of unmodified spans to be sampled
+    neg_to_pos_ratio: float = 0.0
     analyzer: JediUsageAnalyzer = field(default_factory=JediUsageAnalyzer)
 
     def __repr__(self) -> str:
@@ -331,25 +342,61 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     def clear_stats(self) -> None:
         return self.analyzer.error_counts.clear()
 
+    def use_unchanged(self) -> bool:
+        return self.neg_to_pos_ratio > 0
+
+    @dataclass
+    class PreAnalysis:
+        """
+        - `training_samples`: The set of spans that should be used as training examples.
+        This might include some unchanged spans if `sample_unmodified_ratio > 0`.
+        - `usage_analysis`: Map each module to its line usage analysis. Only lines
+        that will be used later are analyzed.
+        """
+
+        training_samples: Set[tuple[ModuleName, LineRange]]
+        usage_analysis: Mapping[ModuleName, LineUsageAnalysis]
+
     def pre_edit_analysis(
         self,
         pstate: ProjectState,
         modules: Mapping[RelPath, JModule],
         changes: Mapping[ModuleName, JModuleChange],
-    ) -> Mapping[ModuleName, LineUsageAnalysis]:
-        "Return the definition usages of each line."
-        result = dict[ModuleName, LineUsageAnalysis]()
+    ) -> PreAnalysis:
+        # first, sample the set of unmodified spans
+        selected_set = set[tuple[ModuleName, LineRange]]()
+        negative_set = set[tuple[ModuleName, LineRange]]()
+        for mname, mchange in changes.items():
+            for cspan in mchange.changed:
+                if not self.should_mk_problem(
+                    cspan,
+                    func_only=not self.is_training,
+                    max_chars=self.max_span_chars,
+                    max_lines=self.max_span_lines,
+                ):
+                    continue
+                if isinstance(cspan.change, Modified):
+                    if cspan.change.unchanged:
+                        negative_set.add((mname, cspan.line_range))
+                    else:
+                        selected_set.add((mname, cspan.line_range))
 
+        # include some negagive samples as training data
+        if negative_set:
+            select_prob = len(selected_set) * self.neg_to_pos_ratio / len(negative_set)
+            for x in negative_set:
+                if random.random() < select_prob:
+                    selected_set.add(x)
+
+        usages = dict[ModuleName, LineUsageAnalysis]()
         src_map = {m.mname: f for f, m in modules.items()}
         for mname, mchange in changes.items():
-            result[mname] = LineUsageAnalysis({})
-            if not isinstance(mchange.module_change, Modified):
-                continue
-
+            usages[mname] = LineUsageAnalysis({})
             lines_to_analyze = set[int]()
+
             for span in mchange.changed:
-                if not isinstance(span.change, Modified):
-                    continue
+                if (mname, span.line_range) not in selected_set:
+                    continue  # skip analysis
                 lines_to_analyze.update(span.line_range.to_range())
                 lines_to_analyze.update(span.header_line_range.to_range())
             if not lines_to_analyze:
@@ -360,8 +407,11 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             line_usages = self.analyzer.get_line_usages(
                 script, lines_to_analyze, silent=True
             )
-            result[mname] = line_usages
-        return result
+            usages[mname] = line_usages
+        return self.PreAnalysis(
+            training_samples=selected_set,
+            usage_analysis=usages,
+        )
 
     def post_edit_analysis(
         self,
@@ -392,7 +442,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     def process_change(
         self,
         pchange: JProjectChange,
-        mod2usages: Mapping[ModuleName, LineUsageAnalysis],
+        pre_analysis: PreAnalysis,
         module_order: Sequence[ModuleName],
     ) -> Sequence[C3Problem]:
         """
@@ -407,8 +457,9 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
             "commit": pchange.commit_info,
         }
 
-        processed_cspans = list[ChangedCodeSpan]()
+        prev_cspans = list[ChangedCodeSpan]()
         problems = list[C3Problem]()
+        mod2usages = pre_analysis.usage_analysis
         for m in module_order:
             if (mchange := pchange.changed.get(m)) is None:
                 continue
@@ -417,32 +468,26 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 warnings.warn("Unexpected: usages missing for module: " + str(m))
             for span in mchange.changed:
                 code_span = cache.to_code_span(span)
-                if not self.should_mk_problem(
-                    span,
-                    func_only=not self.is_training,
-                    max_chars=self.max_span_chars,
-                    max_lines=self.max_span_lines,
-                ):
-                    continue
-                # latest changes are more relevant
-                relevant_unchanged = cache.get_relevant_unchanged(code_span, usages)
-                relevant_changes = list(reversed(processed_cspans))
-                relevant_changes = cache.sort_changes(
-                    code_span, relevant_unchanged, relevant_changes
-                )
+                if (m, span.line_range) in pre_analysis.training_samples:
+                    # latest changes are more relevant
+                    relevant_unchanged = cache.get_relevant_unchanged(code_span, usages)
+                    relevant_changes = list(reversed(prev_cspans))
+                    relevant_changes = cache.sort_changes(
+                        code_span, relevant_unchanged, relevant_changes
+                    )
 
-                n_lines = span.line_range[1] - span.line_range[0]
-                prob = C3Problem(
-                    code_span,
-                    range(0, n_lines + 1),  # one additional line for appending
-                    relevant_changes=relevant_changes,
-                    relevant_unchanged=relevant_unchanged,
-                    change_type=span.change.map(lambda _: None),
-                    src_info=src_info,
-                )
-                problems.append(prob)
-
-                processed_cspans.append(code_span)
+                    n_lines = span.line_range[1] - span.line_range[0]
+                    prob = C3Problem(
+                        code_span,
+                        range(0, n_lines + 1),  # one additional line for appending
+                        relevant_changes=relevant_changes,
+                        relevant_unchanged=relevant_unchanged,
+                        change_type=span.change.map(lambda _: None),
+                        src_info=src_info,
+                    )
+                    problems.append(prob)
+                if code_span.delta:
+                    prev_cspans.append(code_span)
         return problems
 
 
@@ -624,8 +669,11 @@ class C3ProblemTransform(ABC):
 @dataclass
 class C3ProblemSimpleSplit(C3ProblemTransform):
     "Simply split the problem into fixed-sized editing ranges."
-    max_lines_to_edit: int = 25
+    VERSION = "1.1"
+
+    max_lines_to_edit: int = 30
     max_split_factor: int = 4
+    allow_empty_problems: bool = True
 
     def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
         delta = prob.span.delta
@@ -637,7 +685,7 @@ class C3ProblemSimpleSplit(C3ProblemTransform):
         for i in range(start, stop, self.max_lines_to_edit):
             j = min(i + self.max_lines_to_edit, stop)
             sub_delta = delta.for_input_range((i, j))
-            if sub_delta.num_changes() > 0:
+            if sub_delta.num_changes() > 0 or (self.allow_empty_problems and i < j):
                 sub_prob = replace(
                     prob, edit_line_ids=range(i, j), transformations=new_trans
                 )
@@ -653,6 +701,7 @@ class C3ProblemChangeInlining(C3ProblemTransform):
     but also randomly keep some subset of changes in the input.
 
     ### Change log
+    - v1.4: add `allow_empty_problems` option. Improve inlining sampling strategy.
     - v1.3: make `random_subset` truely random.
     - v1.2: fix newline encoding bug.
     - v1.1
@@ -662,13 +711,14 @@ class C3ProblemChangeInlining(C3ProblemTransform):
         - Removed `dropout_prob`.
     """
 
-    VERSION = "1.3"
+    VERSION = "1.4"
 
-    max_lines_to_edit: int = 25
+    max_lines_to_edit: int = 30
     max_split_factor: int = 4
     # when dropping the changes into the input, the biggest ratio of changes to inline
-    max_dropout_ratio: float = 0.5
+    max_inline_ratio: float = 1.0
     _test_prob: float = 0.01
+    allow_empty_problems: bool = True
 
     def __post_init__(self):
         self._rng = random.Random()
@@ -681,19 +731,17 @@ class C3ProblemChangeInlining(C3ProblemTransform):
         start, stop = l_range.start, l_range.stop
 
         grouped_keys = delta.change_groups()
-        should_dropout = len(grouped_keys) >= 2
-        if should_dropout:
-            n_to_drop = int(
-                len(grouped_keys) * random.random() * self.max_dropout_ratio
-            )
-            assert n_to_drop < len(grouped_keys)
-            keys_to_drop = join_list(
-                random_subset(grouped_keys, n_to_drop, rng=self._rng)
-            )
+        if len(grouped_keys) >= 2:
+            keys_to_inline = list[DeltaKey]()
+            # bias toward smaller ratio
+            ratio = self.max_inline_ratio * random.random() ** 2
+            for group in grouped_keys:
+                if random.random() <= ratio:
+                    keys_to_inline.extend(group)
         else:
-            keys_to_drop = []
-        if keys_to_drop:
-            delta1, delta2 = delta.decompose_for_change(keys_to_drop)
+            keys_to_inline = []
+        if keys_to_inline:
+            delta1, delta2 = delta.decompose_for_change(keys_to_inline)
             if random.random() < self._test_prob:
                 result1 = delta2.apply_to_change(
                     delta1.apply_to_change(original.tolist())
@@ -706,14 +754,14 @@ class C3ProblemChangeInlining(C3ProblemTransform):
                         ("result1", decode_tokens(result1)),
                         ("result2", decode_tokens(result2)),
                         ("delta", str(delta)),
-                        ("keys_to_drop", str(keys_to_drop)),
+                        ("keys_to_drop", str(keys_to_inline)),
                         ("delta1", str(delta1)),
                         ("delta2", str(delta2)),
                     )
                     raise AssertionError("decompose_for_change failed.")
             delta2_groups = delta2.change_groups()
-            if not delta2_groups:
-                print_err(f"{delta=}, {keys_to_drop=}, {delta1=}")
+            if not self.allow_empty_problems and not delta2_groups:
+                print_err(f"{delta=}, {keys_to_inline=}, {delta1=}")
                 raise AssertionError("Empty delta2_groups")
             new_original = TkArray.new(delta1.apply_to_change(original.tolist()))
             new_trans = prob.transformations + ("split", "dropout")
@@ -724,7 +772,7 @@ class C3ProblemChangeInlining(C3ProblemTransform):
             delta1 = None
             delta2_groups = delta.change_groups()
 
-        prob_and_n = list[tuple[C3Problem, int]]()
+        prob_count = list[tuple[C3Problem, int]]()
         for i in range(start, stop, self.max_lines_to_edit):
             j = min(i + self.max_lines_to_edit, stop)
             edit_line_ids = range(i, j)
@@ -732,17 +780,19 @@ class C3ProblemChangeInlining(C3ProblemTransform):
                 edit_line_ids = delta1.get_new_line_ids(edit_line_ids)
             line_set = set(edit_line_ids)
             n_groups = sum(any(key[0] in line_set for key in g) for g in delta2_groups)
-            if n_groups > 0:
+            if n_groups > 0 or (self.allow_empty_problems and edit_line_ids):
                 sub_prob = replace(
                     prob,
                     span=new_span,
                     edit_line_ids=edit_line_ids,
                     transformations=new_trans,
                 )
-                prob_and_n.append((sub_prob, n_groups))
+                prob_count.append((sub_prob, n_groups))
         # return the problems with the most changes
-        prob_and_n.sort(key=lambda p: p[1], reverse=True)
-        probs = [p[0] for p in prob_and_n]
+        prob_count.sort(key=lambda p: p[1], reverse=True)
+        probs = [p[0] for p in prob_count]
+        if self.allow_empty_problems and not probs:
+            raise AssertionError(f"No problems generated for:\n{prob.show()}")
         return probs[: self.max_split_factor]
 
 
@@ -898,6 +948,7 @@ class C3ProblemTokenizer:
     ref_chunk_overlap: int = 32
     disable_builtin_defs: bool = True
     disable_unchanged_refs: bool = False
+    # if true, use the current code instead of diff
     current_code_only: bool = False
 
     def get_args(self):

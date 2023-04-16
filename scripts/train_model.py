@@ -9,6 +9,7 @@ import wandb
 from coeditor._utils import cprint, run_long_task
 from coeditor.c3problem import (
     C3ProblemChangeInlining,
+    C3ProblemGenerator,
     C3ProblemTokenizer,
     C3ToCodeCompletion,
 )
@@ -37,7 +38,7 @@ def train_model(
     eval_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
     recreate_data: bool = False,
-    multi_stage: bool = False,
+    multi_stage_training: bool = False,
     resumed_from: Path | None = None,
     model_size: Literal["small", "base", "large"] = "base",
     eval_only: bool = False,
@@ -56,7 +57,6 @@ def train_model(
         encoder.change_processor,
         remake_problems=recreate_data,
         splits=("valid", "test", "train"),
-        workers=multiprocessing.cpu_count(),
     )
 
     with timed_action("Making or loading transformed C3 problems for eval"):
@@ -96,7 +96,7 @@ def train_model(
         )
 
     if resumed_from is None:
-        model = RetrievalEditorModel.from_code_t5(model_size, reuse_embed=True)
+        model = RetrievalEditorModel.from_code_t5(model_size)
     else:
         model = RetrievalEditorModel.load(resumed_from)
 
@@ -117,7 +117,7 @@ def train_model(
         datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
     )
 
-    if not eval_only and multi_stage:
+    if not eval_only and multi_stage_training:
         # gradually increase the ctx size during training
         scales = [4, 2, 1]
         for scale in scales:
@@ -129,7 +129,7 @@ def train_model(
                 if sum(c.change_size() for c in x.relevant_changes)
                 < s_tkn.max_ref_tks_sum
             ]
-            n_probs = max(1, len(s_probs) // max(scales) // 2) * scale
+            n_probs = max(1, len(s_probs) // max(scales)) * scale
             s_probs = random_subset(s_probs, n_probs)
             desc = f"training (ctx={s_tkn.max_ref_tks_sum})"
             s_loader = C3DataLoader(
@@ -226,17 +226,19 @@ def eval_code_completion():
 
 def train_new_model():
     train_model(
-        model_name="coeditor-perm2k-sum_loss-v1.8",
+        model_name="coeditor-perm2k-production-v1.9",
         dataset_name="perm2k",
-        description="Training with sum (instead of mean) loss reduction.",
+        description="The production model trained with negative problems and scrach padding.",
         train_args=TrainingArgs(
             max_train_epochs=1,
         ),
         encoder=C3CombinedEncoder(
-            problem_tranform=C3ProblemChangeInlining(),
-            # edit_tokenizer=C3ProblemTokenizer(max_ref_tks_sum=512 * 6),
+            change_processor=C3ProblemGenerator(neg_to_pos_ratio=0.25),
+            problem_tranform=C3ProblemChangeInlining(
+                max_inline_ratio=1.0, allow_empty_problems=True
+            ),
         ),
-        multi_stage=True,
+        multi_stage_training=True,
         recreate_data=False,
         quicktest=False,
     )

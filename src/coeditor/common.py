@@ -46,6 +46,7 @@ from ._utils import (
     pmap,
     pretty_print_dict,
     repr_modified_args,
+    run_long_task,
     scalar_stats,
     show_string_diff,
     split_dots,
@@ -182,14 +183,23 @@ SEP = "-" * 80
 HtmlCode = str
 
 
+def show_sections(
+    *sections: tuple[str, str],
+    sep: str = SEP,
+) -> str:
+    segs = list[str]()
+    for title, content in sections:
+        segs.append(sep)
+        segs.append(f"{title}:")
+        segs.append(content)
+    return "\n".join(segs)
+
+
 def print_sections(
     *sections: tuple[str, str],
     sep: str = SEP,
 ) -> None:
-    for title, content in sections:
-        print(sep)
-        print(f"{title}:")
-        print(content)
+    print(show_sections(*sections, sep=sep))
 
 
 def short_str(text: str, limit: int = 27) -> str:

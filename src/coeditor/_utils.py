@@ -577,6 +577,7 @@ def scalar_stats(xs) -> dict[str, Any]:
         "median": float(np.median(x)),
         "min": float(x.min()),
         "max": float(x.max()),
+        "count": len(x),
     }
 
 
