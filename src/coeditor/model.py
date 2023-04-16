@@ -209,6 +209,8 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
         amode = getattr(config, "attention_mode", AttentionMode.bidirectional.name)
         self.attention_mode = AttentionMode[amode]
+        scratch_padding = getattr(config, "scratch_padding", None)
+        self.scratch_padding = scratch_padding
         self.tlogger = TimeLogger()
 
     @property
@@ -219,6 +221,15 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def attention_mode(self, mode: AttentionMode):
         self._attention_mode = mode
         self.config.attention_mode = mode.name
+
+    @property
+    def scratch_padding(self) -> int | None:
+        return self._scratch_padding
+
+    @scratch_padding.setter
+    def scratch_padding(self, size: int | None):
+        self._scratch_padding = size
+        self.config.scratch_padding = size
 
     def train_on_data(
         self,
@@ -514,7 +525,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         decoder_attention_mask: Tensor | None = None,
         past_key_values=None,
         use_cache=None,
-        loss_reduction: LossReduction = "sum",
+        loss_reduction: LossReduction = "mean",
         # not used args below
         output_attentions=None,
         output_hidden_states=None,
@@ -690,6 +701,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         return RetrivalEncoder(
             self.encoder,
             attention_mode=self.attention_mode,
+            scratch_padding=self.scratch_padding,
         )
 
     def get_decoder(self):
@@ -841,6 +853,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def from_code_t5(
         size: Literal["small", "base", "large"],
         attention_mode: AttentionMode = AttentionMode.bidirectional,
+        scratch_padding: int | None = 512,
         reuse_embed: bool = False,
         reinit_weights: bool = False,
     ) -> "RetrievalEditorModel":
@@ -857,6 +870,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
             for k, v in w_map.items():
                 embed_layer.weight.data[k] = embed_layer.weight[v]
         model.attention_mode = attention_mode
+        model.scratch_padding = scratch_padding
         model.config.vocab_size = len(_Tokenizer)
         return model
 
@@ -1202,6 +1216,7 @@ class RetrivalEncoderOutputs(transformers.utils.ModelOutput):
 class RetrivalEncoder:
     encoder: T5Stack
     attention_mode: AttentionMode
+    scratch_padding: Optional[int]
 
     def __call__(self, *args: Any, **kwds: Any) -> RetrivalEncoderOutputs:
         return self.forward(*args, **kwds)
@@ -1225,11 +1240,27 @@ class RetrivalEncoder:
         assume all references are accessible to all queries.
         """
 
-        def to_long_tensor(data):
+        def to_long_tensor(data) -> LongTensor:
             return cast(
                 LongTensor,
                 torch.tensor(data, dtype=torch.long).to(device),
             )
+
+        def get_query(i: int) -> LongTensor:
+            l = q_lens[i]
+            x = input_ids[i, :l]
+            if self.scratch_padding and l < self.scratch_padding:
+                space = self.scratch_padding - l
+                left_fill = space // 2
+                right_fill = space - left_fill
+                x = torch.cat(
+                    [
+                        to_long_tensor([PAD_id] * left_fill),
+                        x,
+                        to_long_tensor([PAD_id] * right_fill),
+                    ]
+                )
+            return cast(LongTensor, x)
 
         if references is None:
             references = []
@@ -1247,7 +1278,7 @@ class RetrivalEncoder:
 
         if self.attention_mode.value == AttentionMode.bidirectional.value:
             # use bidirectional implementation
-            queries = [cast(LongTensor, input_ids[i, :l]) for i, l in enumerate(q_lens)]
+            queries = [get_query(i) for i in range(n_queries)]
             refs = [
                 [to_long_tensor(references[rid]) for rid in rids]
                 for rids in query_ref_list
