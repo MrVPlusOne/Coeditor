@@ -74,9 +74,10 @@ class _ProcessingResult:
 def _process_commits(
     root: Path,
     workdir: Path,
-    commits: Sequence[CommitInfo],
     is_training: bool,
+    max_history_per_repo: int,
     change_processor: ProjectChangeProcessor[C3Problem],
+    cache: PickleCache,
     time_limit_per_commit: float = 10.0,
 ) -> _ProcessingResult:
     # use process-specific parso cache
@@ -84,15 +85,23 @@ def _process_commits(
     scoped_changes._tlogger.clear()
     change_processor.clear_stats()
     change_processor.set_training(is_training)
+    key = f"{root.name}({max_history_per_repo}, {is_training=})"
+    commits = []
+    if not cache.contains(key):
+        # keep the oldest commits
+        commits = get_commit_history(root)[-max_history_per_repo:]
     try:
-        # cannot return here since subprocess will be killed after returning
-        edits = edits_from_commit_history(
-            root,
-            commits,
-            tempdir=workdir / "code" / root.name,
-            change_processor=change_processor,
-            silent=True,
-            time_limit=time_limit_per_commit * (len(commits) + 10),
+        # cannot return here since subprocess maybe be killed after returning
+        edits = cache.cached(
+            key,
+            lambda: edits_from_commit_history(
+                root,
+                commits,
+                tempdir=workdir / "code" / root.name,
+                change_processor=change_processor,
+                silent=True,
+                time_limit=time_limit_per_commit * (len(commits) + 10),
+            ),
         )
     except Exception as e:
         if isinstance(e, KeyboardInterrupt):
@@ -107,6 +116,7 @@ def _process_commits(
 
 
 def dataset_from_projects(
+    cache: PickleCache,
     project_roots: Sequence[Path],
     change_processor: ProjectChangeProcessor[TProb],
     repo_training: Sequence[bool],
@@ -123,45 +133,28 @@ def dataset_from_projects(
     # get the process id
     pid = os.getpid()
     workdir = Path(tempfile.gettempdir()) / "dataset_from_projects" / f"pid-{pid}"
-    histories = pmap(
-        get_commit_history,
-        project_roots,
-        max_workers=workers,
-        desc="Getting commit histories",
-        tqdm_args={"unit": "repo"},
-    )
-    # keep the oldest portion of the history
-    histories = [commits[-max_history_per_repo:] for commits in histories]
-    # break long commit sequences into chunks for parallelization
-    roots = list[Path]()
-    chunk_training = list[bool]()
-    chunked_histories = list[list[CommitInfo]]()
-    for root, h, train in zip(project_roots, histories, repo_training):
-        history_chunk_size = max(50, math.ceil(len(h) / 10))
-        for i in range(0, len(h), history_chunk_size):
-            roots.append(root)
-            chunk_training.append(train)
-            # note that we need 1 extra overlapping commit to get all diffs
-            chunked_histories.append(h[i : i + history_chunk_size + 1])
-    workdirs = [workdir / f"chunk-{i}" for i in range(len(roots))]
+
+    roots = project_roots
+    workdirs = [workdir / f"repo-{i}" for i in range(len(roots))]
     try:
         presults = pmap(
             _process_commits,
             roots,
             workdirs,
-            chunked_histories,
-            chunk_training,
+            repo_training,
             key_args={
+                "max_history_per_repo": max_history_per_repo,
                 "change_processor": change_processor,
                 "time_limit_per_commit": time_limit_per_commit,
+                "cache": cache,
             },
             max_workers=workers,
-            tqdm_args={"unit": "chunk"},
+            tqdm_args={"unit": "repo"},
         )
     finally:
         if workdir.exists():
+            print("Removing workdir:", workdir)
             shutil.rmtree(workdir)
-            print("Workdir removed:", workdir)
 
     project2edits = dict[Path, list[TProb]]()
 
@@ -194,7 +187,8 @@ def dataset_from_projects(
     return project2edits
 
 
-def datasets_from_repos(
+def datasets_from_repo_splits(
+    cache: PickleCache,
     repos_root: Path,
     change_processor: ProjectChangeProcessor[TProb],
     splits: Sequence[str] = ("test", "valid", "train"),
@@ -216,6 +210,7 @@ def datasets_from_repos(
             warnings.warn(f"No projects found in {split} split")
 
     dataset = dataset_from_projects(
+        cache,
         join_list(projects.values()),
         change_processor=change_processor,
         repo_training=join_list(split_is_training.values()),
@@ -242,25 +237,24 @@ def make_or_load_dataset(
 ) -> C3ProblemDataset[TProb]:
     prob_config = repr_modified_args(change_processor)
     processed_dir = get_dataset_dir(dataset_name) / "processed"
-    cache = PickleCache(processed_dir)
-    results = dict[str, Sequence[TProb]]()
-    for split in splits:
-        with timed_action(f"Making or loading: {split}"):
-            file_name = f"{split}-{prob_config}.pkl"
-            problems = cache.cached(
-                file_name,
-                lambda: datasets_from_repos(
-                    get_dataset_dir(dataset_name) / "repos",
-                    change_processor,
-                    workers=workers,
-                    splits=[split],
-                    time_limit_per_commit=time_limit_per_commit,
-                ),
-                remake=remake_problems,
-            )
-            results[split] = problems[split]
-        size_mb = (processed_dir / file_name).stat().st_size / (1024**2)
-        print(f"Split total size: {size_mb:.2f} MB")
+    cache_dir = processed_dir / prob_config
+    cache = PickleCache(cache_dir)
+    if remake_problems:
+        cache.clear()
+    results = datasets_from_repo_splits(
+        cache,
+        get_dataset_dir(dataset_name) / "repos",
+        change_processor,
+        workers=workers,
+        splits=splits,
+        time_limit_per_commit=time_limit_per_commit,
+    )
+    size_mb = 0.0
+    n = 0
+    for f in cache_dir.iterdir():
+        n += 1
+        size_mb += f.stat().st_size / (1024**2)
+    print(f"Dataset total size ({n=}): {size_mb:.2f} MB")
 
     return C3ProblemDataset(
         train=results.get("train", []),

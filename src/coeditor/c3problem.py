@@ -25,6 +25,7 @@ from .encoding import (
     TokenizedEdit,
     TruncateAt,
     break_into_chunks,
+    change_tks_to_original_delta,
     change_to_line_diffs,
     change_to_tokens,
     decode_tokens,
@@ -307,6 +308,19 @@ class JediUsageAnalyzer:
 
 
 @dataclass
+class _C3PreAnalysis:
+    """
+    - `training_samples`: The set of spans that should be used as training examples.
+    This might include some unchanged spans if `sample_unmodified_ratio > 0`.
+    - `usage_analysis`: Map each module to its line usage analysis. Only lines
+    that will be used later are analyzed.
+    """
+
+    training_samples: Set[tuple[ModuleName, LineRange]]
+    usage_analysis: Mapping[ModuleName, LineUsageAnalysis]
+
+
+@dataclass
 class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     """
     Generate `C3Problem`s from git histories.
@@ -345,24 +359,12 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     def use_unchanged(self) -> bool:
         return self.neg_to_pos_ratio > 0
 
-    @dataclass
-    class PreAnalysis:
-        """
-        - `training_samples`: The set of spans that should be used as training examples.
-        This might include some unchanged spans if `sample_unmodified_ratio > 0`.
-        - `usage_analysis`: Map each module to its line usage analysis. Only lines
-        that will be used later are analyzed.
-        """
-
-        training_samples: Set[tuple[ModuleName, LineRange]]
-        usage_analysis: Mapping[ModuleName, LineUsageAnalysis]
-
     def pre_edit_analysis(
         self,
         pstate: ProjectState,
         modules: Mapping[RelPath, JModule],
         changes: Mapping[ModuleName, JModuleChange],
-    ) -> PreAnalysis:
+    ) -> _C3PreAnalysis:
         # first, sample the set of unmodified spans
         selected_set = set[tuple[ModuleName, LineRange]]()
         negative_set = set[tuple[ModuleName, LineRange]]()
@@ -408,7 +410,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 script, lines_to_analyze, silent=True
             )
             usages[mname] = line_usages
-        return self.PreAnalysis(
+        return _C3PreAnalysis(
             training_samples=selected_set,
             usage_analysis=usages,
         )
@@ -442,7 +444,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     def process_change(
         self,
         pchange: JProjectChange,
-        pre_analysis: PreAnalysis,
+        pre_analysis: _C3PreAnalysis,
         module_order: Sequence[ModuleName],
     ) -> Sequence[C3Problem]:
         """
@@ -467,13 +469,12 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                 usages = LineUsageAnalysis({})
                 warnings.warn("Unexpected: usages missing for module: " + str(m))
             for span in mchange.changed:
-                code_span = cache.to_code_span(span)
                 if (m, span.line_range) in pre_analysis.training_samples:
+                    code_span = cache.to_code_span(span)
                     # latest changes are more relevant
                     relevant_unchanged = cache.get_relevant_unchanged(code_span, usages)
-                    relevant_changes = list(reversed(prev_cspans))
                     relevant_changes = cache.sort_changes(
-                        code_span, relevant_unchanged, relevant_changes
+                        code_span, relevant_unchanged, reversed(prev_cspans)
                     )
 
                     n_lines = span.line_range[1] - span.line_range[0]
@@ -486,8 +487,11 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
                         src_info=src_info,
                     )
                     problems.append(prob)
-                if code_span.delta:
-                    prev_cspans.append(code_span)
+                    if code_span.delta:
+                        prev_cspans.append(code_span)
+                else:
+                    if span.change.changed:
+                        prev_cspans.append(cache.to_code_span(span))
         return problems
 
 
@@ -601,7 +605,7 @@ class C3GeneratorCache:
         self,
         target: ChangedCodeSpan,
         used_defs: Mapping[PyFullName, PyDefinition],
-        changed: Sequence[ChangedCodeSpan],
+        changed: Iterable[ChangedCodeSpan],
     ) -> Sequence[ChangedCodeSpan]:
         def distance_penalty(cspan: ChangedCodeSpan) -> int:
             if cspan.module != target.module:
@@ -644,13 +648,12 @@ class C3GeneratorCache:
         key = (mod, span.line_range)
         if (cs := self._cspan_cache.get(key)) is not None:
             return cs
-        original, delta = line_diffs_to_original_delta(
-            change_to_line_diffs(span.change)
-        )
+
+        original, delta = change_tks_to_original_delta(change_to_tokens(span.change))
         result = ChangedCodeSpan(
             headers=[self.to_header(cs) for cs in span.parent_scopes],
-            original=TkArray.new(encode_lines_join(original)),
-            delta=delta.to_tk_delta(),
+            original=TkArray.new(original),
+            delta=delta,
             line_range=span.line_range,
             module=span.module,
         )

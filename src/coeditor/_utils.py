@@ -529,6 +529,10 @@ class PickleCache:
             with path.open("rb") as f:
                 return pickle.load(f)
 
+    def contains(self, rel_path: Path | str) -> bool:
+        path = self.cache_dir / rel_path
+        return path.exists()
+
     def set(self, rel_path: Path | str, value: Any):
         path = self.cache_dir / rel_path
         with path.open("wb") as f:

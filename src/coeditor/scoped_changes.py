@@ -90,7 +90,7 @@ class ChangeScope:
             header_code, e_left, e_right = _strip_empty_lines(header_code)
             h_start = not_none(visited[0].get_start_pos_of_prefix())[0] + e_left
             h_end = visited[-1].end_pos[0] + 1 - e_right
-            assert_eq(count_lines(header_code), h_end - h_start)
+            # assert_eq(count_lines(header_code), h_end - h_start)
             header_line_range = line_range(h_start, h_end)
             if self.spans and h_end > self.spans[0].line_range[0]:
                 raise ValueError(

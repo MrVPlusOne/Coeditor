@@ -18,7 +18,7 @@ class CommitInfo:
 
 def get_commit_history(
     project_dir: Path,
-    max_hisotry: int | None = None,
+    max_history: int | None = None,
     commit_id: str = "HEAD",
 ) -> list[CommitInfo]:
     """Get the commit history of the project, start from the given `commit_id`,
@@ -31,7 +31,7 @@ def get_commit_history(
         cwd=project_dir,
     ).strip()
     history = []
-    for _ in range(max_hisotry if max_hisotry else 100000):
+    for _ in range(max_history if max_history else 100000):
         lines = run_command(
             ["git", "cat-file", "-p", commit_id],
             cwd=project_dir,
