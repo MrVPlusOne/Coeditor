@@ -291,6 +291,9 @@ class TkDelta:
                 sum += len(act)
         return sum
 
+    def change_size_in_lines(self) -> int:
+        return sum(len(acts) for acts in self._deltas.values())
+
     def items(self) -> Iterable[tuple[DeltaKey, TokenSeq]]:
         for l, acts in self._deltas.items():
             for i, act in enumerate(acts):

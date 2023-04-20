@@ -1,5 +1,10 @@
+"""This script compares the performance of Coeditor against code completion models
+on FIM problems extracted from code changes."""
+
 import os
 import shutil
+
+import torch
 
 from coeditor.c3problem import (
     C3ProblemGenerator,
@@ -22,14 +27,17 @@ from coeditor.model import RetrievalEditorModel
 os.chdir(proj_root())
 
 dataset_name = "perm2k"
-device = f"cuda"
+device = "cuda"
 N_test = 1000
-addition_only = True
+use_additions = True
+use_modifications = False
 
 # first, load the test data, in FIM format
 fim_probs = make_or_load_dataset(
     dataset_name,
-    C3CompletionGenerator(addition_only=addition_only),
+    C3CompletionGenerator(
+        use_additions=use_additions, use_modifications=use_modifications
+    ),
     splits=("test",),
     time_limit_per_commit=20,
 )["test"]
@@ -42,16 +50,13 @@ c3_probs = make_or_load_dataset(
     splits=("test",),
     time_limit_per_commit=40,
 )["test"]
-transform = C3ToCodeCompletion(addition_only=addition_only)
+transform = C3ToCodeCompletion(
+    use_additions=use_additions, use_modifications=use_modifications
+)
 c3_probs = join_list(transform.transform(p) for p in c3_probs)
 print(f"{len(c3_probs) = }")
 
 # down-sample problems
-if len(fim_probs) != len(c3_probs):
-    warnings.warn(
-        f"FIM and C3 datasets have different sizes: {len(fim_probs)=}, {len(c3_probs)=}"
-        "This may be caused by the various timeouts in the data processing pipeline."
-    )
 fim_probs = random_subset(fim_probs, N_test, rng=42)
 c3_probs = random_subset(c3_probs, N_test, rng=42)
 
@@ -62,7 +67,7 @@ if sample_dir.exists():
 
 accuracies = dict[str, float]()
 
-# Now evaluate the performance of Coeditor
+# %% Evaluate the performance of Coeditor
 coeditor = RetrievalEditorModel.load("MrVPlusOne/coeditor-perm2k-base-v1.7.3")
 coeditor.half()
 coeditor.to("cuda")
@@ -88,17 +93,22 @@ print(f"Coeditor-base accuracy: {acc:.2%}")
 accuracies["Coeditor-base"] = acc
 coeditor.to("cpu")
 
-# Now evaluate the performance of FIM models
+# %% Evaluate the performance of FIM models
 santa_coder = SantaCoderWrapper.from_pretrained()
 incoder = InCoderWrapper.from_pretrained("facebook/incoder-1B", half_precision=True)
-codet5 = CodeT5Wrapper.from_pretrained("Salesforce/codet5-large")
-codet5.model.half()
+incoder6B = InCoderWrapper.from_pretrained("facebook/incoder-6B", half_precision=True)
+
+# CodeT5 is trained on very short spans, which makes it unsuitable for this
+# task without fine-tuning.
+# codet5 = CodeT5Wrapper.from_pretrained("Salesforce/codet5-large")
+# codet5.model.half()
 
 
 fim_models: dict[str, FIMModel] = {
     "SantaCoder": santa_coder,
     "InCoder-1B": incoder,
-    "CodeT5-large": codet5,
+    "InCoder-6B": incoder6B,
+    # "CodeT5-large": codet5,
 }
 for name, model in fim_models.items():
     with timed_action(f"Evaluating {name}"):
@@ -110,7 +120,8 @@ for name, model in fim_models.items():
         ):
             left_ctx = "\n".join(prob.left_ctx) + "\n"
             right_ctx = "\n" + "\n".join(prob.right_ctx)
-            pred = model.infill(left_ctx, right_ctx, max_length=128)
+            with torch.no_grad():
+                pred = model.infill(left_ctx, right_ctx, max_length=128)
             if pred:
                 pred = pred.split("\n")[0]  # only keep the first predicted line
             left_part = prob.left_ctx[-1] + "\n" if prob.left_ctx else ""
@@ -122,7 +133,11 @@ for name, model in fim_models.items():
             if i in sample_ids:
                 ex_dir = sample_dir / f"ex{i}"
                 ex_dir.mkdir(parents=True, exist_ok=True)
-                pred_str = f"prediction:\n{pred}\n{SEP}\nlabel:\n{prob.middle}\n{SEP}\nleft context:\n{left_ctx}\n{SEP}\nright context:\n{right_ctx}"
+                pred_str = (
+                    f"prediction:\n{pred}\n{SEP}\nlabel:\n{prob.middle}\n"
+                    f"{SEP}\nleft context:\n{left_ctx}\n{SEP}\n"
+                    f"right context:\n{right_ctx}"
+                )
                 (ex_dir / f"{name}.txt").write_text(pred_str)
 
         accuracies[name] = acc = sum(results) / len(results)
@@ -132,6 +147,6 @@ for name, model in fim_models.items():
 
 
 print(SEP)
-print("Summary:")
+print(f"Summary ({use_additions=}, {use_modifications=}):")
 for name, acc in accuracies.items():
     print(f"{name} accuracy: {acc:.2%}")

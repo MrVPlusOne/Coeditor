@@ -2,14 +2,12 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from coeditor.c3problem import (
-    C3Problem,
     C3ProblemGenerator,
     C3ToCodeCompletion,
-    JediUsageAnalyzer,
     SrcInfo,
     TkC3Problem,
 )
-from coeditor.change import Change, Modified
+from coeditor.change import Change
 from coeditor.common import *
 from coeditor.encoding import (
     Add_id,
@@ -23,10 +21,7 @@ from coeditor.encoding import (
     change_tks_to_original_delta,
     change_to_tokens,
     decode_tokens,
-    encode_lines_join,
-    encode_single_line,
     get_extra_id,
-    inline_output_tokens,
     output_ids_as_seqs,
     tk_splitlines,
     truncate_sections,
@@ -88,18 +83,22 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
     for code completion models since they don't see any code that get deleted.
 
     ## Change log
-    - version 1.2: Add `addition-only` option.
     - version 1.1: Limit context str length to `10 * max_ctx_tks`.
     """
 
     VERSION = "1.1"
     max_ctx_tks: int = 2048
     min_target_size: int = C3ToCodeCompletion.min_target_size
-    addition_only: bool = C3ToCodeCompletion.addition_only
+    use_additions: bool = C3ToCodeCompletion.use_additions
+    use_modifications: bool = C3ToCodeCompletion.use_modifications
     generator: C3ProblemGenerator = field(default_factory=C3ProblemGenerator)
 
     def __post_init__(self):
-        self._sampler = C3ToCodeCompletion(self.min_target_size, self.addition_only)
+        self._sampler = C3ToCodeCompletion(
+            self.min_target_size,
+            use_additions=self.use_additions,
+            use_modifications=self.use_modifications,
+        )
 
     def use_unchanged(self) -> bool:
         return True
@@ -111,14 +110,14 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
         self,
         pchange: JProjectChange,
         pre_analysis: None,
-        module_order: Sequence[ModuleName],
+        post_analysis: Sequence[ModuleName],
     ) -> Sequence[FIMProblem]:
         probs = list[FIMProblem]()
         src_info: SrcInfo = {
             "project": pchange.project_name,
             "commit": pchange.commit_info,
         }
-        for m in module_order:
+        for m in post_analysis:
             if (mchange := pchange.changed.get(m)) is None:
                 continue
             all_spans = list(mchange.changed)

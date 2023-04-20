@@ -129,7 +129,7 @@ def train_model(
                 if sum(c.change_size() for c in x.relevant_changes)
                 < s_tkn.max_ref_tks_sum
             ]
-            n_probs = max(1, len(s_probs) // max(scales)) * scale
+            n_probs = max(1, scale * len(s_probs) // max(scales))
             s_probs = random_subset(s_probs, n_probs)
             desc = f"training (ctx={s_tkn.max_ref_tks_sum})"
             s_loader = C3DataLoader(
@@ -143,6 +143,7 @@ def train_model(
 
             with timed_action(desc):
                 model.train_on_data(model_name, s_loader, valid_loader, train_args)
+
     elif not eval_only:
         desc = f"training (ctx={train_tkn.max_ref_tks_sum})"
         s_probs = [

@@ -806,12 +806,18 @@ class C3ToCodeCompletion(C3ProblemTransform):
     old version, and treating the new version as the desired output.
 
     ### Change log
+    - v1.2: add `use_modifications`. change `addition_only` to `use_additions`.
     - v1.1: add `addition_only`.
     """
 
-    VERSION = "1.1"
+    VERSION = "1.2"
     min_target_size: int = 6
-    addition_only: bool = False
+    use_additions: bool = True
+    use_modifications: bool = True
+
+    def __post_init__(self):
+        if not (self.use_additions or self.use_modifications):
+            warnings.warn("Both use_additions and use_modifications are False.")
 
     def extract_completion(
         self, original: TokenSeq, delta: TkDelta
@@ -829,7 +835,10 @@ class C3ToCodeCompletion(C3ProblemTransform):
         good = (
             len(acts) <= 2
             and acts[0][0] == Add_id
-            and not (self.addition_only and acts[-1][0] == Del_id)
+            and (
+                (self.use_additions and acts[-1][0] == Add_id)
+                or (self.use_modifications and acts[-1][0] == Del_id)
+            )
             and len(acts[0]) >= self.min_target_size
         )
         if not good:

@@ -166,8 +166,9 @@ def dataset_from_projects(
 
         if "tlogger" in stats:
             df = TimeLogger.times_to_dataframe(stats.pop("tlogger"))
-            print("Time stats:")
-            display(df)
+            if df:
+                print("Time stats:")
+                display(df)
         if "analyzer_errors" in list(stats.keys()):
             errors: dict = stats.pop("analyzer_errors")
             for k in list(errors.keys()):

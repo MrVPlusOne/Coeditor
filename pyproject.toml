@@ -39,3 +39,14 @@ ipykernel = "^6.22.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+
+[tool.pylint]
+disable = "invalid-name, wildcard-import, unused-wildcard-import, unused-import"
+
+
+[tool.pylint.'MESSAGES CONTROL']
+# Torch has generated members that confuse pylint.
+# Disabling these messages for torch
+generated-members="torch.*"
+max-locals=100
