@@ -633,13 +633,15 @@ def pretty_print_dict(
         if isinstance(v, float):
             print(f"{k}: {show_float(v)}")
         elif isinstance(v, dict) or isinstance(v, list):
-            if isinstance(v, dict) and all(isinstance(x, float) for x in v.values()):
+            if isinstance(v, dict) and all(
+                isinstance(x, (float, int)) for x in v.values()
+            ):
                 dict_s = (
                     "{" + ", ".join(f"{k}: {show_float(v)}" for k, v in v.items()) + "}"
                 )
                 print(f"{k}: {dict_s}")
             elif level >= max_show_level:
-                print(f"{k}: ...")
+                print(f"{k}: {v}")
             else:
                 print(f"{k}:")
                 if isinstance(v, list):

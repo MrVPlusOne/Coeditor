@@ -42,7 +42,7 @@ build-backend = "poetry.core.masonry.api"
 
 
 [tool.pylint]
-disable = "invalid-name, wildcard-import, unused-wildcard-import, unused-import"
+disable = "invalid-name, wildcard-import, unused-wildcard-import, unused-import, redefined-outer-name"
 
 
 [tool.pylint.'MESSAGES CONTROL']

@@ -799,6 +799,9 @@ class C3ProblemChangeInlining(C3ProblemTransform):
         return probs[: self.max_split_factor]
 
 
+CompletionKind = Literal["add", "mod"]
+
+
 @dataclass
 class C3ToCodeCompletion(C3ProblemTransform):
     """Convert the C3 problem into an edit-oriented code completion problem by
@@ -821,7 +824,7 @@ class C3ToCodeCompletion(C3ProblemTransform):
 
     def extract_completion(
         self, original: TokenSeq, delta: TkDelta
-    ) -> tuple[TokenSeq, TkDelta] | None:
+    ) -> tuple[TokenSeq, TkDelta, CompletionKind] | None:
         """
         Try to extract a code completion instance from the given change, return None if
         not suitable. This works by taking the last addition from the changes as the
@@ -844,6 +847,7 @@ class C3ToCodeCompletion(C3ProblemTransform):
         if not good:
             return None
 
+        kind = "add" if acts[-1][0] == Add_id else "mod"
         prev_changes = [k for k in delta.keys() if k < target[0]]
         if acts[-1][0] == Del_id:
             # if the last change is a deletion, move it into prev_changesine into before_changes
@@ -856,7 +860,7 @@ class C3ToCodeCompletion(C3ProblemTransform):
         new_delta_keys = tuple(rest_delta.keys())[: len(target)]
         new_delta = rest_delta.for_keys(new_delta_keys)
         assert new_delta, "the remaining delta should not be empty"
-        return new_original, new_delta
+        return new_original, new_delta, kind
 
     def transform(self, prob: C3Problem) -> Sequence[C3Problem]:
         original = prob.span.original.tolist()
@@ -865,9 +869,9 @@ class C3ToCodeCompletion(C3ProblemTransform):
         sampled = self.extract_completion(original, delta)
         if sampled is None:
             return []
-        original, delta = sampled
+        original, delta, kind = sampled
         new_span = replace(prob.span, original=TkArray.new(original), delta=delta)
-        new_trans = prob.transformations + ("code_completion",)
+        new_trans = prob.transformations + ("code_completion", kind)
         new_lines = tuple(set(k[0] for k in delta.keys()))
         new_prob = replace(
             prob,

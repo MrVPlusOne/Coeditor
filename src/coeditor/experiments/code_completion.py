@@ -4,6 +4,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from coeditor.c3problem import (
     C3ProblemGenerator,
     C3ToCodeCompletion,
+    CompletionKind,
     SrcInfo,
     TkC3Problem,
 )
@@ -45,6 +46,7 @@ class FIMProblem:
     middle: str
     src_info: SrcInfo
     max_ctx_tks: int
+    kind: CompletionKind
 
     def get_contexts(
         self,
@@ -138,7 +140,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 sampled = self._sampler.extract_completion(origin, delta)
                 if sampled is None:
                     continue
-                new_origin, new_delta = sampled
+                new_origin, new_delta, kind = sampled
                 left, middle, right = self._split_change(new_origin, new_delta)
                 above_spans = [left] if left else []
                 # add previous spans until total size exceeds max_ctx_tks
@@ -159,7 +161,12 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                     below_spans.append(span)
                 probs.append(
                     FIMProblem(
-                        above_spans, below_spans, middle, src_info, self.max_ctx_tks
+                        above_spans,
+                        below_spans,
+                        middle,
+                        src_info,
+                        self.max_ctx_tks,
+                        kind,
                     )
                 )
         return probs

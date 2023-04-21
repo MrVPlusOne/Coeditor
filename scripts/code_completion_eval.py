@@ -5,11 +5,13 @@ import os
 import shutil
 
 import torch
+from numpy import mean
 
 from coeditor.c3problem import (
     C3ProblemGenerator,
     C3ProblemTokenizer,
     C3ToCodeCompletion,
+    CompletionKind,
 )
 from coeditor.common import *
 from coeditor.dataset import make_or_load_dataset
@@ -28,9 +30,9 @@ os.chdir(proj_root())
 
 dataset_name = "perm2k"
 device = "cuda"
-N_test = 1000
+N_test = 5000
 use_additions = True
-use_modifications = False
+use_modifications = True
 
 # first, load the test data, in FIM format
 fim_probs = make_or_load_dataset(
@@ -40,6 +42,7 @@ fim_probs = make_or_load_dataset(
     ),
     splits=("test",),
     time_limit_per_commit=20,
+    remake_problems=False,
 )["test"]
 print(f"{len(fim_probs) = }")
 
@@ -65,14 +68,27 @@ sample_dir = proj_root() / "output" / "code_completion_eval"
 if sample_dir.exists():
     shutil.rmtree(sample_dir)
 
-accuracies = dict[str, float]()
+ModelName = str
+accuracies = dict[ModelName, dict[str, float]]()
+
+
+def get_accs(results: dict[CompletionKind, list[bool]]) -> dict[str, float]:
+    """Get the accuracy of the model on additions, modifications, and all problems."""
+    return {
+        "add": float(mean(results["add"])),
+        "mod": float(mean(results["mod"])),
+        "all": float(mean(results["add"] + results["mod"])),
+    }
+
 
 # %% Evaluate the performance of Coeditor
 coeditor = RetrievalEditorModel.load("MrVPlusOne/coeditor-perm2k-base-v1.7.3")
 coeditor.half()
 coeditor.to("cuda")
 tknizer = C3ProblemTokenizer.for_eval()
-results = list[bool]()
+coeditor_results: dict[CompletionKind, list[bool]] = {"add": [], "mod": []}
+add_results = list[bool]()
+replace_results = list[bool]()
 for i, prob in tqdm(list(enumerate(c3_probs)), smoothing=0, desc="Evaluating Coeditor"):
     tk_prob = tknizer.tokenize_problem(prob)
     output = infill_with_coeditor(coeditor, tk_prob)
@@ -81,16 +97,21 @@ for i, prob in tqdm(list(enumerate(c3_probs)), smoothing=0, desc="Evaluating Coe
         inline_output_tokens(tk_prob.main_tks, tk_prob.output_tks)
     ).after
     correct = code_equal(pred_code, label_code)
-    results.append(correct)
+    if "add" in prob.transformations:
+        kind = "add"
+    else:
+        assert "mod" in prob.transformations
+        kind = "mod"
+    coeditor_results[kind].append(correct)
 
     if i in sample_ids:
         ex_dir = sample_dir / f"ex{i}"
         ex_dir.mkdir(parents=True, exist_ok=True)
         (ex_dir / "Coeditor-base.txt").write_text(tk_prob.show(output))
 
-acc = sum(results) / len(results)
-print(f"Coeditor-base accuracy: {acc:.2%}")
-accuracies["Coeditor-base"] = acc
+accuracies["Coeditor-base"] = get_accs(coeditor_results)
+print("Coeditor-base accuracy:")
+pretty_print_dict(accuracies["Coeditor-base"])
 coeditor.to("cpu")
 
 # %% Evaluate the performance of FIM models
@@ -111,10 +132,10 @@ fim_models: dict[str, FIMModel] = {
     # "CodeT5-large": codet5,
 }
 for name, model in fim_models.items():
-    with timed_action(f"Evaluating {name}"):
+    with run_long_task(f"Evaluating {name}"):
         model.model.to(device)
 
-        results = list[bool]()
+        results: dict[CompletionKind, list[bool]] = {"add": [], "mod": []}
         for i, prob in tqdm(
             list(enumerate(fim_probs)), smoothing=0, desc=f"Evaluating {name}"
         ):
@@ -129,7 +150,7 @@ for name, model in fim_models.items():
             pred_code = left_part + pred + right_part
             label_code = left_part + prob.middle + right_part
             correct = code_equal(pred_code, label_code)
-            results.append(correct)
+            results[prob.kind].append(correct)
             if i in sample_ids:
                 ex_dir = sample_dir / f"ex{i}"
                 ex_dir.mkdir(parents=True, exist_ok=True)
@@ -140,13 +161,15 @@ for name, model in fim_models.items():
                 )
                 (ex_dir / f"{name}.txt").write_text(pred_str)
 
-        accuracies[name] = acc = sum(results) / len(results)
-        print(f"{name} accuracy: {acc:.2%}")
-
+        accuracies[name] = acc = get_accs(results)
+        print(f"{name} accuracy:")
+        pretty_print_dict(acc)
         model.model.to("cpu")
 
 
 print(SEP)
 print(f"Summary ({use_additions=}, {use_modifications=}):")
-for name, acc in accuracies.items():
-    print(f"{name} accuracy: {acc:.2%}")
+for model, acc in accuracies.items():
+    print("Model: " + model)
+    for group, acc in acc.items():
+        print(f"\t{group}: {acc:.2%}")
