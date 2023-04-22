@@ -275,10 +275,10 @@ class TkDelta:
 
     _deltas: Mapping[int, tuple[TokenSeq, ...]]
 
-    def changed_lines(self) -> Collection[int]:
+    def changed_lines(self) -> Sequence[int]:
         lines = self._deltas.keys()
         assert all(x for x in self._deltas.values())
-        return lines
+        return tuple(lines)
 
     def keys(self) -> Iterable[DeltaKey]:
         for k, _ in self.items():

@@ -885,26 +885,30 @@ class EditCostModel(ABC):
     def get_edit_gain(
         self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
     ) -> int:
-        ...
+        "Return the cost of the edit."
 
 
 class LineBasedCostModel(EditCostModel):
+    """Simply returns the number of lines changed.
+
+    Each line modification is counted as two lines."""
+
     name = "diff-lines"
 
     def get_edit_gain(
         self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
     ) -> int:
-        "Simply returns the number of lines changed."
-        return delta.change_size()
+        return delta.change_size_in_lines()
 
 
 class LevenshteinCostModel(EditCostModel):
+    "Measures the size of the change using Levenshtein distance."
+
     name = "levenshtein"
 
     def get_edit_gain(
         self, original: TokenSeq, delta: TkDelta, print_steps: bool = False
     ) -> int:
-        "Measures the size of the change using Levenshtein distance."
         if not delta:
             return 0
         edit_lines = list(k[0] for k in delta.keys())
@@ -918,6 +922,8 @@ class LevenshteinCostModel(EditCostModel):
 
 @dataclass
 class KeystrokeCostModel(EditCostModel):
+    "Measure the editing cost using approximated required keystrokes."
+
     cursor_jump_cost: int = 4  # the cost of jumping the cursor to a new location
     delete_line_cost: int = 2  # the cost of deleting a line
 
@@ -991,8 +997,13 @@ class KeystrokeCostModel(EditCostModel):
         return total
 
 
+MultiRoundStrategy = Literal["pick_first", "most_uncertain", "least_effort"]
+
+
 @dataclass
 class MultiRoundEvaluator:
+    """Evaluate model performance in a multi-round setting."""
+
     model: RetrievalEditorModel
     tokenizer: C3ProblemTokenizer
     dec_args: DecodingArgs
@@ -1001,8 +1012,8 @@ class MultiRoundEvaluator:
         LineBasedCostModel(),
         LevenshteinCostModel(),
     )
-    strategy: Literal["most_uncertain", "least_effort"] = "most_uncertain"
-    max_rounds: int = 8
+    strategy: MultiRoundStrategy = "most_uncertain"
+    max_rounds: int = 6
 
     @torch.no_grad()
     def multi_round_edit_gain(
@@ -1015,7 +1026,6 @@ class MultiRoundEvaluator:
         (since it's unclear how to define normalization for partial edits)."""
 
         cost_models = self.cost_models
-        main_cost_model = cost_models[0]
         problem = problem.restrict_span_changes()
         span = problem.span
         gold_change = span.get_change()
@@ -1047,6 +1057,7 @@ class MultiRoundEvaluator:
                 print("pred change:")
                 print(pred_str)
 
+            # compute which changes matches the ground truth
             accept_keys = list[DeltaKey]()
             for group in pred_delta.change_groups():
                 expected = [span.delta.get(k) for k in group]
@@ -1054,6 +1065,7 @@ class MultiRoundEvaluator:
                 if expected == actual:
                     accept_keys.extend(group)
             if accept_keys:
+                # accept partial changes and rerun the model
                 accept_delta, rest_delta = span.delta.decompose_for_change(accept_keys)
                 if print_steps:
                     cprint("green", "Accepted changes:")
@@ -1064,6 +1076,7 @@ class MultiRoundEvaluator:
                         for cm in cost_models
                     }
             else:
+                delta_keys: Sequence[DeltaKey]
                 if self.strategy == "most_uncertain":
                     delta_keys = self._get_most_uncertain_edit(
                         batch,
@@ -1071,7 +1084,10 @@ class MultiRoundEvaluator:
                         problem.edit_line_ids,
                         print_steps=print_steps,
                     )
+                elif self.strategy == "pick_first":
+                    delta_keys = span.delta.change_groups()[0]
                 else:
+                    main_cost_model = cost_models[0]
                     assert_eq(self.strategy, "least_effort")
                     delta_keys = self._get_least_effort_edit(
                         original, span.delta, main_cost_model, print_steps=print_steps
@@ -1093,7 +1109,7 @@ class MultiRoundEvaluator:
                 print(rest_delta)
             if not rest_delta or rounds == self.max_rounds:
                 break
-            first_line = next(iter(rest_delta._deltas))
+            first_line = rest_delta.changed_lines()[0]
             # shrink the edit range
             edit_line_ids = accept_delta.get_new_line_ids(problem.edit_line_ids)
             edit_line_ids = [l for l in edit_line_ids if l >= first_line]
