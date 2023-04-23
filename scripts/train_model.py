@@ -7,7 +7,11 @@ import warnings
 import wandb
 
 from coeditor._utils import cprint, run_long_task
-from coeditor.c3problem import C3ProblemChangeInlining, C3ToCodeCompletion
+from coeditor.c3problem import (
+    C3ProblemChangeInlining,
+    C3ProblemTokenizer,
+    C3ToCodeCompletion,
+)
 from coeditor.common import *
 from coeditor.dataset import (
     C3CombinedEncoder,
@@ -32,6 +36,7 @@ def train_model(
     batch_args=BatchArgs.train_default(),
     eval_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
+    fixed_ref_tks_sum: int | None = None,
     recreate_data: bool = False,
     resumed_from: Path | None = None,
     eval_only: bool = False,
@@ -108,6 +113,8 @@ def train_model(
     eval_tkn.max_query_tks = 1024
     eval_tkn.max_output_tks *= 2
     eval_tkn.max_ref_tks_sum *= 2
+    if fixed_ref_tks_sum is not None:
+        eval_tkn.max_ref_tks_sum = fixed_ref_tks_sum
 
     valid_loader = C3DataLoader(
         datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
@@ -127,6 +134,8 @@ def train_model(
             ]
             n_probs = max(1, len(s_probs) // max(scales) // 2) * scale
             s_probs = random_subset(s_probs, n_probs)
+            if fixed_ref_tks_sum is not None:
+                s_tkn.max_ref_tks_sum = fixed_ref_tks_sum
             desc = f"training (ctx={s_tkn.max_ref_tks_sum})"
             s_loader = C3DataLoader(
                 s_probs,
@@ -203,9 +212,9 @@ def eval_code_completion():
 
 def train_new_model():
     train_model(
-        model_name="coeditor-perm2k-c3-multi-v1.7.2",
+        model_name="coeditor-perm2k-c3-multi-2048-v1.7.2",
         dataset_name="perm2k",
-        description="Use fixed batch size.",
+        description="Ablation: Use only 2048 max reference tokens.",
         train_args=TrainingArgs(
             max_train_epochs=1,
         ),
@@ -213,6 +222,7 @@ def train_new_model():
             problem_tranform=C3ProblemChangeInlining(),
             # edit_tokenizer=C3ProblemTokenizer(disable_unchanged_refs=True),
         ),
+        fixed_ref_tks_sum=2048,
         recreate_data=False,
         quicktest=False,
     )

@@ -909,6 +909,7 @@ class C3ProblemTokenizer:
                 }
             for i, chunk in enumerate(self._group_encode_unchanged_refs(unchanged)):
                 all_refs.append((f"unchanged ref {i}", chunk))
+                ref_size_sum += len(chunk)
         else:
             truncated = True
 
@@ -916,7 +917,7 @@ class C3ProblemTokenizer:
             changed = self._group_encode_changed_refs(problem.relevant_changes)
             for i, chunk in enumerate(changed):
                 all_refs.append((f"changed ref {i}", chunk))
-            ref_size_sum += sum(len(x) for x in changed)
+                ref_size_sum += len(chunk)
         else:
             truncated = True
 
