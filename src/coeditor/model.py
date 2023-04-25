@@ -339,7 +339,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         dec_args: DecodingArgs,
         out_dir: Path,
         probs_to_save: int = 300,
-    ):
+    ) -> CountedSum:
         shutil.rmtree(out_dir, ignore_errors=True)
         (out_dir / "correct").mkdir(parents=True, exist_ok=True)
         (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
@@ -2012,7 +2012,7 @@ class BatchArgs:
     @classmethod
     def eval_default(cls) -> Self:
         return BatchArgs(
-            batch_size=2,
+            batch_size=1,
             shuffle_extra_ids=False,
         )
 
@@ -2050,6 +2050,8 @@ class _C3PostProcess:
 
 @dataclass
 class C3DataLoader:
+    """This used to implement dynamic batching, but now it's just fixed batch size."""
+
     all_probs: Sequence[C3Problem]
     transform: C3ProblemTransform | None
     tokenizer: C3ProblemTokenizer
@@ -2096,20 +2098,22 @@ class C3DataLoader:
             )
 
     def estimate_n_batches(self) -> int:
+        if self.transform is None:
+            return max(1, len(self.all_probs) // self.batch_args.batch_size)
+
         factor = 10
         n = max(1, len(self.all_probs) // factor)
         subset = random_subset(self.all_probs, n, rng=42)
         probs = list(subset)
-        if self.transform is not None:
-            # we can afford to store all transformed problems beforehand
-            probs = join_list(
-                pmap(
-                    self.transform.transform,
-                    probs,
-                    chunksize=self.chunk_size // 2,
-                    max_workers=self.workers,
-                )
+        # we can afford to store all transformed problems beforehand
+        probs = join_list(
+            pmap(
+                self.transform.transform,
+                probs,
+                chunksize=self.chunk_size // 2,
+                max_workers=self.workers,
             )
+        )
         # better to have a smaller estimate to avoid triggering data regeneration
         n_batches = max(1, len(probs) // self.batch_args.batch_size)
         est = max(1, int(len(self.all_probs) / n * n_batches * 0.99))
