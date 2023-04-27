@@ -202,6 +202,14 @@ class PyDefinition:
 class LineUsageAnalysis:
     line2usages: Mapping[int, Sequence[PyDefinition]]
 
+    def __repr__(self):
+        lines = (
+            ["LineUsageAnalysis("]
+            + [f"    {l}: {us}" for l, us in self.line2usages.items()]
+            + [")"]
+        )
+        return "\n".join(lines)
+
 
 @dataclass
 class JediUsageAnalyzer:
@@ -591,7 +599,7 @@ class C3GeneratorCache:
         for l in all_lines:
             for pydef in line_usages.line2usages.get(l, []):
                 if pydef.full_name.startswith(module) and any(
-                    l in all_lines for l in pydef.start_locs
+                    l in all_lines for l, _ in pydef.start_locs
                 ):
                     # skip self references
                     continue
