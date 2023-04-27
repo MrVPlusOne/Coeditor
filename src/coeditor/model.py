@@ -209,7 +209,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
 
         amode = getattr(config, "attention_mode", AttentionMode.bidirectional.name)
         self.attention_mode = AttentionMode[amode]
-        scratch_padding = getattr(config, "scratch_padding", None)
+        scratch_padding: int | None = getattr(config, "scratch_padding", None)
         self.scratch_padding = scratch_padding
         self.tlogger = TimeLogger()
 

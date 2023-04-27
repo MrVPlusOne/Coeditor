@@ -936,11 +936,17 @@ class TkC3Problem(TokenizedEdit):
         ]
 
     def stats(self) -> Mapping[str, int | float]:
+        all_ref_tks = sum(len(x) for x in self.references)
+        unchanged_ref_tks = sum(
+            len(x) for name, x in self.named_references if "unchanged ref" in name
+        )
         return {
             "input_tks": len(self.input_tks),
             "output_tks": len(self.output_tks),
             "n_references": len(self.references),
-            "total_reference_tks": sum(len(ref) for ref in self.references),
+            "changed_reference_tks": all_ref_tks - unchanged_ref_tks,
+            "unchanged_reference_tks": unchanged_ref_tks,
+            "total_reference_tks": all_ref_tks,
         }
 
 
@@ -1236,7 +1242,12 @@ class C3ProblemTokenizer:
         return stats
 
     def _tokenize_stats(self, problem: C3Problem):
-        return self.tokenize_problem(problem).stats()
+        tkprob = self.tokenize_problem(problem)
+        stats = dict(tkprob.stats())
+        stats["input_cutoff"] = stats["input_tks"] >= self.max_query_tks
+        stats["output_cutoff"] = stats["output_tks"] >= self.max_output_tks
+        stats["reference_cutoff"] = tkprob.truncated
+        return stats
 
     def __repr__(self):
         return repr_modified_args(self)
