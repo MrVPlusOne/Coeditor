@@ -66,7 +66,6 @@ def train_model(
             datasets,
             encoder,
             remake_problems=recreate_data,
-            workers=multiprocessing.cpu_count(),
         )
 
     # limit the number of examples for faster testing
@@ -119,7 +118,7 @@ def train_model(
 
     if not eval_only and multi_stage_training:
         # gradually increase the ctx size during training
-        scales = [4, 2, 1]
+        scales = [4, 2]
         for scale in scales:
             s_tkn = copy.copy(train_tkn)
             s_tkn.max_ref_tks_sum //= scale
@@ -129,8 +128,8 @@ def train_model(
                 if sum(c.change_size() for c in x.relevant_changes)
                 < s_tkn.max_ref_tks_sum
             ]
-            n_probs = max(1, scale * len(s_probs) // max(scales))
-            s_probs = random_subset(s_probs, n_probs)
+            # n_probs = max(1, scale * len(s_probs) // max(scales))
+            # s_probs = random_subset(s_probs, n_probs)
             desc = f"training (ctx={s_tkn.max_ref_tks_sum})"
             s_loader = C3DataLoader(
                 s_probs,
@@ -227,16 +226,16 @@ def eval_code_completion():
 
 def train_new_model():
     train_model(
-        model_name="coeditor-perm2k-production-v1.9",
+        model_name="coeditor-perm2k-base-v2.0",
         dataset_name="perm2k",
-        description="The production model trained with negative problems and scrach padding.",
+        description="Coeditor model trained with default settings.",
         train_args=TrainingArgs(
             max_train_epochs=1,
         ),
         encoder=C3CombinedEncoder(
-            change_processor=C3ProblemGenerator(neg_to_pos_ratio=0.25),
+            change_processor=C3ProblemGenerator(neg_to_pos_ratio=0),
             problem_tranform=C3ProblemChangeInlining(
-                max_inline_ratio=1.0, allow_empty_problems=True
+                max_inline_ratio=0.8, allow_empty_problems=True
             ),
         ),
         multi_stage_training=True,

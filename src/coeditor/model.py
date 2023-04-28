@@ -853,7 +853,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
     def from_code_t5(
         size: Literal["small", "base", "large"],
         attention_mode: AttentionMode = AttentionMode.bidirectional,
-        scratch_padding: int | None = 512,
+        scratch_padding: int | None = None,
         reuse_embed: bool = False,
         reinit_weights: bool = False,
     ) -> "RetrievalEditorModel":

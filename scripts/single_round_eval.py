@@ -28,20 +28,25 @@ testset = make_or_load_dataset(
     splits=("test",),
     time_limit_per_commit=40,
 )["test"]
-# testset = random_subset(testset, 50, rng=42)
+# testset = random_subset(testset, 10, rng=42)
 print(f"{len(testset)}")
 
 accs = dict[str, float]()
 for name, full_name in model_names.items():
-    model = RetrievalEditorModel.load(get_model_dir() / full_name)
+    if "checkpoint" in full_name:
+        model_path = get_model_dir(False) / full_name
+    else:
+        model_path = get_model_dir() / full_name
+    model = RetrievalEditorModel.load(model_path)
     model.to(model_device)
 
+    out_dir = get_model_dir() / full_name / "exact_match_samples"
+    eval_tkn = C3ProblemTokenizer.for_eval()
+    if name == "Small Context":
+        eval_tkn.max_ref_tks_sum = 2048
+    eval_batch_args = BatchArgs.eval_default()
+
     with timed_action(f"Evaluating {name}"):
-        out_dir = get_model_dir() / full_name / "exact_match_samples"
-        eval_tkn = C3ProblemTokenizer.for_eval()
-        if name == "Small Context":
-            eval_tkn.max_ref_tks_sum = 2048
-        eval_batch_args = BatchArgs.eval_default()
         test_loader = C3DataLoader(
             testset, None, eval_tkn, eval_batch_args, shuffle=False, desc="test"
         )

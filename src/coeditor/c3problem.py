@@ -334,6 +334,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     Generate `C3Problem`s from git histories.
 
     ### Change log
+    - v3.1: fix self-references in static analaysis
     - v3.0: Support `sample_unmodified_ratio`. Fix missing changes in `relevant_changes`.
     - v2.9: Add sibling usages for class members. Improve statement signatures.
         - fix 1: Remove builtin usages by default.
@@ -346,7 +347,7 @@ class C3ProblemGenerator(ProjectChangeProcessor[C3Problem]):
     splitting logic elsewhere. Also changed the data format of `ChangedCodeSpan`.
     """
 
-    VERSION = "3.0"
+    VERSION = "3.1"
     # change spans with more than this many lines will be ignored
     max_span_lines: int = 500
     # change spans with more than this many characters will be ignored
