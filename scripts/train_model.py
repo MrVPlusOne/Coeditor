@@ -37,8 +37,9 @@ def train_model(
     batch_args=BatchArgs.train_default(),
     eval_batch_args=BatchArgs.eval_default(),
     train_args=TrainingArgs(),
+    fixed_ref_tks_sum: int | None = None,
     recreate_data: bool = False,
-    multi_stage_training: bool = False,
+    multi_stage_training: bool = True,
     resumed_from: Path | None = None,
     model_size: Literal["small", "base", "large"] = "base",
     eval_only: bool = False,
@@ -111,6 +112,8 @@ def train_model(
     eval_tkn.max_query_tks = 1024
     eval_tkn.max_output_tks *= 2
     eval_tkn.max_ref_tks_sum *= 2
+    if fixed_ref_tks_sum is not None:
+        eval_tkn.max_ref_tks_sum = fixed_ref_tks_sum
 
     valid_loader = C3DataLoader(
         datasets["valid"], None, eval_tkn, eval_batch_args, shuffle=False, desc="eval"
@@ -122,6 +125,8 @@ def train_model(
         for scale in scales:
             s_tkn = copy.copy(train_tkn)
             s_tkn.max_ref_tks_sum //= scale
+            if fixed_ref_tks_sum is not None:
+                s_tkn.max_ref_tks_sum = fixed_ref_tks_sum
             s_probs = [
                 x
                 for x in datasets["train"]
@@ -229,23 +234,67 @@ def train_new_model():
         model_name="coeditor-perm2k-base-v2.0",
         dataset_name="perm2k",
         description="Coeditor model trained with default settings.",
-        train_args=TrainingArgs(
-            max_train_epochs=1,
-        ),
         encoder=C3CombinedEncoder(
-            change_processor=C3ProblemGenerator(neg_to_pos_ratio=0),
             problem_tranform=C3ProblemChangeInlining(
                 max_inline_ratio=0.8, allow_empty_problems=True
             ),
         ),
-        multi_stage_training=True,
-        recreate_data=False,
-        quicktest=False,
+    )
+
+
+def ablation_short_context():
+    train_model(
+        model_name="coeditor-perm2k-2048ctx-v2.0",
+        dataset_name="perm2k",
+        description="Ablation: Use only 2048 max reference tokens.",
+        encoder=C3CombinedEncoder(
+            problem_tranform=C3ProblemChangeInlining(
+                max_inline_ratio=0.8, allow_empty_problems=True
+            ),
+        ),
+        fixed_ref_tks_sum=2048,
+    )
+
+
+def ablation_no_signatures():
+    train_model(
+        model_name="coeditor-perm2k-no_sigs-v2.0",
+        dataset_name="perm2k",
+        description="Ablation: No signatures in context.",
+        encoder=C3CombinedEncoder(
+            problem_tranform=C3ProblemChangeInlining(
+                max_inline_ratio=0.8, allow_empty_problems=True
+            ),
+            edit_tokenizer=C3ProblemTokenizer(disable_unchanged_refs=True),
+        ),
+    )
+
+
+def ablation_no_changes():
+    train_model(
+        model_name="coeditor-perm2k-no_changes-v2.0",
+        dataset_name="perm2k",
+        description="Ablation: No changes in context.",
+        encoder=C3CombinedEncoder(
+            problem_tranform=C3ProblemChangeInlining(
+                max_inline_ratio=0.8, allow_empty_problems=True
+            ),
+            edit_tokenizer=C3ProblemTokenizer(current_code_only=True),
+        ),
     )
 
 
 if __name__ == "__main__":
     os.chdir(proj_root())
 
-    with run_long_task("train_model.py"):
+    with run_long_task("train default model"):
         train_new_model()
+
+    # with run_long_task("train ablation: short context"):
+    #     ablation_short_context()
+
+    # with run_long_task("train ablation: no signatures"):
+    #     ablation_no_signatures()
+
+    # with run_long_task("train ablation: no changes"):
+    #     ablation_no_changes()
