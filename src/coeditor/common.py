@@ -22,6 +22,7 @@ from pprint import pprint
 from textwrap import dedent
 from typing import *
 
+import numpy as np
 from IPython.display import HTML, display
 from tqdm import tqdm
 
@@ -199,8 +200,9 @@ def show_sections(
 def print_sections(
     *sections: tuple[str, str],
     sep: str = SEP,
+    file: TextIO = sys.stdout,
 ) -> None:
-    print(show_sections(*sections, sep=sep))
+    print(show_sections(*sections, sep=sep), file=file)
 
 
 def short_str(text: str, limit: int = 27) -> str:
@@ -747,3 +749,16 @@ def keystroke_cost_old(
         init_curosr_dis = cursor_jump_cost
 
     return rec(0, 0, init_curosr_dis, False)
+
+
+def bootstrap_sample(
+    values: Sequence[float], iterations: int = 10000
+) -> tuple[float, float]:
+    """Return the bootstrap estimate of the confidence interval of the mean."""
+    n = len(values)
+    means = list[float]()
+    for _ in range(iterations):
+        mu = float(np.mean(np.random.choice(values, size=n, replace=True)))
+        means.append(mu)
+    means.sort()
+    return means[int(iterations * 0.025)], means[int(iterations * 0.975)]

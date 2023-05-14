@@ -1,9 +1,11 @@
 """Evaluate Coeditor's exact match performance in a single-round editing setting.
 
-This script generates the data for the ablation study.
+This script generates the results for the ablation studies.
 """
 
 import os
+
+import numpy as np
 
 from coeditor.c3problem import C3ProblemGenerator, C3ProblemTokenizer
 from coeditor.common import *
@@ -22,16 +24,24 @@ model_names = {
     "Small Context": "coeditor-perm2k-c3-multi-2048-v1.7.2",
 }
 
-testset = make_or_load_dataset(
-    dataset_name,
-    C3ProblemGenerator(),
-    splits=("test",),
-    time_limit_per_commit=40,
-)["test"]
-# testset = random_subset(testset, 10, rng=42)
+
+# we load the older dataset format since the models above were trained on it.
+testset = pickle_load(
+    get_dataset_dir("perm2k") / "processed" / "C3ProblemGenerator(VERSION=2.9)"
+)["valid"]
+
+# # uncomment below to load with the newest dataset format
+# testset = make_or_load_dataset(
+#     dataset_name,
+#     C3ProblemGenerator(),
+#     splits=("valid",),
+#     time_limit_per_commit=40,
+# )["valid"]
+
+# testset = random_subset(testset, 50, rng=42)
 print(f"{len(testset)}")
 
-accs = dict[str, float]()
+accs = dict[str, dict]()
 for name, full_name in model_names.items():
     if "checkpoint" in full_name:
         model_path = get_model_dir(False) / full_name
@@ -48,20 +58,24 @@ for name, full_name in model_names.items():
 
     with timed_action(f"Evaluating {name}"):
         test_loader = C3DataLoader(
-            testset, None, eval_tkn, eval_batch_args, shuffle=False, desc="test"
+            testset, None, eval_tkn, eval_batch_args, shuffle=False, desc="evaluating"
         )
-        exact_acc = model.eval_on_data(
+        correctness = model.eval_on_data(
             testset,
             test_loader,
             DecodingArgs(),
             out_dir,
             probs_to_save=300,
         )
+        exact_acc = float(np.mean(correctness))
+        lb, ub = bootstrap_sample(list(map(float, correctness)))
         print("Exact-match accuracy:", exact_acc)
+        print(f"95% CI: [{lb:.4f}, {ub:.4f}]")
         cprint("blue", "Exact-match samples saved to:", out_dir)
-        accs[name] = exact_acc.average()
+        accs[name] = {"mean": exact_acc, "lb": lb, "ub": ub}
 
     model.to("cpu")
     del model
 
 pretty_print_dict(accs)
+pickle_dump(Path("output/single_round_eval-accs.pkl"), accs)

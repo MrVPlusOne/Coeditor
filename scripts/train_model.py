@@ -4,6 +4,7 @@ import os
 import shutil
 import warnings
 
+import numpy as np
 import wandb
 
 from coeditor._utils import cprint, run_long_task
@@ -181,15 +182,16 @@ def train_model(
 
     with timed_action("Accuracy Evaluation"):
         out_dir = get_model_dir() / model_name / "exact_match_samples"
-        exact_acc = model.eval_on_data(
+        correctness = model.eval_on_data(
             datasets["test"],
             test_loader,
             dec_args,
             out_dir,
             probs_to_save=300,
         )
+        exact_acc = float(np.mean(correctness))
         print("Exact-match accuracy:", exact_acc)
-        wandb.log({"test/exact-acc": exact_acc.average()})
+        wandb.log({"test/exact-acc": exact_acc})
         cprint("blue", "Exact-match samples saved to:", out_dir)
 
     return model
