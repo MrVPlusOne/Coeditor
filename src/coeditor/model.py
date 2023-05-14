@@ -339,7 +339,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         dec_args: DecodingArgs,
         out_dir: Path,
         probs_to_save: int = 300,
-    ) -> CountedSum:
+    ) -> list[bool]:
         shutil.rmtree(out_dir, ignore_errors=True)
         (out_dir / "correct").mkdir(parents=True, exist_ok=True)
         (out_dir / "incorrect").mkdir(parents=True, exist_ok=True)
@@ -349,7 +349,7 @@ class RetrievalEditorModel(T5PreTrainedModel):
         )
 
         gen_args = dec_args.to_model_args()
-        exact_acc = CountedSum(0, 0)
+        correctness = list[bool]()
         ex_id = 0
         for batch in eval_loader:  # type: ignore
             out_tks = self.generate(
@@ -372,17 +372,17 @@ class RetrievalEditorModel(T5PreTrainedModel):
                 )
                 prob = eval_problems[ex_id]
                 correct = exact_match_correct(prob, mp)
-                exact_acc += correct
+                correctness.append(correct)
                 if ex_id in save_ids:
                     pred_str = show_prediction(prob, mp)
                     (
                         out_dir
-                        / ("correct" if correct.sum else "incorrect")
+                        / ("correct" if correct else "incorrect")
                         / f"ex-{ex_id}.txt"
                     ).write_text(pred_str)
                 ex_id += 1
 
-        return exact_acc
+        return correctness
 
     @torch.autocast("cuda")
     def predict_on_batch(
@@ -1020,6 +1020,7 @@ class MultiRoundEvaluator:
         self,
         problem: C3Problem,
         print_steps: bool = True,
+        skip_ctx: bool = True,
     ) -> "dict[str, MultiRoundEditStats]":
         """Compute the total edit gain via multi-round interaction.
         Note that this is a strict metric that does not perform code normalization
@@ -1028,17 +1029,10 @@ class MultiRoundEvaluator:
         cost_models = self.cost_models
         problem = problem.restrict_span_changes()
         span = problem.span
-        gold_change = span.get_change()
+        # gold_change = span.get_change()
         original = span.original.tolist()
-        if print_steps:
-            print_sections(("gold_change", show_change(gold_change)))
-            print("Remaining changes:")
-            print(span.delta)
 
-        gains = {
-            cm.name: cm.get_edit_gain(original, span.delta, print_steps)
-            for cm in cost_models
-        }
+        gains = {cm.name: cm.get_edit_gain(original, span.delta) for cm in cost_models}
         label_gains = gains.copy()
         first_gains = {cm.name: 0 for cm in cost_models}
         rounds = 0
@@ -1052,9 +1046,15 @@ class MultiRoundEvaluator:
             main_segs = output_ids_as_seqs(tk_prob.main_tks)
             pred_str = TkC3Problem.show_predictions(pred.out_tks, main_segs)
             if print_steps:
+                if rounds == 1:
+                    print("\n".join(tk_prob.meta_data_lines()))
+                    print(tk_prob.stats())
                 print_sections(("round", str(rounds)))
-                print(tk_prob.show(skip_ctx=True))
-                print("pred change:")
+                if not skip_ctx and rounds == 1:
+                    print(tk_prob.show(skip_meta=True))
+                else:
+                    print(tk_prob.show(skip_ctx=True, skip_meta=True))
+                print("========Predicted Changes========")
                 print(pred_str)
 
             # compute which changes matches the ground truth
@@ -1068,11 +1068,11 @@ class MultiRoundEvaluator:
                 # accept partial changes and rerun the model
                 accept_delta, rest_delta = span.delta.decompose_for_change(accept_keys)
                 if print_steps:
-                    cprint("green", "Accepted changes:")
+                    cprint("green", "========Accepted changes========")
                     print(accept_delta)
                 if rounds == 1:
                     first_gains = {
-                        cm.name: cm.get_edit_gain(original, accept_delta, print_steps)
+                        cm.name: cm.get_edit_gain(original, accept_delta)
                         for cm in cost_models
                     }
             else:
@@ -1082,7 +1082,7 @@ class MultiRoundEvaluator:
                         batch,
                         span.delta,
                         problem.edit_line_ids,
-                        print_steps=print_steps,
+                        print_steps=False,
                     )
                 elif self.strategy == "pick_first":
                     delta_keys = span.delta.change_groups()[0]
@@ -1090,12 +1090,11 @@ class MultiRoundEvaluator:
                     main_cost_model = cost_models[0]
                     assert_eq(self.strategy, "least_effort")
                     delta_keys = self._get_least_effort_edit(
-                        original, span.delta, main_cost_model, print_steps=print_steps
+                        original, span.delta, main_cost_model, print_steps=False
                     )
                 accept_delta, rest_delta = span.delta.decompose_for_change(delta_keys)
                 if print_steps:
-                    cprint("red", "No accepted changes.")
-                    print("Manual changes:")
+                    cprint("red", "========Manual changes========")
                     print(accept_delta)
                 for cm in cost_models:
                     gains[cm.name] -= cm.get_edit_gain(
@@ -1105,7 +1104,11 @@ class MultiRoundEvaluator:
             original = accept_delta.apply_to_change(original)
             span = replace(span, original=TkArray.new(original), delta=rest_delta)
             if print_steps:
-                print("Remaining changes:")
+                print("========Accepted gains========")
+                for cm in cost_models:
+                    gain = cm.get_edit_gain(original, accept_delta)
+                    print(f"{cm.name}: {gain}")
+                print("========Remaining changes========")
                 print(rest_delta)
             if not rest_delta or rounds == self.max_rounds:
                 break
@@ -1117,7 +1120,7 @@ class MultiRoundEvaluator:
 
         # the remaining changes (if any) need to be applied manually
         for cm in cost_models:
-            gains[cm.name] -= cm.get_edit_gain(original, span.delta, print_steps)
+            gains[cm.name] -= cm.get_edit_gain(original, span.delta)
 
         return {
             cm.name: MultiRoundEditStats(
@@ -1183,7 +1186,7 @@ class MultiRoundEvaluator:
         return min(group_costs, key=lambda x: x[1])[0]
 
 
-def exact_match_correct(prob: C3Problem, mp: RetrievalModelPrediction) -> CountedSum:
+def exact_match_correct(prob: C3Problem, mp: RetrievalModelPrediction) -> bool:
     original = prob.span.original.tolist()
     pred_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["output_ids"])
     label_delta = TkDelta.from_output_tks(prob.edit_line_ids, mp["labels"])
@@ -1191,8 +1194,7 @@ def exact_match_correct(prob: C3Problem, mp: RetrievalModelPrediction) -> Counte
     label_change = label_delta.apply_to_change(original)
     pred_code = tokens_to_change(pred_change).after
     label_code = tokens_to_change(label_change).after
-    is_correct = code_equal(pred_code, label_code)
-    return CountedSum(int(is_correct), 1)
+    return code_equal(pred_code, label_code)
 
 
 def show_prediction(prob: C3Problem, pred: RetrievalModelPrediction) -> str:

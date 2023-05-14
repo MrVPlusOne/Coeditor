@@ -933,7 +933,7 @@ class TkC3Problem(TokenizedEdit):
             f"n_references: {len(self.references)}",
             f"total_reference_tks: {sum(len(ref) for ref in self.references)}",
             f"project: {self.project}",
-            f"commit: {self.commit}",
+            f"commit: {self.commit.summary() if self.commit else 'None'}",
         ]
 
     def stats(self) -> Mapping[str, int | float]:

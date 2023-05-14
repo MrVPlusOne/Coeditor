@@ -1020,7 +1020,12 @@ class TokenizedEdit(ABC):
             lines.append(f"{label}:{indent(decode_tokens(seg), ' ' * 4).lstrip()}")
         return "".join(lines)
 
-    def show(self, pred_tks: TokenSeq | None = None, skip_ctx: bool = False) -> str:
+    def show(
+        self,
+        pred_tks: TokenSeq | None = None,
+        skip_ctx: bool = False,
+        skip_meta: bool = False,
+    ) -> str:
         def show_ctx(ctx_tks: TokenSeq):
             lines = tk_splitlines(ctx_tks)
             return "\n".join("  " + self.show_line(l) for l in lines)
@@ -1044,15 +1049,18 @@ class TokenizedEdit(ABC):
             if pred_tks
             else []
         )
-        outputs = [
-            "-" * 80,
-            *self.meta_data_lines(),
-            "========Ground Truth========",
-            self.show_predictions(self.output_tks, main_segs),
-            *pred_lines,
-            "========Main Code========",
-            "\n".join(main_lines),
-        ]
+        outputs = []
+        if not skip_meta:
+            outputs.extend(["-" * 80, *self.meta_data_lines()])
+        outputs.extend(
+            [
+                "========Ground Truth========",
+                self.show_predictions(self.output_tks, main_segs),
+                *pred_lines,
+                "========Main Code========",
+                "\n".join(main_lines),
+            ]
+        )
         if not skip_ctx:
             outputs.extend(
                 f"==========={name}===========\n" + show_ctx(tks)
