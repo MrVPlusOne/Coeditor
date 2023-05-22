@@ -762,3 +762,22 @@ def bootstrap_sample(
         means.append(mu)
     means.sort()
     return means[int(iterations * 0.025)], means[int(iterations * 0.975)]
+
+
+def bootstrap_compare(
+    this_perf: Sequence[float | bool],
+    that_perf: Sequence[float | bool],
+    iterations: int = 10000,
+) -> float:
+    """Return the p-value of "this is better than that" using bootstrap sampling."""
+    n = len(this_perf)
+    assert_eq(len(that_perf), n)
+    this_array = np.array(this_perf)
+    that_array = np.array(that_perf)
+
+    outcomes = list[bool]()
+    for _ in range(iterations):
+        ids = np.random.choice(range(n), size=n, replace=True)
+        outcome = bool(np.mean(this_array[ids]) >= np.mean(that_array[ids]))
+        outcomes.append(outcome)
+    return float(np.mean(outcomes))

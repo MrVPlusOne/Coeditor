@@ -47,6 +47,10 @@ class FIMProblem:
     src_info: SrcInfo
     max_ctx_tks: int
     kind: CompletionKind
+    path: ProjectPath
+
+    def uid(self) -> tuple[ProjectPath, str]:
+        return self.path, not_none(self.src_info["commit"]).hash
 
     def get_contexts(
         self,
@@ -86,9 +90,10 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
 
     ## Change log
     - version 1.1: Limit context str length to `10 * max_ctx_tks`.
+    - version 1.2: Add `path` attribute to `FIMProblem`.
     """
 
-    VERSION = "1.1"
+    VERSION = "1.2"
     max_ctx_tks: int = 2048
     min_target_size: int = C3ToCodeCompletion.min_target_size
     use_additions: bool = C3ToCodeCompletion.use_additions
@@ -145,20 +150,20 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 above_spans = [left] if left else []
                 # add previous spans until total size exceeds max_ctx_tks
                 above_sum = len(left)
-                for span in reversed(new_spans[: 2 * i + 1]):
-                    if above_sum + len(span) >= self.max_ctx_tks * 10:
+                for s in reversed(new_spans[: 2 * i + 1]):
+                    if above_sum + len(s) >= self.max_ctx_tks * 10:
                         break
-                    above_sum += len(span)
-                    above_spans.append(span)
+                    above_sum += len(s)
+                    above_spans.append(s)
                 above_spans.reverse()
                 below_spans = [right] if right else []
                 below_sum = len(right)
-                for span in old_spans[2 * i + 2 :]:
+                for s in old_spans[2 * i + 2 :]:
                     # take until below sum exceeds max_ctx_tks
-                    if below_sum + len(span) >= self.max_ctx_tks * 10:
+                    if below_sum + len(s) >= self.max_ctx_tks * 10:
                         break
-                    below_sum += len(span)
-                    below_spans.append(span)
+                    below_sum += len(s)
+                    below_spans.append(s)
                 probs.append(
                     FIMProblem(
                         above_spans,
@@ -167,6 +172,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                         src_info,
                         self.max_ctx_tks,
                         kind,
+                        path=span.scope.later.path,
                     )
                 )
         return probs

@@ -131,6 +131,9 @@ class C3Problem:
     def path(self) -> ProjectPath:
         return self.span.headers[-1].path
 
+    def uid(self) -> tuple[ProjectPath, str]:
+        return self.path, not_none(self.src_info["commit"]).hash
+
     def meta_data_lines(self) -> list[str]:
         return [
             f"path: {self.span.headers[-1].path}",
@@ -1297,12 +1300,12 @@ def _problem_to_current(prob: C3Problem):
     original = span.original.tolist()
     delta = span.delta
     edit_line_ids = set(prob.edit_line_ids)
+    assert edit_line_ids
 
     shift = 0
     new_lines = list[TokenSeq]()
     new_delta = dict[int, tuple]()
     new_edit_line_ids = set[int]()
-    assert edit_line_ids
     i = -1
     for i, line in enumerate(tk_splitlines(original)):
         if line and line[0] == Add_id:
@@ -1320,7 +1323,11 @@ def _problem_to_current(prob: C3Problem):
         new_edit_line_ids.add(i + shift + 1)
 
     if not new_edit_line_ids:
-        raise ValueError(f"No edit lines left. {prob.edit_line_ids=}")
+        print_err("original:")
+        print_err(decode_tokens(original))
+        raise ValueError(
+            f"No edit lines left. {prob.edit_line_ids=}, {len(tk_splitlines(original))=}"
+        )
 
     new_edit_line_ids = list(sorted(new_edit_line_ids))
     new_original = TkArray.new(join_list(new_lines, Newline_id))

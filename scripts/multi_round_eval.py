@@ -48,6 +48,10 @@ for strategy in strategies:
 
     print("=" * 100)
     print("Prompting strategy:", strategy)
+    target_file = (
+        proj_root() / f"output/multi_round_eval/{model_name}/{strategy}-{N_test}.pkl"
+    )
+    pickle_dump(target_file, metric_stats)
     for cm in evaluator.cost_models:
         cm_name = cm.name
         print(SEP)

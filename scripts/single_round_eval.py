@@ -27,8 +27,8 @@ model_names = {
 
 # we load the older dataset format since the models above were trained on it.
 testset = pickle_load(
-    get_dataset_dir("perm2k") / "processed" / "C3ProblemGenerator(VERSION=2.9)"
-)["valid"]
+    get_dataset_dir("perm2k") / "processed" / "valid-C3ProblemGenerator(VERSION=2.9)"
+)
 
 # # uncomment below to load with the newest dataset format
 # testset = make_or_load_dataset(
@@ -39,9 +39,10 @@ testset = pickle_load(
 # )["valid"]
 
 # testset = random_subset(testset, 50, rng=42)
-print(f"{len(testset)}")
+print(f"{len(testset)=}")
 
 accs = dict[str, dict]()
+results = dict[str, list[bool]]()
 for name, full_name in model_names.items():
     if "checkpoint" in full_name:
         model_path = get_model_dir(False) / full_name
@@ -67,6 +68,7 @@ for name, full_name in model_names.items():
             out_dir,
             probs_to_save=300,
         )
+        results[name] = correctness
         exact_acc = float(np.mean(correctness))
         lb, ub = bootstrap_sample(list(map(float, correctness)))
         print("Exact-match accuracy:", exact_acc)
@@ -79,3 +81,10 @@ for name, full_name in model_names.items():
 
 pretty_print_dict(accs)
 pickle_dump(Path("output/single_round_eval-accs.pkl"), accs)
+pickle_dump(Path("output/single_round_eval-results.pkl"), results)
+
+baseline_perf = results["No Ablation"]
+for name in ["No Diffs", "No Defs", "Small Context"]:
+    this_perf = results[name]
+    pvalue = bootstrap_compare(this_perf, baseline_perf)
+    print(f"(vs. No Ablation) {name} p-value: {pvalue:.4f}")
