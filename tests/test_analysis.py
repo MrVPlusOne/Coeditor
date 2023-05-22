@@ -92,28 +92,28 @@ def test_anlayzing_defs():
     )
 
 
-@pytest.mark.xfail(reason="Due to jedi bug")
-def test_dataclass_signature():
-    s = jedi.Script(
-        dedent(
-            """\
-        from dataclasses import dataclass
-        @dataclass
-        class Foo:
-            bar: int
-        """
-        )
-    )
+# @pytest.mark.xfail(reason="Due to jedi bug")
+# def test_dataclass_signature():
+#     s = jedi.Script(
+#         dedent(
+#             """\
+#         from dataclasses import dataclass
+#         @dataclass
+#         class Foo:
+#             bar: int
+#         """
+#         )
+#     )
 
-    defs = s.goto(3, 8)  # go to Foo directly
-    assert len(defs) == 1
-    n = defs[0]
-    assert n._get_docstring_signature() == "Foo(bar: int)"
+#     defs = s.goto(3, 8)  # go to Foo directly
+#     assert len(defs) == 1
+#     n = defs[0]
+#     assert n._get_docstring_signature() == "Foo(bar: int)"
 
-    defs = s.goto(4, 6)  # first go to bar
-    print(f"{len(defs)=}")
-    n = defs[0].parent()  # then go to parent
-    assert n._get_docstring_signature() == "Foo(bar: int)"
+#     defs = s.goto(4, 6)  # first go to bar
+#     print(f"{len(defs)=}")
+#     n = defs[0].parent()  # then go to parent
+#     assert n._get_docstring_signature() == "Foo(bar: int)"
 
 
 def test_anlayzing_usages():

@@ -1,27 +1,69 @@
-# Coeditor: Project-level Contextual Code Change Prediction
+# Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing
 
+This repository contains the code for the paper, "Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing". Coeditor is a machine learning model that autocompletes code changes based on the changes in the context, and it powers the [Coeditor VSCode extension](https://marketplace.visualstudio.com/items?itemName=JiayiWei.vscode-coeditor). This README provides instructions on how to install, use, and evaluate the Coeditor model.
 
 ## Installation
 
-This project uses [pipenv](https://pipenv.pypa.io/en/latest/) to manage the package dependencies. Pipenv tracks the exact package versions and manages the (project-specific) virtual environment for you. To install all dependencies, make sure you have pipenv and python 3.11 installed, then, run the following at the project root:
+### With Poetry (recommended)
+
+This project uses [poetry](https://python-poetry.org) to manage the package dependencies. Poetry records all dependencies in the `pyproject.toml` file and tracks the exact package versions via `poetry.lock`. It also manages the (project-specific) virtual environment for you.
+
+You can install poetry via the following command:
+
 ```bash
-pipenv --python <path-to-your-python-3.11>  # create a new environment for this project
-pipenv sync --dev
+curl -sSL https://install.python-poetry.org | python3 -
+poetry completions bash >> ~/.bash_completion
 ```
 
-To add new dependences into the virtual environment, you can either add them via `pipenv install ..` (using `pipenv`) or `pipenv run pip install ..` (using `pip` from within the virtual environment). If your pytorch installation is not working properly, you might need to install it via the `pip` approach rather than `pipenv`.
+To install all dependencies, make sure you have python 3.11 installed, then, run the following at the project root:
 
-We also provide a generated Python `requirements.txt` file in case you cannot use `pipenv` for some reasone.
+```bash
+poetry install
+```
+
+You can then spawn a shell within the project's virtual environment via `poetry shell`.
+
+### Using requirements.txt
+
+Alternatively, you can also install all dependencies using the exported [`requirements.txt`](requirements.txt) file.
 
 ## Usage
-All `.py` scripts below can be run via `pipenv run python <script-name.py>`. For `.ipynb` notebooks, make sure you select the pipenv environment as the kernel. All commands listed here should be run from the project root.
 
-- Run all unit tests: `pipenv run pytest`.
-- Train a new model: [`scripts/train_model.py`](scripts/train_model.py).
-    - You can optionally specify which GPUs should be used by setting the `CUDA_VISIBLE_DEVICES` environment variable. For example, to use GPUs 0 and 1, run `CUDA_VISIBLE_DEVICES=0,1 pipenv run python scripts/train_model.py`.
-- download training data: [`scripts/download_data.ipynb`](scripts/download_data.ipynb).
-- TODO: add other relevant scripts.
+**Note**: All scripts below should be run within the poetry shell (or the virtual environment in which you installed all the dependencies).
 
+### Use the VSCode extension server
+
+Run [`scripts/start_server`](scripts/start_server.py) to start the Coeditor VSCode extension server. This will download the pre-trained Coeditor model from Huggingface (if not already) and start the extension service at port 5042.
+
+### Run unit tests
+
+You can run all unit tests via `poetry run pytest` (or just `pytest` if you run inside the poetry shell).
+
+### Download the dataset
+
+1. Configure the directories. Create the file `config/coeditor.json` and use the following template to specify where you want to store the dataset and the trained models:
+
+```json
+{
+    "data_dir": "/path/to/data/dir",
+    "model_dir": "/path/to/model/dir"
+}
+```
+
+2. Run [`notebooks/download_data.ipynb`](notebooks/download_data.ipynb) to clone the repos from GitHub. Note that we use the GitHub search API to search for repos with permissive licenses, so the results may change over time even though the query remains the same.
+
+3. (Optional) Run [`scripts/prepare_data.py`](scripts/prepare_data.py) to preprocess the repos into the PyCommits format introduced in the paper. You can safely skip this step since it will automatically be run when you train a new model (and with the corresponding encoder parameters).
+
+### Train a new model
+
+Use the [`scripts/train_model.py`](scripts/train_model.py) script to train a new model from scratch. By default, this script trains a model under our default settings, but you can uncomment the corresponding function calls at the bottom of the script to train a model following one of the ablation settings in the paper.
+
+### Evaluate pre-trained models
+
+- **Comparison with Code Completion Approaches**: Run [scripts/code_completion_eval.py](scripts/code_completion_eval.py) to obtain the results reported in section 4.1 of the paper.
+- **Multi-round editing**: Run [`scripts/multi_round_eval.py`](scripts/multi_round_eval.py) to obtain the results reported in section 4.2 of the paper.
+- **Ablation Studies**: Run [`scripts/single_round_eval.py`](scripts/single_round_eval.py) to obtain the results reported in section 4.3 of the paper.
 
 ## Development
-Please see [DevGuide.md](DevGuide.md).
+
+For development guidelines and best practices, please see [DevGuide.md](DevGuide.md).

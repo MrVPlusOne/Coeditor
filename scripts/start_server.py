@@ -1,3 +1,9 @@
+"""
+Run this script to start the Coeditor VSCode extension server.
+This will download the pre-trained Coeditor model from Huggingface (if not already)
+and start the extension service at port 5042.
+"""
+
 import traceback
 from functools import wraps
 

@@ -16,6 +16,7 @@ os.chdir(proj_root())
 
 dataset_name = "perm2k"
 N_test = 5000  # number of test examples to evaluate
+# NOTE: You can change the `model_name`` below to a `Path` to load a local model.
 model_name = "MrVPlusOne/coeditor-perm2k-base-v1.7.3"
 model_device = "cuda"
 

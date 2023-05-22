@@ -1,3 +1,10 @@
+"""
+You can use this script to train a new model from scratch.
+By default, this script trains a model under our default settings, but you can
+uncomment the corresponding function calls at the bottom of the script to train
+a model following one of the ablation settings in the paper.
+"""
+
 import copy
 import multiprocessing
 import os
@@ -238,7 +245,7 @@ def train_new_model():
         description="Coeditor model trained with default settings.",
         encoder=C3CombinedEncoder(
             problem_tranform=C3ProblemChangeInlining(
-                max_inline_ratio=0.8, allow_empty_problems=True
+                max_inline_ratio=0.6, allow_empty_problems=True
             ),
         ),
     )
@@ -251,7 +258,7 @@ def ablation_short_context():
         description="Ablation: Use only 2048 max reference tokens.",
         encoder=C3CombinedEncoder(
             problem_tranform=C3ProblemChangeInlining(
-                max_inline_ratio=0.8, allow_empty_problems=True
+                max_inline_ratio=0.6, allow_empty_problems=True
             ),
         ),
         fixed_ref_tks_sum=2048,
@@ -265,7 +272,7 @@ def ablation_no_signatures():
         description="Ablation: No signatures in context.",
         encoder=C3CombinedEncoder(
             problem_tranform=C3ProblemChangeInlining(
-                max_inline_ratio=0.8, allow_empty_problems=True
+                max_inline_ratio=0.6, allow_empty_problems=True
             ),
             edit_tokenizer=C3ProblemTokenizer(disable_unchanged_refs=True),
         ),
@@ -279,7 +286,7 @@ def ablation_no_changes():
         description="Ablation: No changes in context.",
         encoder=C3CombinedEncoder(
             problem_tranform=C3ProblemChangeInlining(
-                max_inline_ratio=0.8, allow_empty_problems=True
+                max_inline_ratio=0.6, allow_empty_problems=True
             ),
             edit_tokenizer=C3ProblemTokenizer(current_code_only=True),
         ),
