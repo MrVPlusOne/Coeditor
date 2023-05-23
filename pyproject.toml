@@ -2,7 +2,7 @@
 name = "coeditor"
 version = "0.3.0"
 description = "Coeditor: AI assisted code editing"
-authors = ["Jiayi Wei <wjydzh1@gmail.com>"]
+authors = ["Anonymous Authors"]
 license = "bsd-3-clause"
 readme = "README.md"
 

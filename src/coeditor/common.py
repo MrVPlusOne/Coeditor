@@ -115,7 +115,7 @@ def get_model_dir(trained=True) -> Path:
 
 
 def get_coeditor_model_path() -> str | Path:
-    return "MrVPlusOne/coeditor-perm2k-base-v1.7.3"
+    return pickle_load(proj_root() / "data/coeditor_link.pkl")
 
 
 def run_command(args: Sequence[str], cwd: str | Path) -> str:

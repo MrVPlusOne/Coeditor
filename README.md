@@ -1,6 +1,6 @@
 # Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing
 
-This repository contains the code for the paper, "Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing". Coeditor is a machine learning model that autocompletes code changes based on the changes in the context. This repo includes the server code for the [Coeditor VSCode extension](https://marketplace.visualstudio.com/items?itemName=JiayiWei.vscode-coeditor), as well as the scripts to process the data and reproduce the results presented in the paper.
+This repository contains the code for the paper, "Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing". Coeditor is a machine learning model that autocompletes code changes based on the changes in the context. This repo includes the server code for the [Coeditor VSCode extension](https://???) (link redacted for review), as well as the scripts to process the data and reproduce the results presented in the paper.
 
 ## Installation
 
