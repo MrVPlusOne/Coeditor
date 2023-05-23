@@ -21,7 +21,6 @@ from typing import *
 
 import numpy as np
 import pandas as pd
-from IPython.display import display
 from termcolor import colored
 
 # from tqdm.auto import tqdm
@@ -38,61 +37,12 @@ def proj_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
-def get_config_dict() -> dict:
-    if (path := proj_root() / "config" / "SPOT.json").exists():
-        return json.loads(read_file(path))
-    else:
-        return {}
-
-
-def get_config(key: str) -> Optional[str]:
-    return get_config_dict().get(key)
-
-
 def get_gpu_id(default: int) -> int:
     if (s := os.getenv("GPU_ID")) is not None:
         return int(s)
     else:
         print("GPU_ID not set, using:", default)
         return default
-
-
-def get_dataroot() -> Path:
-    if (v := get_config("data_root")) is None:
-        return proj_root()
-    else:
-        return Path(v)
-
-
-def get_dataset_dir(dataname: str) -> Path:
-    if (v := get_config("datasets_root")) is None:
-        return get_dataroot() / "datasets" / dataname
-    else:
-        return Path(v) / dataname
-
-
-def get_model_dir(trained=True) -> Path:
-    post = "trained" if trained else "training"
-    return get_dataroot() / "models" / post
-
-
-def get_eval_dir(dataname: str, experiment_name: str) -> Path:
-    return get_dataroot() / "evaluations" / dataname / experiment_name
-
-
-def mk_testset_from_repos(name="InferTypes4Py", repos: Sequence[Path] | None = None):
-    if repos is None:
-        repos = [proj_root()]
-    dest = get_dataset_dir(name) / "repos" / "test" / "SPOT"
-    if dest.exists():
-        print("Deleting old dataset at: ", dest)
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-    for root in repos:
-        root = proj_root()
-        shutil.copytree(root / "src", dest / "src")
-        shutil.copytree(root / "tests", dest / "tests")
-        return dest
 
 
 def raise_error(msg: str) -> T1:  # type: ignore
