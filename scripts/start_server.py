@@ -36,7 +36,7 @@ class LazyVal(Generic[T1]):
 
 
 def start_server(device, port: int, print_stats: bool = True):
-    model_path = "MrVPlusOne/coeditor-perm2k-base-v1.7.3"
+    model_path = get_coeditor_model_path()
     model = RetrievalEditorModel.load(model_path)
     model.to(device)
     print(f"Model '{model_path}' loaded on device:", device)

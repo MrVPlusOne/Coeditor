@@ -82,7 +82,7 @@ def get_accs(results: dict[CompletionKind, list[bool]]) -> dict[str, float]:
 
 
 # %% Evaluate the performance of Coeditor
-coeditor = RetrievalEditorModel.load("MrVPlusOne/coeditor-perm2k-base-v1.7.3")
+coeditor = RetrievalEditorModel.load(get_coeditor_model_path())
 coeditor.half()
 coeditor.to("cuda")
 tknizer = C3ProblemTokenizer.for_eval()

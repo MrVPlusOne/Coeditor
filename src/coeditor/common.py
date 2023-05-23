@@ -111,6 +111,10 @@ def get_model_dir(trained=True) -> Path:
     return Path(get_config("models_root")) / post
 
 
+def get_coeditor_model_path() -> str | Path:
+    return "MrVPlusOne/coeditor-perm2k-base-v1.7.3"
+
+
 def run_command(args: Sequence[str], cwd: str | Path) -> str:
     return subprocess.check_output(
         args,
