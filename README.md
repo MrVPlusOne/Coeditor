@@ -27,13 +27,16 @@ You can then spawn a shell within the project's virtual environment via `poetry 
 
 Alternatively, you can also install all dependencies using the exported [`requirements.txt`](requirements.txt) file.
 
-## Usage
+## Usages
 
 **Note**: All scripts below should be run within the poetry shell (or the virtual environment in which you installed all the dependencies).
 
 ### Use the VSCode extension server
 
 Run [`scripts/start_server`](scripts/start_server.py) to start the Coeditor VSCode extension server. This will download the pre-trained Coeditor model from Huggingface (if not already) and start the extension service at port 5042.
+
+### Run Coeditor inside a notebook
+- As an alternative to using the VSCode extension, you can directly run Coeditor inside [this notebook](notebooks/run_api.ipynb) by specifying a target file and line nubmer.  
 
 ### Run unit tests
 

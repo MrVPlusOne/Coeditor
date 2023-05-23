@@ -81,10 +81,13 @@ def proj_root() -> Path:
 
 
 def get_config_dict() -> dict:
-    if (path := proj_root() / "config" / "coeditor.json").exists():
-        return json.loads(path.read_text())
-    else:
-        return {}
+    path = proj_root() / "config" / "coeditor.json"
+    if not path.exists():
+        warnings.warn(f"No config file found at `{path}`. Create a default one.")
+        path.parent.mkdir(exist_ok=True)
+        default_dict = {"datasets_root": "datasets_root", "models_root": "models_root"}
+        path.write_text(json.dumps(default_dict, indent=4))
+    return json.loads(path.read_text())
 
 
 def get_config(key: str) -> str:

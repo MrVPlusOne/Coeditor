@@ -274,7 +274,7 @@ class JediUsageAnalyzer:
         name2pydef = dict[PyFullName, PyDefinition]()
 
         try:
-            for name in tqdm(all_names, f"Analyzing {script.path}", disable=silent):
+            for name in tqdm(all_names, f"Analyzing {script.path.name}", disable=silent):
                 name: tree.Name
                 line = name.start_pos[0]
                 usages = line2usages.setdefault(line, set())

@@ -298,6 +298,7 @@ def path_to_module_name(rel_path: RelPath) -> ModuleName:
 @dataclass
 class ServiceResponse:
     target_file: str
+    target_project: str
     edit_start: tuple[int, int]
     edit_end: tuple[int, int]
     target_lines: Sequence[int]
@@ -315,7 +316,8 @@ class ServiceResponse:
         }
 
     def print(self, file=sys.stdout):
-        print(f"Target file: {self.target_file}", file=file)
+        tfile = Path(self.target_file).relative_to(self.target_project)
+        print(f"Target file: {tfile}", file=file)
         print(f"Edit range: {self.edit_start} - {self.edit_end}", file=file)
         target_lines = self.target_lines
         if target_lines:
@@ -327,8 +329,6 @@ class ServiceResponse:
                 file=file,
             )
             print(textwrap.indent(s["change_preview"], "\t"), file=file)
-        # print(f"Input code:", file=file)
-        # print(self.input_code, file=file)
 
     def __str__(self) -> str:
         # use the print above
@@ -457,6 +457,7 @@ class EditPredictionService:
 
             return ServiceResponse(
                 target_file=str(self.project / file),
+                target_project=str(self.project),
                 edit_start=(target_lines[0], 0),
                 edit_end=(target_lines[-1] + 1, 0),
                 target_lines=target.target_lines,
