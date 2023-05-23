@@ -59,9 +59,21 @@ transform = C3ToCodeCompletion(
 c3_probs = join_list(transform.transform(p) for p in c3_probs)
 print(f"{len(c3_probs) = }")
 
+common_ids = set(p.uid() for p in fim_probs) & set(p.uid() for p in c3_probs)
+fim_probs = [p for p in fim_probs if p.uid() in common_ids]
+fim_probs.sort(key=lambda p: p.uid())
+c3_probs = [p for p in c3_probs if p.uid() in common_ids]
+c3_probs.sort(key=lambda p: p.uid())
+
 # down-sample problems
 fim_probs = random_subset(fim_probs, N_test, rng=42)
 c3_probs = random_subset(c3_probs, N_test, rng=42)
+
+# pickle the problems
+fim_file = get_dataset_dir(dataset_name) / "code_completion_eval/fim_probs.pkl"
+c3_file = get_dataset_dir(dataset_name) / "code_completion_eval/c3_probs.pkl"
+pickle_dump(fim_file, fim_probs)
+pickle_dump(c3_file, c3_probs)
 
 sample_ids = set(random_subset(range(len(fim_probs)), 100, rng=73))
 sample_dir = proj_root() / "output" / "code_completion_eval"
