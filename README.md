@@ -1,12 +1,12 @@
 # Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing
 
-This repository contains the code for the paper, "Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing". Coeditor is a machine learning model that autocompletes code changes based on the changes in the context. This repo includes the server code for the [Coeditor VSCode extension](https://marketplace.visualstudio.com/items?itemName=JiayiWei.vscode-coeditor), as well as the scripts to process the data and reproduce the results presented in the paper.
+Coeditor is a machine learning model that autocompletes your code changes based on the changes in the context. This repo includes the server code for the [Coeditor VSCode extension](https://marketplace.visualstudio.com/items?itemName=JiayiWei.vscode-coeditor), as well as the scripts to process the data and reproduce the results presented in the paper, [Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing](https://arxiv.org/abs/2305.18584) by Jiayi Wei, Greg Durrett, and Isil Dillig.
 
 ## Installation
 
-### With Poetry (recommended)
+### Method 1: with Poetry (recommended)
 
-This project uses [poetry](https://python-poetry.org) to manage the package dependencies. Poetry records all dependencies in the `pyproject.toml` file and tracks the exact package versions via `poetry.lock`. It also manages the (project-specific) virtual environment for you.
+This project uses [poetry](https://python-poetry.org) to manage the package dependencies. Poetry records all dependencies in the `pyproject.toml` file and manages the (project-specific) virtual environment for you.
 
 You can install poetry via the following command:
 
@@ -15,7 +15,7 @@ curl -sSL https://install.python-poetry.org | python3 -
 poetry completions bash >> ~/.bash_completion
 ```
 
-To install all dependencies, make sure you have python 3.11 installed, then, run the following at the project root:
+To install all dependencies required by Coeditor, make sure you have python 3.11 installed, then, run the following at the project root:
 
 ```bash
 poetry install
@@ -23,9 +23,13 @@ poetry install
 
 You can then spawn a shell within the project's virtual environment via `poetry shell`.
 
-### Using requirements.txt
+### Method 2: using requirements.txt
 
 Alternatively, you can also install all dependencies using the exported [`requirements.txt`](requirements.txt) file.
+
+```bash
+pip3 install -r requirements.txt
+```
 
 ## Usages
 
@@ -33,7 +37,7 @@ Alternatively, you can also install all dependencies using the exported [`requir
 
 ### Run unit tests
 
-You can check your installation by running all unit tests via `pytest`.
+You can check your installation by running all unit tests via the command `pytest`.
 
 ### Use the VSCode extension server
 
@@ -46,7 +50,7 @@ Run [`python scripts/start_server.py`](scripts/start_server.py) to start the Coe
 
 You can run all unit tests via `poetry run pytest` (or just `pytest` if you run inside the poetry shell).
 
-### Download the dataset
+### Download the PyCommits dataset
 
 1. (Optional) Configure the directories. Create the file `config/coeditor.json` and use the following template to specify where you want to store the dataset and the trained models:
 
@@ -73,6 +77,16 @@ Use the [scripts/train_model.py](scripts/train_model.py) script to train a new m
 - **Multi-round editing**: Run [scripts/multi_round_eval.py](scripts/multi_round_eval.py) to obtain the results reported in section 4.2 of the paper.
 - **Ablation Studies**: Run [scripts/single_round_eval.py](scripts/single_round_eval.py) to obtain the results reported in section 4.3 of the paper.
 
-## Development
 
-For development guidelines and best practices, please see [DevGuide.md](DevGuide.md).
+## Citation
+Please cite our paper as:
+```
+@misc{wei2023coeditor,
+    title={{Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing}},
+    author={Jiayi Wei and Greg Durrett and Isil Dillig},
+    year={2023},
+    eprint={2305.18584},
+    archivePrefix={arXiv},
+    primaryClass={cs.SE}
+}
+```
