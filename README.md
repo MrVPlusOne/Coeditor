@@ -35,11 +35,7 @@ pip3 install -r requirements.txt
 
 **Note**: All scripts below should be run within the poetry shell (or the virtual environment in which you installed all the dependencies).
 
-### Run unit tests
-
-You can check your installation by running all unit tests via the command `pytest`.
-
-### Use the VSCode extension server
+### Use the VSCode extension server✨
 
 Run [`python scripts/start_server.py`](scripts/start_server.py) to start the Coeditor VSCode extension server. This will download the pre-trained Coeditor model from Huggingface (if not already) and start the extension service at port 5042.
 
