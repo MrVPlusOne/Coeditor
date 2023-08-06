@@ -1,28 +1,28 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.gpt2.modeling_gpt2 import GPT2PreTrainedModel
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
+from transformers.models.gpt_bigcode.modeling_gpt_bigcode import GPTBigCodeForCausalLM
 
 from coeditor.common import *
 from coeditor.encoding import TruncateAt, truncate_sections
 from coeditor.experiments.code_completion import FIMModel
 
-SantaCoderModelType = GPT2PreTrainedModel
+SantaCoderModelType = GPTBigCodeForCausalLM
 SantaCoderTokenizerType = GPT2TokenizerFast
 
 
 @dataclass
-class SantaCoderWrapper(FIMModel):
+class StarCoderWrapper(FIMModel):
     model: SantaCoderModelType
     tokenizer: SantaCoderTokenizerType
-    tks_limit: int = 2048
+    tks_limit: int = 1024 * 8
 
     def __post_init__(self):
-        added = self.tokenizer.get_added_vocab()
-        self.endoftext = self.tokenizer.encode("<|endoftext|>")[0]
-        self.fim_prefix = added["<fim-prefix>"]
-        self.fim_middle = added["<fim-middle>"]
-        self.fim_suffix = added["<fim-suffix>"]
+        vocab = self.tokenizer.vocab
+        self.endoftext = vocab["<|endoftext|>"]
+        self.fim_prefix = vocab["<fim_prefix>"]
+        self.fim_middle = vocab["<fim_middle>"]
+        self.fim_suffix = vocab["<fim_suffix>"]
 
     def infill(self, left: str, right: str, max_output: int) -> str:
         tkn = self.tokenizer
@@ -69,9 +69,13 @@ class SantaCoderWrapper(FIMModel):
         return completion
 
     @staticmethod
-    def from_pretrained(model_name: str = "bigcode/santacoder"):
+    def from_pretrained(
+        model_name: str = "bigcode/starcoderbase-7b", half_precision: bool = True
+    ):
         model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         assert isinstance(model, SantaCoderModelType)
         assert isinstance(tokenizer, SantaCoderTokenizerType)
-        return SantaCoderWrapper(model, tokenizer)
+        if half_precision:
+            model = model.half()
+        return StarCoderWrapper(model, tokenizer)

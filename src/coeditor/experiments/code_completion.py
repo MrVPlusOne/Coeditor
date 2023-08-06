@@ -151,7 +151,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 # add previous spans until total size exceeds max_ctx_tks
                 above_sum = len(left)
                 for s in reversed(new_spans[: 2 * i + 1]):
-                    if above_sum + len(s) >= self.max_ctx_tks * 10:
+                    if above_sum + len(s) >= self.max_ctx_tks * 6:
                         break
                     above_sum += len(s)
                     above_spans.append(s)
@@ -160,7 +160,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
                 below_sum = len(right)
                 for s in old_spans[2 * i + 2 :]:
                     # take until below sum exceeds max_ctx_tks
-                    if below_sum + len(s) >= self.max_ctx_tks * 10:
+                    if below_sum + len(s) >= self.max_ctx_tks * 6:
                         break
                     below_sum += len(s)
                     below_spans.append(s)
@@ -234,7 +234,7 @@ class FIMModel(ABC):
     tokenizer: PreTrainedTokenizerBase
 
     @abstractmethod
-    def infill(self, left: str, right: str, max_length: int) -> str:
+    def infill(self, left: str, right: str, max_output: int) -> str:
         ...
 
 
@@ -244,13 +244,13 @@ class CodeT5Wrapper(FIMModel):
     tks_limit: int = 2048
     tokenizer = CodeT5TKN
 
-    def infill(self, left: str, right: str, max_length: int = 128) -> str:
+    def infill(self, left: str, right: str, max_output: int = 128) -> str:
         tkn = self.tokenizer
         device = self.model.device
         left_tks: TokenSeq = tkn.encode(left, add_special_tokens=False)
         right_tks: TokenSeq = tkn.encode(right, add_special_tokens=False)
         left_tks, right_tks = truncate_sections(
-            self.tks_limit - max_length - 8,
+            self.tks_limit - max_output - 8,
             (left_tks, TruncateAt.Left),
             (right_tks, TruncateAt.Right),
             add_bos=False,
@@ -262,7 +262,7 @@ class CodeT5Wrapper(FIMModel):
         output_ids = self.model.generate(
             input_ids=input_ids,
             do_sample=False,
-            max_length=max_length,
+            max_length=max_output,
         )
         assert isinstance(output_ids, torch.Tensor)
         output_ids = output_ids[0].tolist()

@@ -40,13 +40,13 @@ class InCoderWrapper(FIMModel):
             make_sentinel(1), add_special_tokens=False
         )
 
-    def infill(self, left: str, right: str, max_length: int) -> str:
+    def infill(self, left: str, right: str, max_output: int) -> str:
         tkn = self.tokenizer
         device = self.model.device
         left_tks: TokenSeq = tkn.encode(left, add_special_tokens=False)
         right_tks: TokenSeq = tkn.encode(right, add_special_tokens=False)
         left_tks, right_tks = truncate_sections(
-            self.tks_limit - max_length - 8,
+            self.tks_limit - max_output - 8,
             (left_tks, TruncateAt.Left),
             (right_tks, TruncateAt.Right),
             add_bos=False,
@@ -62,7 +62,7 @@ class InCoderWrapper(FIMModel):
                 self.mask0_ids,
             ]
         )
-        total_length = len(input_ids) + max_length
+        total_length = len(input_ids) + max_output
         if total_length > self.tks_limit:
             warnings.warn(
                 f"Total length too large: {total_length=} (> {self.tks_limit})"
