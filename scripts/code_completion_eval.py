@@ -35,7 +35,7 @@ N_test = 5000
 use_additions = True
 use_modifications = True
 
-# first, load the test data, in FIM format
+# first, load the test data in FIM format
 fim_probs = make_or_load_dataset(
     dataset_name,
     C3CompletionGenerator(
@@ -80,7 +80,7 @@ pickle_dump(fim_file, fim_probs)
 pickle_dump(c3_file, c3_probs)
 
 sample_ids = set(random_subset(range(len(fim_probs)), 100, rng=73))
-sample_dir = proj_root() / "output" / "code_completion_eval"
+sample_dir = proj_root() / "output" / f"code_completion_eval(n={N_test})"
 if sample_dir.exists():
     shutil.rmtree(sample_dir)
 
@@ -141,15 +141,24 @@ def eval_fim_models(model_list: dict[str, Callable[[], FIMModel | OpenAIGptWrapp
             model = model_f()
             if isinstance(model, FIMModel):
                 model.model.to(device)
+            all_probs = list(enumerate(fim_probs))
+            if "gpt" in name:
+                all_probs = all_probs[:1000]
 
             results: dict[CompletionKind, list[bool]] = {"add": [], "mod": []}
-            for i, prob in tqdm(
-                list(enumerate(fim_probs)), smoothing=0, desc=f"Evaluating {name}"
-            ):
+            for i, prob in tqdm(all_probs, smoothing=0, desc=f"Evaluating {name}"):
                 left_ctx = "\n".join(prob.left_ctx) + "\n"
                 right_ctx = "\n" + "\n".join(prob.right_ctx)
                 with torch.no_grad():
-                    pred = model.infill(left_ctx, right_ctx, max_output=128)
+                    try:
+                        pred = model.infill(left_ctx, right_ctx, max_output=128)
+                    except Exception as e:
+                        import traceback
+
+                        traceback.print_exc()
+                        print(f"Errored on problem {i}: {e}")
+                        print("Exiting the evaluation eariler with partial results.")
+                        break
                 if pred:
                     pred = pred.split("\n")[0]  # only keep the first predicted line
                 left_part = prob.left_ctx[-1] + "\n" if prob.left_ctx else ""
@@ -185,15 +194,16 @@ fim_model_list: dict[str, Callable[[], FIMModel | OpenAIGptWrapper]] = {
     "InCoder-6B": lambda: InCoderWrapper.from_pretrained(
         "facebook/incoder-6B", half_precision=True
     ),
-    "gpt-3.5-fim": lambda: OpenAIGptWrapper(use_fim=True),
-    "gpt-3.5-lm": lambda: OpenAIGptWrapper(use_fim=False),
+    "gpt-3.5-fim": lambda: OpenAIGptWrapper(use_fim=True, use_nl_prompt=False),
+    "gpt-3.5-nl-prompt": lambda: OpenAIGptWrapper(use_fim=True, use_nl_prompt=True),
     "StarCoder-7B": lambda: StarCoderWrapper.from_pretrained(half_precision=True),
 }
 
-eval_fim_models(fim_model_list)
 
 with run_long_task(f"Evaluating Coeditor"):
     eval_coeditor()
+
+eval_fim_models(fim_model_list)
 
 print(SEP)
 print(f"Summary ({use_additions=}, {use_modifications=}):")

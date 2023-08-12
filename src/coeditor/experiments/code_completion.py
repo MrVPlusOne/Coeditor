@@ -91,6 +91,7 @@ class C3CompletionGenerator(ProjectChangeProcessor[FIMProblem]):
     ## Change log
     - version 1.1: Limit context str length to `10 * max_ctx_tks`.
     - version 1.2: Add `path` attribute to `FIMProblem`.
+    - version 1.2: Change context str length to `6 * max_ctx_tks`.
     """
 
     VERSION = "1.2"
