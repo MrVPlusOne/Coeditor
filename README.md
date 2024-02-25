@@ -1,6 +1,8 @@
-# Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing
+# Coeditor: Leveraging Repo-level Diffs for Code Auto-editing
 
-Coeditor is a machine learning model that autocompletes your code changes based on the changes in the context. This repo includes the server code for the [Coeditor VSCode extension](https://marketplace.visualstudio.com/items?itemName=JiayiWei.vscode-coeditor), as well as the scripts to process the data and reproduce the results presented in the paper, [Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing](https://arxiv.org/abs/2305.18584) by Jiayi Wei, Greg Durrett, and Isil Dillig.
+Coeditor is a transformer model that auto-edits your code based on your recent code changes. This repo includes the server code for the [Coeditor VSCode extension](https://marketplace.visualstudio.com/items?itemName=JiayiWei.vscode-coeditor) and the scripts for data processing, model training, and evaluation. The ideas behind Coeditor are presented in the ICLR Spotlight paper, [Coeditor: Leveraging Repo-level Diffs for Code Auto-editing](https://openreview.net/forum?id=ALVwQjZRS8), by Jiayi Wei, Greg Durrett, and Isil Dillig.
+
+Watch the [Coeditor demo](https://www.youtube.com/watch?v=hjZE__jslzs) on Youtube.
 
 ## Installation
 
@@ -77,12 +79,12 @@ Use the [scripts/train_model.py](scripts/train_model.py) script to train a new m
 ## Citation
 Please cite our paper as:
 ```
-@misc{wei2023coeditor,
-    title={{Coeditor: Leveraging Contextual Changes for Multi-round Code Auto-editing}},
-    author={Jiayi Wei and Greg Durrett and Isil Dillig},
-    year={2023},
-    eprint={2305.18584},
-    archivePrefix={arXiv},
-    primaryClass={cs.SE}
+@inproceedings{
+wei2024coeditor,
+title={Coeditor: Leveraging Repo-level Diffs for Code Auto-editing},
+author={Jiayi Wei and Greg Durrett and Isil Dillig},
+booktitle={The Twelfth International Conference on Learning Representations},
+year={2024},
+url={https://openreview.net/forum?id=ALVwQjZRS8}
 }
 ```
